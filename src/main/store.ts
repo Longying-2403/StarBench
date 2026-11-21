@@ -48,22 +48,44 @@ export async function saveSettings(input: SettingsInput): Promise<Settings> {
     if (!key) {
       delete stored.encryptedKey
     } else {
-      if (!safeStorage.isEncryptionAvailable()) {
-        throw new Error('OS-level encryption is not available, so the API key cannot be stored safely.')
-      }
-      stored.encryptedKey = safeStorage.encryptString(key).toString('base64')
+      stored.encryptedKey = await encryptKey(key)
     }
   }
   await writeJson(settingsFile(), stored)
   return toPublic(stored)
 }
 
+async function encryptKey(key: string): Promise<string> {
+  if (!(await safeStorage.isAsyncEncryptionAvailable())) {
+    throw new Error('OS-level encryption is not available, so the API key cannot be stored safely.')
+  }
+  return (await safeStorage.encryptStringAsync(key)).toString('base64')
+}
+
 /** Main-process only: the decrypted connection details for an API call. */
 export async function getConnection(): Promise<{ apiKey: string; baseURL: string; model: string } | null> {
   const stored = await loadStored()
   if (!stored.encryptedKey) return null
-  const apiKey = safeStorage.decryptString(Buffer.from(stored.encryptedKey, 'base64'))
-  return { apiKey, baseURL: stored.baseURL, model: stored.model }
+  let decrypted: { result: string; shouldReEncrypt: boolean }
+  try {
+    // Also reads keys saved by earlier versions with the synchronous API.
+    decrypted = await safeStorage.decryptStringAsync(Buffer.from(stored.encryptedKey, 'base64'))
+  } catch {
+    // Typically a profile copied from another computer or user account: the OS key differs.
+    throw new Error('The saved API key could not be decrypted on this computer. Enter it again in Settings.')
+  }
+  if (decrypted.shouldReEncrypt) {
+    // The OS rotated its key. Failing to re-save is harmless: the old value still decrypts.
+    try {
+      const latest = await loadStored()
+      if (latest.encryptedKey === stored.encryptedKey) {
+        await writeJson(settingsFile(), { ...latest, encryptedKey: await encryptKey(decrypted.result) })
+      }
+    } catch (err) {
+      console.error('[store] could not re-encrypt the API key:', err)
+    }
+  }
+  return { apiKey: decrypted.result, baseURL: stored.baseURL, model: stored.model }
 }
 
 export async function listSessions(): Promise<SessionSummary[]> {

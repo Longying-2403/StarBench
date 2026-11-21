@@ -4,8 +4,13 @@
 import { spawn } from 'node:child_process'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
+import { decodeOutput } from './decode.ts'
 
 const MAX_OUTPUT_CHARS = 30_000
+/** Command output beyond this is dropped while it is still being read. */
+const MAX_OUTPUT_BYTES = 400_000
+/** On its own line, so PowerShell's error messages quote only the command the model wrote. */
+const POWERSHELL_UTF8 = '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\n'
 const MAX_FILE_BYTES = 1_000_000
 const MAX_SEARCH_HITS = 200
 const COMMAND_TIMEOUT_MS = 120_000
@@ -86,16 +91,20 @@ function runCommand(command: string, ctx: ToolContext): Promise<string> {
   return new Promise((resolve) => {
     const isWindows = process.platform === 'win32'
     const child = isWindows
-      ? spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command], {
+      ? // Without this prefix PowerShell and the programs it starts write in the system code page.
+        spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `${POWERSHELL_UTF8}${command}`], {
           cwd: ctx.workspace,
           windowsHide: true
         })
       : spawn('/bin/sh', ['-c', command], { cwd: ctx.workspace })
 
-    let output = ''
+    // Kept as bytes until the end: decoding chunk by chunk would break characters split across chunks.
+    const chunks: Buffer[] = []
+    let bytes = 0
     let note = ''
     const collect = (chunk: Buffer): void => {
-      if (output.length < MAX_OUTPUT_CHARS * 2) output += chunk.toString('utf8')
+      if (bytes < MAX_OUTPUT_BYTES) chunks.push(chunk)
+      bytes += chunk.length
     }
     child.stdout.on('data', collect)
     child.stderr.on('data', collect)
@@ -116,6 +125,8 @@ function runCommand(command: string, ctx: ToolContext): Promise<string> {
     const finish = (tail: string): void => {
       clearTimeout(timer)
       ctx.signal.removeEventListener('abort', onAbort)
+      // Some programs ignore the console code page, so the decoder still falls back to it.
+      const output = decodeOutput(Buffer.concat(chunks))
       resolve(truncate(`${output}${output && !output.endsWith('\n') ? '\n' : ''}${tail}`))
     }
     child.on('error', (err) => finish(`Failed to start command: ${err.message}`))

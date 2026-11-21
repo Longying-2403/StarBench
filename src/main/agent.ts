@@ -122,9 +122,25 @@ function toApiMessage(message: ChatMessage): ChatMessage {
   } as unknown as ChatMessage
 }
 
+/** Result texts the UI recognises to label a call as cancelled or refused. */
+const CANCELLED = 'Cancelled by user'
+const DENIED = 'The user denied this tool call.'
+
+/** Produces the result of one tool call. Always resolves: every call needs a result, or the next request is rejected. */
+async function runToolCall(call: ToolCall, opts: TurnOptions): Promise<string> {
+  if (opts.signal.aborted) return CANCELLED
+  if (opts.tools.needsPermission(call.name) && !opts.alwaysAllowed.has(call.name)) {
+    const decision = await opts.requestPermission(call)
+    // A stop while the prompt was open ends the wait; that is a cancellation, not a refusal.
+    if (opts.signal.aborted) return CANCELLED
+    if (decision === 'deny') return DENIED
+    if (decision === 'always') opts.alwaysAllowed.add(call.name)
+  }
+  return opts.tools.execute(call.name, call.arguments, { workspace: opts.workspace, signal: opts.signal })
+}
+
 export async function runTurn(opts: TurnOptions): Promise<void> {
   const client = new OpenAI({ apiKey: opts.apiKey, baseURL: opts.baseURL })
-  const { alwaysAllowed } = opts
   const stored = opts.messages
 
   try {
@@ -137,21 +153,7 @@ export async function runTurn(opts: TurnOptions): Promise<void> {
 
       for (const call of assistant.tool_calls) {
         opts.emit({ type: 'tool_start', call })
-        let output: string
-        if (opts.signal.aborted) {
-          // Every tool call still needs a result, or the next request is rejected.
-          output = 'Cancelled by user'
-        } else {
-          let allowed = !opts.tools.needsPermission(call.name) || alwaysAllowed.has(call.name)
-          if (!allowed) {
-            const decision = await opts.requestPermission(call)
-            if (decision === 'always') alwaysAllowed.add(call.name)
-            allowed = decision !== 'deny'
-          }
-          output = allowed
-            ? await opts.tools.execute(call.name, call.arguments, { workspace: opts.workspace, signal: opts.signal })
-            : 'The user denied this tool call.'
-        }
+        const output = await runToolCall(call, opts)
         stored.push({ role: 'tool', tool_call_id: call.id, content: output })
         opts.emit({ type: 'tool_result', id: call.id, output })
       }

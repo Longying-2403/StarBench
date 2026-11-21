@@ -1,6 +1,6 @@
 // Drives the real agent loop against a fake OpenAI-compatible streaming server.
 import assert from 'node:assert/strict'
-import { mkdtemp, readFile } from 'node:fs/promises'
+import { mkdtemp, readFile, readdir } from 'node:fs/promises'
 import http from 'node:http'
 import type { AddressInfo } from 'node:net'
 import os from 'node:os'
@@ -107,6 +107,50 @@ test('a turn streams, runs tools with permission checks and feeds results back',
   assert.equal(await readFile(path.join(workspace, 'sub/a.txt'), 'utf8'), 'line1\r\ncost $& $2\r\n', 'edit keeps CRLF and literal $')
 
   assert.deepEqual(messages.at(-1), { role: 'assistant', content: 'All done.' })
+  assert.equal(events.at(-1)?.type, 'turn_end')
+  assert.equal(events.some((e) => e.type === 'error'), false)
+})
+
+test('stopping while a permission prompt is open cancels the remaining calls', async () => {
+  const model = await fakeModel([
+    [
+      ...call(0, 'c1', 'write_file', { path: 'a.txt', content: 'x' }),
+      ...call(1, 'c2', 'list_dir', {}),
+      ...call(2, 'c3', 'run_command', { command: 'echo hi' })
+    ],
+    [chunk({ content: 'should never be requested' })]
+  ])
+  const tools = new ToolRegistry()
+  registerBuiltinTools(tools)
+  const workspace = await mkdtemp(path.join(os.tmpdir(), 'starbench-agent-'))
+  const controller = new AbortController()
+  const alwaysAllowed = new Set<string>()
+  const messages: ChatMessage[] = [{ role: 'user', content: 'go' }]
+  const events: AgentEvent[] = []
+  await runTurn({
+    apiKey: 'test',
+    baseURL: model.baseURL,
+    model: 'fake',
+    workspace,
+    messages,
+    signal: controller.signal,
+    tools,
+    alwaysAllowed,
+    emit: (e) => events.push(e),
+    checkpoint: () => {},
+    // What the app does on Stop: abort, then release the open prompt with "deny".
+    requestPermission: async () => {
+      controller.abort()
+      return 'deny'
+    }
+  })
+  await model.close()
+
+  const results = messages.flatMap((m) => (m.role === 'tool' ? [m.content] : []))
+  assert.deepEqual(results, ['Cancelled by user', 'Cancelled by user', 'Cancelled by user'])
+  assert.equal(model.requests.length, 1, 'no further request is made after a stop')
+  assert.deepEqual(await readdir(workspace), [], 'nothing was written')
+  assert.equal(alwaysAllowed.size, 0)
   assert.equal(events.at(-1)?.type, 'turn_end')
   assert.equal(events.some((e) => e.type === 'error'), false)
 })
