@@ -30,6 +30,7 @@ const api: HarnessApi = {
   deleteSession: (id) => ipcRenderer.invoke('sessions:delete', id),
   renameSession: (id, title) => ipcRenderer.invoke('sessions:rename', id, title),
   setSessionArchived: (id, archived) => ipcRenderer.invoke('sessions:archive', id, archived),
+  setSessionIcon: (id, icon) => ipcRenderer.invoke('sessions:icon', id, icon),
   send: (sessionId, workspace, text, skill) => ipcRenderer.invoke('agent:send', sessionId, workspace, text, skill),
   stop: (sessionId) => ipcRenderer.invoke('agent:stop', sessionId),
   respondPermission: (id, decision) => ipcRenderer.invoke('permission:respond', id, decision),

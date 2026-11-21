@@ -7,6 +7,7 @@ import type {
   ModelInfo,
   PermissionDecision,
   ReasoningEffort,
+  SessionIcon,
   SessionSummary,
   Settings,
   ToolCall
@@ -15,6 +16,7 @@ import { Composer } from './Composer.tsx'
 import { FolderMenu } from './FolderMenu.tsx'
 import { itemsFromMessages, itemsReducer } from './items.ts'
 import type { Item } from './items.ts'
+import { Notice } from './Notice.tsx'
 import { SettingsDialog } from './Settings.tsx'
 import { Sidebar } from './Sidebar.tsx'
 import { errorText } from './util.ts'
@@ -155,9 +157,9 @@ function Transcript({ items, onOpenSettings }: { items: Item[]; onOpenSettings: 
         if (item.kind === 'tool') return <ToolCard key={index} item={item} />
         if (item.kind === 'notice') {
           return (
-            <div key={index} className="msg msg-notice" role="status">
+            <Notice key={index} className="msg" role="status">
               {item.text}
-            </div>
+            </Notice>
           )
         }
         if (item.hint === 'chatgpt-usage') {
@@ -342,6 +344,11 @@ export function App() {
     refreshSessions()
   }
 
+  const markSession = async (id: string, icon: SessionIcon | null): Promise<void> => {
+    await api.setSessionIcon(id, icon)
+    refreshSessions()
+  }
+
   const archiveSession = async (id: string, archived: boolean): Promise<void> => {
     await api.setSessionArchived(id, archived)
     // The session leaves the list, so the window moves on from it too.
@@ -429,6 +436,7 @@ export function App() {
         onOpen={(id) => void openSession(id)}
         onRename={renameSession}
         onArchive={archiveSession}
+        onIcon={markSession}
         onDelete={removeSession}
         onSettings={() => setShowSettings(true)}
       />

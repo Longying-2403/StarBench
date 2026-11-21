@@ -5,8 +5,8 @@
 import { app, safeStorage } from 'electron'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
-import type { ChatGptAccount, ProviderInput, ReasoningEffort, Session, SessionSummary, Settings } from '../shared/types.ts'
-import { isReasoningEffort, offersFastMode } from '../shared/types.ts'
+import type { ChatGptAccount, ProviderInput, ReasoningEffort, Session, SessionIcon, SessionSummary, Settings } from '../shared/types.ts'
+import { isReasoningEffort, isSessionIcon, offersFastMode } from '../shared/types.ts'
 import { OPENAI, canUsePlan, clientIsGone, newHostId, readRecord, refreshed, renewalDue, revoke, tokensAreDead } from './chatgpt/oauth.ts'
 import type { AuthService, LoginRecord } from './chatgpt/oauth.ts'
 import { readJson, writeJson } from './json-file.ts'
@@ -348,7 +348,15 @@ export async function listSessions(): Promise<SessionSummary[]> {
   )
   return sessions
     .filter((s): s is Session => s !== null)
-    .map(({ id, title, workspace, updatedAt, archived }) => ({ id, title, workspace, updatedAt, ...(archived ? { archived } : {}) }))
+    .map(({ id, title, workspace, updatedAt, archived, icon }) => ({
+      id,
+      title,
+      workspace,
+      updatedAt,
+      ...(archived ? { archived } : {}),
+      // A file can hold a name this version does not know; the list then shows no mark.
+      ...(isSessionIcon(icon) ? { icon } : {})
+    }))
     .sort((a, b) => b.updatedAt - a.updatedAt)
 }
 
@@ -360,13 +368,18 @@ export function saveSession(session: Session): Promise<void> {
   return writeJson(sessionFile(session.id), session)
 }
 
-/** Changes the name or the archived mark of a saved session. `updatedAt` stays, so the list keeps its order. */
-export async function updateSession(id: string, change: { title?: string; archived?: boolean }): Promise<void> {
+/**
+ * Changes the name, the archived mark or the icon of a saved session; a null icon takes the icon
+ * away. `updatedAt` stays, so the list keeps its order.
+ */
+export async function updateSession(id: string, change: { title?: string; archived?: boolean; icon?: SessionIcon | null }): Promise<void> {
   const session = await loadSession(id)
   if (!session) throw new Error('This session no longer exists.')
   if (change.title !== undefined) session.title = change.title
   if (change.archived === true) session.archived = true
   if (change.archived === false) delete session.archived
+  if (change.icon === null) delete session.icon
+  else if (change.icon !== undefined) session.icon = change.icon
   await saveSession(session)
 }
 

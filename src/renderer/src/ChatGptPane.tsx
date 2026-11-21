@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import { CHATGPT_HELP_URL, CHATGPT_USAGE_URL } from '../../shared/types.ts'
 import type { ModelChoice, Settings, SignInOptions, SignInResult } from '../../shared/types.ts'
+import { Notice } from './Notice.tsx'
 import { errorText } from './util.ts'
 
 const api = window.harness
@@ -168,7 +169,7 @@ export function ChatGptPane({
 
   const messages = (
     <>
-      {notice && <p className="notice">{notice}</p>}
+      {notice && <Notice>{notice}</Notice>}
       {error && (
         <div className="msg-error" role="alert">
           {error}
@@ -266,7 +267,7 @@ export function ChatGptPane({
           </p>
         ) : (
           <>
-            <p className="notice">这个账号已经登录，但还没有允许 StarBench 使用它的 ChatGPT 套餐，所以暂时不能用它发消息。</p>
+            <Notice>这个账号已经登录，但还没有允许 StarBench 使用它的 ChatGPT 套餐，所以暂时不能用它发消息。</Notice>
             <div className="toolbar">
               <button type="button" className="btn btn-primary" disabled={busy} onClick={() => void signIn({ consent: true })}>
                 启用套餐额度

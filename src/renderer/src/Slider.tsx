@@ -11,17 +11,41 @@ const scatter = (i: number, salt: number): number => {
   return x - Math.floor(x)
 }
 
-/** Where one particle sits in the fill, how far it drifts and how fast it twinkles. */
-const sparkStyle = (i: number): CSSProperties =>
+/**
+ * What the particles in the filled part do: nothing, twinkle where they are, or stream towards
+ * the left. Wherever there are particles, the dots of the stops under them give way.
+ */
+export type Sparks = 'none' | 'still' | 'stream'
+
+/** Particles spread over the whole track. Only the ones under the fill are seen, so a longer fill shows more of them. */
+const SPARKS = 18
+
+/** A particle that stays where it is: it fades in, strays a few pixels in a direction of its own and fades out. */
+const stillStyle = (i: number): CSSProperties =>
   ({
-    left: `${4 + scatter(i, 1) * 88}%`,
-    top: `${18 + scatter(i, 2) * 64}%`,
-    '--spark-size': `${1.4 + scatter(i, 3) * 1.4}px`,
-    '--spark-dx': `${3 + scatter(i, 4) * 7}px`,
-    '--spark-dy': `${-3 + scatter(i, 5) * 6}px`,
-    animationDuration: `${2.2 + scatter(i, 6) * 2.6}s`,
+    left: `${3 + scatter(i, 11) * 94}%`,
+    top: `${18 + scatter(i, 12) * 64}%`,
+    '--spark-size': `${1.4 + scatter(i, 13) * 1.4}px`,
+    '--spark-dx': `${-5 + scatter(i, 14) * 10}px`,
+    '--spark-dy': `${-3 + scatter(i, 15) * 6}px`,
+    animationDuration: `${2.2 + scatter(i, 16) * 2.6}s`,
     // Negative, so the particles are already out of step when the slider appears.
-    animationDelay: `${-scatter(i, 7) * 5}s`
+    animationDelay: `${-scatter(i, 17) * 5}s`
+  }) as CSSProperties
+
+/**
+ * One streaming particle's lane: where on the track it is, how high, how big, how long it takes
+ * to cross the track and how fast it twinkles. Every particle has its own pace, so the stream never
+ * repeats visibly. A crossing takes two to four seconds: fast enough to read as speed at a glance.
+ */
+const laneStyle = (i: number): CSSProperties =>
+  ({
+    top: `${16 + scatter(i, 2) * 68}%`,
+    '--spark-x': `${scatter(i, 1) * 100}%`,
+    '--spark-size': `${1.3 + scatter(i, 3) * 1.5}px`,
+    '--spark-cross': `${1.8 + scatter(i, 4) * 2}s`,
+    '--spark-twinkle': `${1.2 + scatter(i, 6) * 1.6}s`,
+    '--spark-delay': `${-scatter(i, 7) * 9}s`
   }) as CSSProperties
 
 const fractionOf = (index: number, count: number): number => (count < 2 ? 0 : index / (count - 1))
@@ -37,7 +61,7 @@ export function Slider({
   index,
   label,
   emptyText,
-  sparks = 0,
+  sparks = 'none',
   onPreview,
   onCommit
 }: {
@@ -47,8 +71,8 @@ export function Slider({
   label: string
   /** Read out when no stop is selected. */
   emptyText: string
-  /** How many twinkling particles drift in the filled part. */
-  sparks?: number
+  /** What the particles in the filled part do. */
+  sparks?: Sparks
   /** The stop under the pointer during a drag; null when the drag ends. */
   onPreview: (index: number | null) => void
   onCommit: (index: number) => void
@@ -108,6 +132,7 @@ export function Slider({
         { '--slider-pos': fraction ?? 0, '--slider-track': `${TRACK_PX}px`, '--slider-inset': `${INSET_PX}px` } as CSSProperties
       }
       data-dragging={drag === null ? undefined : ''}
+      data-sparks={sparks !== 'none' && fraction !== null ? sparks : undefined}
     >
       <div
         className="slider-track"
@@ -126,13 +151,22 @@ export function Slider({
         onPointerCancel={(e) => finish(e, false)}
         onKeyDown={onKeyDown}
       >
-        {fraction !== null && (
-          <div className="slider-fill" aria-hidden="true">
-            {Array.from({ length: sparks }, (_, i) => (
-              <span key={i} className="slider-spark" style={sparkStyle(i)} />
-            ))}
-          </div>
-        )}
+        {fraction !== null && <div className="slider-fill" aria-hidden="true" />}
+        {/* Both kinds of particles are always there, so that each can fade in and out, and one into the other. */}
+        <div className="slider-sparks slider-sparks-still" aria-hidden="true">
+          {Array.from({ length: SPARKS }, (_, i) => (
+            <i key={i} style={stillStyle(i)} />
+          ))}
+        </div>
+        {/* Each lane holds its particle twice, one track-width apart: moved by exactly that width, it looks as it did. */}
+        <div className="slider-sparks slider-sparks-stream" aria-hidden="true">
+          {Array.from({ length: SPARKS }, (_, i) => (
+            <span key={i} className="slider-lane" style={laneStyle(i)}>
+              <i />
+              <i />
+            </span>
+          ))}
+        </div>
         {stops.map((stop, at) => {
           const position = fractionOf(at, count)
           return (

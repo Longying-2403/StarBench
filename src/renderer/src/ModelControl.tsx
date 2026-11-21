@@ -4,7 +4,7 @@ import { REASONING_EFFORTS, offersFastMode, usualEfforts } from '../../shared/ty
 import type { EffortLevel, ModelChoice, ModelInfo, ProviderInfo, ReasoningEffort, Settings } from '../../shared/types.ts'
 import { BoltIcon, CheckIcon, ChevronDownIcon, ChevronLeftIcon, ChevronRightIcon, ResetIcon, SettingsIcon } from './icons.tsx'
 import { Slider } from './Slider.tsx'
-import { errorText, popupSide, useOutsidePress } from './util.ts'
+import { errorText, roomStyle, useOutsidePress, usePopupPlace } from './util.ts'
 
 const api = window.harness
 
@@ -20,6 +20,15 @@ const LABELS: Record<EffortLevel, string> = {
 
 /** The list gets a search field above this many models. */
 const SEARCH_THRESHOLD = 8
+
+/**
+ * The height that is enough for each pane to open below the button. The slider needs all of its
+ * own; the list of models can be shorter than it would like, and scrolls.
+ */
+const PANE_HEIGHT = { effort: 130, models: 240 } as const
+
+/** The distance between the button and its card, at its largest: `.effort-panel` opens 16px below it or 8px above. */
+const PANEL_GAP = 16
 
 /** What is known about the models of one provider. */
 interface ModelList {
@@ -68,14 +77,15 @@ export function ModelControl({
 }) {
   const [open, setOpen] = useState(false)
   const [pane, setPane] = useState<'effort' | 'models'>('effort')
-  /** Where the card opens; decided each time, since the message box moves from the middle to the bottom. */
-  const [side, setSide] = useState<'up' | 'down'>('down')
   /** The stop under the pointer while the slider is dragged. */
   const [preview, setPreview] = useState<number | null>(null)
   const [lists, setLists] = useState<Record<string, ModelList>>({})
   const [query, setQuery] = useState('')
   const rootRef = useRef<HTMLSpanElement>(null)
   const triggerRef = useRef<HTMLButtonElement>(null)
+  // Decided each time the card opens, since the message box moves from the middle to the bottom,
+  // and again for the list of models: where the slider fitted, the taller pane may not.
+  const place = usePopupPlace(open, triggerRef, PANE_HEIGHT[pane], PANEL_GAP)
 
   const effort = settings.reasoningEffort
   const levels = levelsFor(settings, modelInfo)
@@ -101,6 +111,9 @@ export function ModelControl({
     : fastOn
       ? `Fast Mode 已开启：回答更快，${fastCost}。点击关闭`
       : `开启 Fast Mode：回答更快，${fastCost}`
+  // Faster answers show as particles streaming through the slider, at every level. Without them,
+  // only the top of the scale has particles, and those twinkle where they are.
+  const sparks = displayedAt < 0 ? 'none' : fastOn ? 'stream' : fromTop === 0 ? 'still' : 'none'
   const canReset = chosen !== undefined && chosen !== recommended
   // "Recommended" only when the service named a level; otherwise it is simply whatever the service does.
   const resetText = recommended
@@ -219,8 +232,7 @@ export function ModelControl({
         index={index}
         label="思考强度"
         emptyText="默认"
-        // The harder the model thinks, the livelier the slider.
-        sparks={fromTop === 0 ? 14 : fromTop === 1 ? 5 : 0}
+        sparks={sparks}
         onPreview={setPreview}
         onCommit={(at) => levels[at] !== shown && onEffortChange(levels[at])}
       />
@@ -314,8 +326,6 @@ export function ModelControl({
         }
         onClick={() => {
           if (open) return close(false)
-          // The list of models is the taller of the two panes.
-          setSide(popupSide(triggerRef.current, settings.model ? 130 : 320))
           setOpen(true)
           // Without a model there is no effort to set yet: the card starts on the list.
           if (!settings.model) showModels()
@@ -337,7 +347,8 @@ export function ModelControl({
           role="dialog"
           aria-label={pane === 'effort' ? '调整思考强度' : '切换模型'}
           data-peak={pane === 'effort' && fromTop === 0 ? '' : undefined}
-          data-side={side}
+          data-side={place.side}
+          style={roomStyle(place)}
           onKeyDown={onPanelKeyDown}
         >
           {pane === 'effort' ? effortPane : modelsPane}

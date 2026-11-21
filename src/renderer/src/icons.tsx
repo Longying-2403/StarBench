@@ -1,6 +1,6 @@
 // Small line icons, drawn in the current text colour.
 
-const line = {
+export const line = {
   width: 16,
   height: 16,
   viewBox: '0 0 24 24',
@@ -118,6 +118,16 @@ export function TrashIcon() {
   return (
     <svg {...line}>
       <path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13M10 11v6M14 11v6" />
+    </svg>
+  )
+}
+
+/** A triangle with an exclamation mark: read this before going on. */
+export function WarningIcon() {
+  return (
+    <svg {...line}>
+      <path d="M12 4 2.5 20h19z" />
+      <path d="M12 10v4.5M12 17.2v.3" />
     </svg>
   )
 }

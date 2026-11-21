@@ -14,6 +14,9 @@
   --warn: #e0a93b;
   --ok: #4fb977;
   --mono: 'Cascadia Code', Consolas, 'SF Mono', Menlo, monospace;
+  /* The sidebar's width: what was chosen by dragging its edge (Sidebar.tsx sets --sidebar-width),
+     held to what the window has room for, so that the chat beside it keeps at least 420px. */
+  --sidebar: clamp(180px, var(--sidebar-width, 240px), max(180px, 100vw - 420px));
   font-family: 'Segoe UI', 'Microsoft YaHei', system-ui, sans-serif;
   font-size: 14px;
   line-height: 1.6;
@@ -55,6 +58,9 @@ body {
 .app {
   display: flex;
   height: 100%;
+  /* The window itself never scrolls. Popups keep to the room they have (see `usePopupPlace`);
+     should anything still reach past the edge of the window, it is cut off there. */
+  overflow: clip;
 }
 
 /* Buttons */
@@ -93,14 +99,47 @@ body {
 
 /* Sidebar */
 .sidebar {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: 10px;
-  width: 240px;
+  width: var(--sidebar);
   flex-shrink: 0;
   padding: 12px;
   background: var(--panel);
   border-right: 1px solid var(--border);
+}
+/* The sidebar's right edge, for dragging. Wider than the line it shows, so it is easy to catch. */
+.sidebar-resizer {
+  position: absolute;
+  top: 0;
+  right: -5px;
+  bottom: 0;
+  width: 9px;
+  cursor: col-resize;
+  touch-action: none;
+  outline: none;
+}
+.sidebar-resizer::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  /* On the sidebar's border. */
+  left: 3px;
+  width: 2px;
+  background: var(--accent);
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+/* A moment later, so the line does not flash each time the pointer crosses the edge. */
+.sidebar-resizer:hover::after {
+  opacity: 1;
+  transition-delay: 120ms;
+}
+.sidebar-resizer:focus-visible::after,
+.sidebar-resizer[data-dragging]::after {
+  opacity: 1;
 }
 /* Buttons that carry a small icon before their text. */
 .sidebar-new,
@@ -237,6 +276,9 @@ body {
 .session-open {
   flex: 1;
   min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
   padding: 5px 8px;
   border: 0;
   background: none;
@@ -244,10 +286,25 @@ body {
   font: inherit;
   font-size: 13px;
   text-align: left;
+  cursor: pointer;
+}
+.session-title {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  cursor: pointer;
+}
+/* The mark a session was given, or the room kept for one so that the names of a group stay in line. */
+.session-icon {
+  flex-shrink: 0;
+  display: inline-grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+}
+.session-icon svg {
+  width: 15px;
+  height: 15px;
 }
 .session-open:disabled {
   cursor: default;
@@ -271,8 +328,36 @@ body {
   position: fixed;
   top: auto;
   left: auto;
-  width: 160px;
+  width: 188px;
   min-width: 0;
+}
+/* The marks a session can be given, at the top of its menu. */
+.icon-grid {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 2px;
+  padding: 2px;
+}
+.icon-choice {
+  display: grid;
+  place-items: center;
+  aspect-ratio: 1;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+}
+.icon-choice:hover,
+.icon-choice:focus-visible {
+  background: var(--raised);
+  outline: none;
+}
+/* The one in use. */
+.icon-choice[aria-checked='true'] {
+  background: var(--raised);
+  box-shadow: inset 0 0 0 1px var(--accent);
 }
 .session-menu .menu-item {
   font-size: 13px;
@@ -349,10 +434,13 @@ body {
   background: var(--raised);
   white-space: pre-wrap;
 }
+/* Like a notice, in the colour of errors. */
 .msg-error {
   padding: 8px 12px;
-  border: 1px solid var(--danger);
+  border: 1px solid color-mix(in srgb, var(--danger) 55%, transparent);
+  border-left: 5px solid var(--danger);
   border-radius: 6px;
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
   color: var(--danger);
   white-space: pre-wrap;
 }
@@ -527,13 +615,22 @@ body {
   top: calc(100% + 6px);
   left: 0;
   z-index: 10;
-  width: min(360px, calc(100vw - 300px));
+  display: flex;
+  flex-direction: column;
+  /* No wider than the chat column, whatever width the sidebar has. */
+  width: min(360px, calc(100vw - var(--sidebar) - 60px));
   min-width: 240px;
+  /* No taller than the room the window leaves it: the list gives way, and scrolls. */
+  max-height: var(--popup-room, none);
   padding: 4px;
   border: 1px solid var(--border);
   border-radius: 10px;
   background: var(--panel);
   box-shadow: 0 8px 24px rgb(0 0 0 / 30%);
+}
+.menu[data-side='up'] {
+  top: auto;
+  bottom: calc(100% + 6px);
 }
 .menu-label {
   padding: 6px 10px 2px;
@@ -541,6 +638,7 @@ body {
   color: var(--muted);
 }
 .menu-list {
+  min-height: 0;
   max-height: min(300px, 40vh);
   overflow-y: auto;
 }
@@ -668,6 +766,11 @@ body {
   width: 13px;
   height: 13px;
 }
+.effort-head .icon-btn {
+  transition:
+    color 250ms ease,
+    background-color 250ms ease;
+}
 .effort-head .icon-btn[aria-pressed='true'] {
   color: var(--warn);
   background: color-mix(in srgb, var(--warn) 16%, transparent);
@@ -686,8 +789,12 @@ body {
   right: 0;
   bottom: calc(100% + 8px);
   z-index: 10;
-  width: min(256px, calc(100vw - 300px));
+  display: flex;
+  flex-direction: column;
+  width: min(256px, calc(100vw - var(--sidebar) - 60px));
   min-width: 200px;
+  /* No taller than the room the window leaves it: the list of models gives way, and scrolls. */
+  max-height: var(--popup-room, none);
   padding: 8px 10px 10px;
   border: 1px solid var(--border);
   border-radius: 12px;
@@ -772,6 +879,7 @@ body {
   font-size: 12px;
 }
 .model-list {
+  min-height: 0;
   max-height: min(260px, 40vh);
   margin-top: 6px;
   overflow-x: hidden;
@@ -874,17 +982,82 @@ body {
   width: calc(var(--slider-inset) * 2 + (100% - var(--slider-inset) * 2) * var(--slider-pos));
   border-radius: inherit;
   background: var(--accent);
-  /* Keeps the particles inside the rounded ends. */
+  /* Keeps the colours of the top level inside the rounded ends. */
   overflow: hidden;
   pointer-events: none;
   transition: width 160ms ease;
 }
-/* The top of the scale: a night sky instead of the plain accent colour. */
-.effort-panel[data-peak] .slider-fill {
-  background: linear-gradient(90deg, #3b5bdb 0%, #6a5af9 45%, #9f7aea 78%, #c4a7ff 100%);
+/*
+ * The top of the scale: a night sky instead of the accent colour, and not a still one. It lies
+ * over the plain fill and fades in, so reaching the top is a change of colour rather than a cut.
+ * The gradient begins and ends on the same colour and is twice as wide as the fill: moved by
+ * its own width, it is back where it started.
+ *
+ * There are two of it. One sways to and fro: the colours change, but nothing goes anywhere. The
+ * other runs to the left and is laid over the first while faster answers are on.
+ */
+.slider-fill::before,
+.slider-fill::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, #3157e0 0%, #5d5cf0 20%, #b79cff 45%, #7c5cf5 65%, #3f3fcf 82%, #3157e0 100%) 0 0 / 200% 100%
+    repeat-x;
+  opacity: 0;
+  transition: opacity 450ms ease;
 }
-/* Particles that fade in, drift a little and fade out, each at its own pace. */
-.slider-spark {
+.slider-fill::before {
+  animation: slider-sway 7s ease-in-out infinite alternate;
+}
+.slider-fill::after {
+  animation: slider-flow 4s linear infinite;
+}
+.effort-panel[data-peak] .slider-fill::before,
+.effort-panel[data-peak] .slider[data-sparks='stream'] .slider-fill::after {
+  opacity: 1;
+}
+@keyframes slider-sway {
+  from {
+    background-position: 0% 0;
+  }
+  to {
+    background-position: 100% 0;
+  }
+}
+/* Leftwards, like the particles. */
+@keyframes slider-flow {
+  to {
+    background-position: 200% 0;
+  }
+}
+/*
+ * The particles, in two kinds: ones that twinkle where they are, and a stream towards the left.
+ * Both lie across the whole track, of which only the part under the fill is seen. They are
+ * always there and fade in and out, so switching one on, or one into the other, is not a jump.
+ */
+.slider-sparks {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  /*
+   * The stream keeps particles waiting beyond the right end of the track. They are not seen, but
+   * without this they would count as content and the window would grow a scrollbar for them.
+   */
+  overflow: hidden;
+  /* The same width as the fill. */
+  clip-path: inset(0 calc(100% - var(--slider-inset) * 2 - (100% - var(--slider-inset) * 2) * var(--slider-pos)) 0 0 round 999px);
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    opacity 500ms ease,
+    clip-path 160ms ease;
+}
+.slider[data-sparks='still'] .slider-sparks-still,
+.slider[data-sparks='stream'] .slider-sparks-stream {
+  opacity: 1;
+}
+/* A particle that stays put: it fades in, strays a little and fades out, each at its own pace. */
+.slider-sparks-still i {
   position: absolute;
   width: var(--spark-size);
   height: var(--spark-size);
@@ -907,6 +1080,43 @@ body {
     transform: translate(var(--spark-dx), var(--spark-dy)) scale(0.6);
   }
 }
+/* One particle's path across the track, from right to left and round again. */
+.slider-lane {
+  position: absolute;
+  left: 0;
+  width: 100%;
+  height: 0;
+  animation: slider-stream var(--spark-cross) linear var(--spark-delay) infinite;
+}
+.slider-lane i {
+  position: absolute;
+  left: var(--spark-x);
+  width: var(--spark-size);
+  height: var(--spark-size);
+  margin-top: calc(var(--spark-size) / -2);
+  border-radius: 50%;
+  background: #ffffff;
+  animation: slider-twinkle var(--spark-twinkle) ease-in-out var(--spark-delay) infinite alternate;
+}
+/* The same particle one track further on: it takes the first one's place as the lane comes round. */
+.slider-lane i + i {
+  left: calc(var(--spark-x) + 100%);
+}
+@keyframes slider-stream {
+  to {
+    transform: translateX(-100%);
+  }
+}
+@keyframes slider-twinkle {
+  from {
+    opacity: 0.2;
+    transform: scale(0.7);
+  }
+  to {
+    opacity: 0.95;
+    transform: scale(1);
+  }
+}
 .slider-dot {
   position: absolute;
   top: 50%;
@@ -917,9 +1127,22 @@ body {
   border-radius: 50%;
   background: var(--muted);
   pointer-events: none;
+  transition:
+    opacity 450ms ease,
+    transform 600ms ease;
 }
 .slider-dot[data-filled] {
   background: rgb(255 255 255 / 72%);
+}
+/*
+ * Where there are particles, the dots under them give way; the stops still ahead keep theirs.
+ * Into a stream they set off with it as they fade, and they come back the same way.
+ */
+.slider[data-sparks] .slider-dot[data-filled] {
+  opacity: 0;
+}
+.slider[data-sparks='stream'] .slider-dot[data-filled] {
+  transform: translateX(-14px);
 }
 .slider-thumb {
   position: absolute;
@@ -953,6 +1176,10 @@ body {
 .slider[data-dragging] .slider-thumb {
   transition: none;
 }
+/* The particles keep to the fill while it follows the pointer; they still fade in and out. */
+.slider[data-dragging] .slider-sparks {
+  transition: opacity 500ms ease;
+}
 .slider[data-dragging] .slider-thumb {
   transform: scale(1.08);
 }
@@ -966,9 +1193,22 @@ body {
     transition: none;
   }
   /* Still there, but holding still. */
-  .slider-spark {
+  .slider-lane,
+  .slider-lane i,
+  .slider-sparks-still i,
+  .slider-fill::before,
+  .slider-fill::after {
     animation: none;
+  }
+  .slider-lane i,
+  .slider-sparks-still i {
     opacity: 0.7;
+  }
+  .slider-dot,
+  .slider-sparks,
+  .slider-fill::before,
+  .slider-fill::after {
+    transition: none;
   }
 }
 .send {
@@ -1028,7 +1268,7 @@ body {
   left: 0;
   z-index: 10;
   width: min(460px, 100%);
-  max-height: 300px;
+  max-height: min(300px, var(--popup-room, 300px));
   overflow-y: auto;
   padding: 4px;
   border: 1px solid var(--border);
@@ -1175,13 +1415,31 @@ body {
   padding: 10px 0 2px;
   background: var(--panel);
 }
+/* Something not to miss: a wide bar in the warning colour, a mark, and a tint behind the text.
+   Used in the settings and, for what did not stop a turn, among the messages. */
 .notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
   margin: 0;
-  padding: 8px 10px;
-  border-left: 3px solid var(--warn);
-  border-radius: 4px;
-  background: var(--raised);
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--warn) 40%, transparent);
+  border-left: 5px solid var(--warn);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--warn) 12%, transparent);
   font-size: 13px;
+}
+.notice > svg {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  /* Level with the first line of the text. */
+  margin-top: 1px;
+  color: var(--warn);
+}
+.notice-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .toolbar {
   display: flex;
@@ -1403,24 +1661,16 @@ a.btn {
   margin-left: 0;
 }
 
-/* Something worth knowing that did not stop the turn */
-.msg-notice {
-  padding: 6px 10px;
-  border-left: 3px solid var(--warn);
-  border-radius: 4px;
-  background: var(--raised);
-  color: var(--muted);
-  font-size: 13px;
-}
-
-/* An error with something to do about it */
+/* An error with something to do about it: the same bar and tint as a notice. */
 .error-notice {
   display: flex;
   flex-direction: column;
   gap: 6px;
   padding: 10px 12px;
-  border: 1px solid var(--warn);
+  border: 1px solid color-mix(in srgb, var(--warn) 40%, transparent);
+  border-left: 5px solid var(--warn);
   border-radius: 6px;
+  background: color-mix(in srgb, var(--warn) 12%, transparent);
 }
 .error-notice-title {
   font-weight: 600;

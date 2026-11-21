@@ -1,9 +1,9 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { KeyboardEvent } from 'react'
 import type { ModelInfo, ReasoningEffort, Settings, SkillInfo } from '../../shared/types.ts'
 import { ModelControl } from './ModelControl.tsx'
 import { EnterIcon, StopIcon } from './icons.tsx'
-import { popupSide } from './util.ts'
+import { roomStyle, usePopupPlace } from './util.ts'
 
 const api = window.harness
 
@@ -45,7 +45,6 @@ export function Composer({
   /** The draft for which Escape closed the "/" menu, so it stays closed until the text changes. */
   const [dismissed, setDismissed] = useState<string | null>(null)
   const [active, setActive] = useState(0)
-  const [menuSide, setMenuSide] = useState<'up' | 'down'>('up')
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const areaRef = useRef<HTMLDivElement>(null)
 
@@ -57,10 +56,9 @@ export function Composer({
   const matches = visible ? skills.filter((s) => s.name.toLowerCase().includes(filter)) : []
   const activeIndex = Math.min(active, Math.max(matches.length - 1, 0))
 
-  // Below the box while it sits in the middle of a new chat, above it once it is at the bottom.
-  useLayoutEffect(() => {
-    if (visible) setMenuSide(popupSide(areaRef.current, 320))
-  }, [visible])
+  // Below the box while it sits in the middle of a new chat and the whole menu fits there, above
+  // it once it is at the bottom. `.skill-menu` is 300px at its tallest and sits 6px from the box.
+  const menuPlace = usePopupPlace(visible, areaRef, 300, 6)
 
   // Read the list each time the menu opens: skills can be added while the app is running.
   useEffect(() => {
@@ -138,7 +136,7 @@ export function Composer({
       }}
     >
       {visible && (
-        <div className="skill-menu" id="skill-menu" role="listbox" aria-label="Skills" data-side={menuSide}>
+        <div className="skill-menu" id="skill-menu" role="listbox" aria-label="Skills" data-side={menuPlace.side} style={roomStyle(menuPlace)}>
           {matches.length === 0 ? (
             <div className="skill-empty">
               {skills.length === 0 ? '还没有 Skill。在"设置 → Skills"里可以打开文件夹添加。' : '没有匹配的 Skill'}

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import type { KeyboardEvent } from 'react'
 import { CheckIcon, ChevronDownIcon, FolderIcon, PlusIcon } from './icons.tsx'
 import { folderKey, folderName } from '../../shared/folders.ts'
-import { isWindows, useOutsidePress } from './util.ts'
+import { isWindows, roomStyle, useOutsidePress, usePopupPlace } from './util.ts'
 
 const api = window.harness
 
@@ -18,6 +18,8 @@ export function FolderMenu({ workspace, onChoose }: { workspace: string; onChoos
   const [folders, setFolders] = useState<string[] | null>(null)
   const rootRef = useRef<HTMLDivElement>(null)
   const triggerRef = useRef<HTMLButtonElement>(null)
+  // Below the button for as long as a few folders fit there; `.menu` sits 6px from it.
+  const place = usePopupPlace(open, triggerRef, 220, 6)
 
   const close = (refocus: boolean): void => {
     setOpen(false)
@@ -81,7 +83,7 @@ export function FolderMenu({ workspace, onChoose }: { workspace: string; onChoos
         <ChevronDownIcon />
       </button>
       {open && (
-        <div className="menu" role="menu" aria-label="工作文件夹" onKeyDown={onKeyDown}>
+        <div className="menu" role="menu" aria-label="工作文件夹" data-side={place.side} style={roomStyle(place)} onKeyDown={onKeyDown}>
           {folders !== null && folders.length > 0 && (
             <>
               <div className="menu-label">用过的文件夹</div>

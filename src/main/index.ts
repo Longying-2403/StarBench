@@ -12,6 +12,7 @@ import type {
   SignInOptions,
   SignInResult
 } from '../shared/types.ts'
+import { isSessionIcon } from '../shared/types.ts'
 import { runTurn } from './agent.ts'
 import { SignInError, startAttempt } from './chatgpt/login.ts'
 import type { Attempt } from './chatgpt/login.ts'
@@ -288,6 +289,11 @@ function registerIpc(): void {
   ipcMain.handle('sessions:archive', async (_e, id: string, archived: unknown) => {
     notWhileRunning(id)
     await store.updateSession(id, { archived: archived === true })
+  })
+  ipcMain.handle('sessions:icon', async (_e, id: string, icon: unknown) => {
+    notWhileRunning(id)
+    if (icon !== null && !isSessionIcon(icon)) throw new Error('This is not one of the icons a session can have.')
+    await store.updateSession(id, { icon })
   })
   ipcMain.handle('sessions:delete', async (_e, id: string) => {
     activeRuns.get(id)?.controller.abort()

@@ -3,6 +3,7 @@ import type { FormEvent } from 'react'
 import { CHATGPT_HELP_URL, PROVIDER_KINDS, PROVIDER_PRESETS } from '../../shared/types.ts'
 import type { McpServerStatus, ModelChoice, PluginInfo, ProviderInfo, ProviderKind, Settings, SkillInfo } from '../../shared/types.ts'
 import { ChatGptButton, ChatGptPane } from './ChatGptPane.tsx'
+import { Notice } from './Notice.tsx'
 import { errorText } from './util.ts'
 
 const api = window.harness
@@ -325,9 +326,7 @@ function PluginsTab() {
 
   return (
     <div className="tab-body">
-      <p className="notice">
-        插件在应用内以完整权限运行：可以读写文件、执行命令，也能访问你的 API Key 和 ChatGPT 登录。只启用你信任的插件。
-      </p>
+      <Notice>插件在应用内以完整权限运行：可以读写文件、执行命令，也能访问你的 API Key 和 ChatGPT 登录。只启用你信任的插件。</Notice>
       <div className="toolbar">
         <button className="btn" onClick={() => api.openPluginsFolder().catch((err) => setError(errorText(err)))}>
           打开插件文件夹

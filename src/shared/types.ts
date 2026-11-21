@@ -41,6 +41,32 @@ export type ChatMessage =
     }
   | { role: 'tool'; tool_call_id: string; content: string }
 
+/**
+ * The marks a session can be given in the list, to tell it from the others at a glance. These
+ * are the names a session's file stores; the page holds the drawings.
+ */
+export const SESSION_ICONS = [
+  'star',
+  'heart',
+  'flag',
+  'bookmark',
+  'pin',
+  'bolt',
+  'bulb',
+  'rocket',
+  'bug',
+  'code',
+  'terminal',
+  'flask',
+  'book',
+  'pencil',
+  'chat',
+  'globe',
+  'check'
+] as const
+export type SessionIcon = (typeof SESSION_ICONS)[number]
+export const isSessionIcon = (value: unknown): value is SessionIcon => (SESSION_ICONS as readonly unknown[]).includes(value)
+
 export interface Session {
   id: string
   title: string
@@ -48,10 +74,12 @@ export interface Session {
   updatedAt: number
   /** Put away: kept, but out of the main list. */
   archived?: boolean
+  /** The mark shown before the name in the list. */
+  icon?: SessionIcon
   messages: ChatMessage[]
 }
 
-export type SessionSummary = Pick<Session, 'id' | 'title' | 'workspace' | 'updatedAt' | 'archived'>
+export type SessionSummary = Pick<Session, 'id' | 'title' | 'workspace' | 'updatedAt' | 'archived' | 'icon'>
 
 /**
  * How hard the model thinks before it answers, lowest first. `default` sends nothing and leaves
@@ -326,6 +354,8 @@ export interface HarnessApi {
   renameSession(id: string, title: string): Promise<void>
   /** Archived sessions stay on disk and can be brought back. */
   setSessionArchived(id: string, archived: boolean): Promise<void>
+  /** The mark before the session's name in the list; null takes it away. */
+  setSessionIcon(id: string, icon: SessionIcon | null): Promise<void>
   /**
    * Starts a turn. Creates the session when `sessionId` is null. Resolves with the session id.
    * `skill` names a skill the user picked for this message.
