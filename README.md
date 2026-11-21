@@ -47,13 +47,13 @@ npm run dev
 | 服务 | 接口类型 | 说明 |
 |---|---|---|
 | DeepSeek | OpenAI 兼容（Chat Completions） | 默认。用真实接口测试过 |
-| xAI | OpenAI 兼容（Chat Completions） | 尚未用真实接口测试 |
-| OpenAI | Responses API | 尚未用真实接口测试 |
-| Anthropic | Messages API | 尚未用真实接口测试 |
+| xAI | OpenAI 兼容（Chat Completions） | 用真实接口测试过（grok-4.7） |
+| OpenAI | Responses API | 没有用 API Key 测试过；同一个接口经 ChatGPT 套餐登录实际用过 |
+| Anthropic | Messages API | 用真实接口测试过（Claude Opus 5.5、Haiku 5.5） |
 | ChatGPT 套餐 | Responses API，用 ChatGPT 账号登录 | 不需要 API Key。用真实账户走通过登录和对话 |
 | 其他服务 | 三种类型任选 | 填接口地址即可，多数第三方服务选"OpenAI 兼容" |
 
-标"尚未用真实接口测试"的几种，只对照各家的文档、用本地模拟的服务验证过请求和响应的处理。
+"用真实接口测试过"指的是：取模型列表、带工具调用的一轮对话、各档思考强度，以及在同一个会话里换到别家再换回来。用 API Key 访问 OpenAI 这一种，只对照文档、用本地模拟的服务验证过请求和响应的处理。
 
 ### 用 ChatGPT 套餐登录
 
