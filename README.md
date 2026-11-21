@@ -1,4 +1,4 @@
-# Open Harness
+# StarBench
 
 一个桌面端的 AI 编程助手外壳（agent harness）：选一个工作文件夹，用对话的方式让模型读写文件、搜索代码、执行命令。默认接入 DeepSeek，也可以换成任何兼容 OpenAI 接口格式的服务。
 

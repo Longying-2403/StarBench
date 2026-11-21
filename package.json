@@ -1,5 +1,5 @@
 {
-  "name": "open-harness",
+  "name": "starbench",
   "version": "0.1.0",
   "description": "A desktop GUI agent harness for DeepSeek and other OpenAI-compatible models",
   "type": "module",

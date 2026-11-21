@@ -402,7 +402,7 @@ export function App() {
         >
           {items.length === 0 ? (
             <div className="empty">
-              <h1>Open Harness</h1>
+              <h1>StarBench</h1>
               <p>选择一个工作文件夹，然后告诉我要做什么。</p>
             </div>
           ) : (
