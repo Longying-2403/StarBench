@@ -3,9 +3,48 @@ import { randomUUID } from 'node:crypto'
 import path from 'node:path'
 import type { PermissionDecision, Session, SessionEvent, SettingsInput } from '../shared/types.ts'
 import { runTurn } from './agent.ts'
+import { createKernel } from './kernel.ts'
+import type { Kernel } from './kernel.ts'
+import { PluginManager } from './plugins.ts'
 import * as store from './store.ts'
+import { ToolRegistry, registerBuiltinTools } from './tools.ts'
+
+// Lets development and tests run against a throwaway profile instead of the real one.
+if (process.env.STARBENCH_USER_DATA) {
+  app.setPath('userData', path.resolve(process.env.STARBENCH_USER_DATA))
+}
+
+// Plugin code runs in this process; a promise it forgot to handle must not take the app down.
+process.on('unhandledRejection', (reason) => {
+  console.error('[main] unhandled rejection:', reason)
+})
 
 let mainWindow: BrowserWindow | null = null
+
+const tools = new ToolRegistry()
+registerBuiltinTools(tools)
+let kernel: Kernel | null = null
+let plugins: PluginManager | null = null
+/** Resolves once enabled plugins have been started; plugin IPC waits for it. */
+let pluginsReady: Promise<PluginManager> | null = null
+
+async function startPlugins(): Promise<PluginManager> {
+  kernel = await createKernel({ tools })
+  const userData = app.getPath('userData')
+  plugins = new PluginManager({
+    root: kernel.root,
+    tools,
+    dir: path.join(userData, 'plugins'),
+    stateFile: path.join(userData, 'plugins.json')
+  })
+  await plugins.init()
+  return plugins
+}
+
+async function shutdown(): Promise<void> {
+  await plugins?.dispose()
+  await kernel?.dispose()
+}
 
 interface ActiveRun {
   controller: AbortController
@@ -72,6 +111,21 @@ function registerIpc(): void {
     return result.canceled ? null : result.filePaths[0]
   })
 
+  const pluginManager = async (): Promise<PluginManager> => {
+    if (!pluginsReady) throw new Error('Plugins are not available yet.')
+    return pluginsReady
+  }
+  ipcMain.handle('plugins:list', async () => (await pluginManager()).list())
+  ipcMain.handle('plugins:setEnabled', async (_e, id: string, enabled: boolean) => {
+    const manager = await pluginManager()
+    await manager.setEnabled(id, enabled)
+    return manager.list()
+  })
+  ipcMain.handle('plugins:openFolder', async () => {
+    const error = await shell.openPath((await pluginManager()).dir)
+    if (error) throw new Error(error)
+  })
+
   ipcMain.handle('sessions:list', () => store.listSessions())
   ipcMain.handle('sessions:load', (_e, id: string) => store.loadSession(id))
   ipcMain.handle('sessions:delete', async (_e, id: string) => {
@@ -117,6 +171,7 @@ function registerIpc(): void {
       workspace: current.workspace,
       messages: current.messages,
       signal: run.controller.signal,
+      tools,
       alwaysAllowed: allowed,
       emit: (event) => send({ sessionId: current.id, event }),
       checkpoint,
@@ -152,9 +207,24 @@ function registerIpc(): void {
 void app.whenReady().then(() => {
   registerIpc()
   createWindow()
+  // Plugins load in the background so a slow or stuck one cannot delay the window.
+  pluginsReady = startPlugins()
+  pluginsReady.catch((err) => console.error('[plugins] failed to start:', err))
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })
+})
+
+// Give plugins a chance to release what they hold (child processes, files) before exiting.
+let shuttingDown = false
+app.on('before-quit', (event) => {
+  if (shuttingDown) return
+  shuttingDown = true
+  event.preventDefault()
+  const giveUp = new Promise((resolve) => setTimeout(resolve, 3000))
+  void Promise.race([shutdown(), giveUp])
+    .catch((err) => console.error('[main] shutdown failed:', err))
+    .finally(() => app.quit())
 })
 
 app.on('window-all-closed', () => {

@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
-import type { FormEvent, KeyboardEvent } from 'react'
+import type { KeyboardEvent } from 'react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import type { PermissionDecision, SessionSummary, Settings, ToolCall } from '../../shared/types.ts'
 import { itemsFromMessages, itemsReducer } from './items.ts'
 import type { Item } from './items.ts'
+import { SettingsDialog } from './Settings.tsx'
+import { errorText } from './util.ts'
 
 const api = window.harness
 const LAST_WORKSPACE_KEY = 'lastWorkspace'
@@ -15,12 +17,6 @@ function readLastWorkspace(): string {
   } catch {
     return ''
   }
-}
-
-function errorText(err: unknown): string {
-  const text = err instanceof Error ? err.message : String(err)
-  // Electron prefixes errors that crossed IPC; the prefix is noise for the user.
-  return text.replace(/^Error invoking remote method '[^']+': (Error: )?/, '')
 }
 
 function parseArgs(call: ToolCall): Record<string, unknown> {
@@ -126,82 +122,6 @@ function Transcript({ items }: { items: Item[] }) {
         )
       })}
     </>
-  )
-}
-
-function SettingsDialog({
-  settings,
-  onClose,
-  onSaved
-}: {
-  settings: Settings
-  onClose: () => void
-  onSaved: (s: Settings) => void
-}) {
-  const [baseURL, setBaseURL] = useState(settings.baseURL)
-  const [model, setModel] = useState(settings.model)
-  const [apiKey, setApiKey] = useState('')
-  const [error, setError] = useState('')
-  const [saving, setSaving] = useState(false)
-
-  const submit = async (e: FormEvent): Promise<void> => {
-    e.preventDefault()
-    setSaving(true)
-    setError('')
-    try {
-      // An empty key field means "keep the stored key".
-      onSaved(await api.saveSettings({ baseURL, model, ...(apiKey ? { apiKey } : {}) }))
-      onClose()
-    } catch (err) {
-      setError(errorText(err))
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  return (
-    <div className="overlay" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <form className="dialog" onSubmit={submit}>
-        <h2>设置</h2>
-        <label>
-          API Key
-          <input
-            type="password"
-            value={apiKey}
-            autoFocus
-            onChange={(e) => setApiKey(e.target.value)}
-            placeholder={settings.hasApiKey ? '已保存，留空则不修改' : 'sk-…'}
-          />
-          <span className="hint">使用系统凭据加密后保存在本机，不会写入项目文件。</span>
-        </label>
-        <label>
-          接口地址
-          <input value={baseURL} onChange={(e) => setBaseURL(e.target.value)} />
-          <span className="hint">任何兼容 OpenAI 格式的服务都可以。</span>
-        </label>
-        <label>
-          模型
-          <input value={model} onChange={(e) => setModel(e.target.value)} list="models" />
-          <datalist id="models">
-            <option value="deepseek-flash" />
-            <option value="deepseek-v4-pro" />
-          </datalist>
-        </label>
-        {error && (
-          <div className="msg-error" role="alert">
-            {error}
-          </div>
-        )}
-        <div className="dialog-actions">
-          <button type="button" className="btn" onClick={onClose}>
-            取消
-          </button>
-          <button type="submit" className="btn btn-primary" disabled={saving}>
-            保存
-          </button>
-        </div>
-      </form>
-    </div>
   )
 }
 

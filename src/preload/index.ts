@@ -4,6 +4,9 @@ import type { HarnessApi, SessionEvent } from '../shared/types.ts'
 const api: HarnessApi = {
   getSettings: () => ipcRenderer.invoke('settings:get'),
   saveSettings: (input) => ipcRenderer.invoke('settings:save', input),
+  listPlugins: () => ipcRenderer.invoke('plugins:list'),
+  setPluginEnabled: (id, enabled) => ipcRenderer.invoke('plugins:setEnabled', id, enabled),
+  openPluginsFolder: () => ipcRenderer.invoke('plugins:openFolder'),
   pickWorkspace: () => ipcRenderer.invoke('workspace:pick'),
   listSessions: () => ipcRenderer.invoke('sessions:list'),
   loadSession: (id) => ipcRenderer.invoke('sessions:load', id),

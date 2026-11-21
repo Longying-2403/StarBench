@@ -4,7 +4,7 @@
 
 import OpenAI from 'openai'
 import type { AgentEvent, ChatMessage, PermissionDecision, ToolCall } from '../shared/types.ts'
-import { TOOLS, TOOL_DEFINITIONS, executeTool } from './tools.ts'
+import type { ToolRegistry } from './tools.ts'
 
 const MAX_STEPS = 50
 
@@ -16,6 +16,8 @@ export interface TurnOptions {
   /** Conversation so far, ending with the new user message. Mutated in place as the turn proceeds. */
   messages: ChatMessage[]
   signal: AbortSignal
+  /** Read on every model request, so tools added mid-turn are picked up at the next step. */
+  tools: Pick<ToolRegistry, 'definitions' | 'needsPermission' | 'execute'>
   /** Tool names the user chose to always allow; owned by the caller so it outlives one turn. */
   alwaysAllowed: Set<string>
   emit(event: AgentEvent): void
@@ -52,6 +54,7 @@ async function streamAssistant(
 ): Promise<Extract<ChatMessage, { role: 'assistant' }>> {
   const message: Extract<ChatMessage, { role: 'assistant' }> = { role: 'assistant', content: '' }
   const calls: ToolCall[] = []
+  const tools = opts.tools.definitions()
   try {
     const stream = await client.chat.completions.create(
       {
@@ -62,7 +65,8 @@ async function streamAssistant(
           { role: 'system', content: systemPrompt(opts.workspace) },
           ...(opts.messages as unknown as OpenAI.Chat.ChatCompletionMessageParam[])
         ],
-        tools: TOOL_DEFINITIONS,
+        // The API rejects an empty tools array.
+        ...(tools.length ? { tools } : {}),
         stream: true
       },
       { signal: opts.signal }
@@ -130,14 +134,14 @@ export async function runTurn(opts: TurnOptions): Promise<void> {
           // Every tool call still needs a result, or the next request is rejected.
           output = 'Cancelled by user'
         } else {
-          let allowed = !TOOLS[call.name]?.needsPermission || alwaysAllowed.has(call.name)
+          let allowed = !opts.tools.needsPermission(call.name) || alwaysAllowed.has(call.name)
           if (!allowed) {
             const decision = await opts.requestPermission(call)
             if (decision === 'always') alwaysAllowed.add(call.name)
             allowed = decision !== 'deny'
           }
           output = allowed
-            ? await executeTool(call.name, call.arguments, { workspace: opts.workspace, signal: opts.signal })
+            ? await opts.tools.execute(call.name, call.arguments, { workspace: opts.workspace, signal: opts.signal })
             : 'The user denied this tool call.'
         }
         stored.push({ role: 'tool', tool_call_id: call.id, content: output })

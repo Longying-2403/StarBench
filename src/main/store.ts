@@ -6,6 +6,7 @@ import { app, safeStorage } from 'electron'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import type { Session, SessionSummary, Settings, SettingsInput } from '../shared/types.ts'
+import { readJson, writeJson } from './json-file.ts'
 
 interface StoredSettings {
   baseURL: string
@@ -22,22 +23,6 @@ const sessionsDir = (): string => path.join(app.getPath('userData'), 'sessions')
 const sessionFile = (id: string): string => {
   if (!/^[a-z0-9-]+$/i.test(id)) throw new Error('Invalid session id')
   return path.join(sessionsDir(), `${id}.json`)
-}
-
-async function readJson<T>(file: string): Promise<T | null> {
-  try {
-    return JSON.parse(await fs.readFile(file, 'utf8')) as T
-  } catch {
-    return null
-  }
-}
-
-async function writeJson(file: string, value: unknown): Promise<void> {
-  await fs.mkdir(path.dirname(file), { recursive: true })
-  // Write to a temp file first so a crash mid-write cannot corrupt the original.
-  const tmp = `${file}.tmp`
-  await fs.writeFile(tmp, JSON.stringify(value, null, 2), 'utf8')
-  await fs.rename(tmp, file)
 }
 
 async function loadStored(): Promise<StoredSettings> {

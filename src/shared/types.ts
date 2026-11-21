@@ -42,6 +42,20 @@ export interface SettingsInput {
   apiKey?: string
 }
 
+export interface PluginInfo {
+  /** Folder name under the plugins directory. */
+  id: string
+  name: string
+  version: string
+  description: string
+  enabled: boolean
+  /** `waiting`: enabled, but a service it injects is not available yet. */
+  status: 'disabled' | 'active' | 'waiting' | 'error'
+  error?: string
+  /** Names of the tools it currently provides. */
+  tools: string[]
+}
+
 export type PermissionDecision = 'allow' | 'always' | 'deny'
 
 export type AgentEvent =
@@ -63,6 +77,10 @@ export interface SessionEvent {
 export interface HarnessApi {
   getSettings(): Promise<Settings>
   saveSettings(input: SettingsInput): Promise<Settings>
+  listPlugins(): Promise<PluginInfo[]>
+  /** Resolves with the refreshed list. */
+  setPluginEnabled(id: string, enabled: boolean): Promise<PluginInfo[]>
+  openPluginsFolder(): Promise<void>
   pickWorkspace(): Promise<string | null>
   listSessions(): Promise<SessionSummary[]>
   loadSession(id: string): Promise<Session | null>

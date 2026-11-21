@@ -1,0 +1,8 @@
+{
+  "name": "hello-tool",
+  "version": "0.1.0",
+  "description": "示例插件：给模型添加一个查询当前时间的工具",
+  "type": "module",
+  "main": "index.js",
+  "license": "MIT"
+}

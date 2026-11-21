@@ -1,5 +1,5 @@
-// The tools the model can call. Nothing in this file depends on Electron, so it
-// can be exercised from a plain Node script.
+// The tool registry and the built-in tools. Nothing in this file depends on
+// Electron or the plugin kernel, so it can be exercised from a plain Node script.
 
 import { spawn } from 'node:child_process'
 import { promises as fs } from 'node:fs'
@@ -16,13 +16,28 @@ export interface ToolContext {
   signal: AbortSignal
 }
 
-interface ToolSpec {
+/** What a tool author provides. This shape is the public contract for plugins. */
+export interface ToolSpec {
+  /** Unique name the model calls the tool by: letters, digits, "_" and "-", at most 64 characters. */
+  name: string
   description: string
-  parameters: Record<string, unknown>
-  /** Tools that change files or run code ask the user first. */
-  needsPermission: boolean
-  run(args: Record<string, unknown>, ctx: ToolContext): Promise<string>
+  /** JSON Schema of the arguments object. Defaults to an object with no properties. */
+  parameters?: Record<string, unknown>
+  /** Whether the user is asked before each call. Defaults to true; set false only for read-only tools. */
+  needsPermission?: boolean
+  /** Returns the text shown to the model. Throwing reports the error to the model instead. */
+  run(args: Record<string, unknown>, ctx: ToolContext): unknown
 }
+
+export interface ToolInfo {
+  name: string
+  description: string
+  /** Who registered it: "builtin", a plugin id, or "mcp:<server>". */
+  source: string
+  needsPermission: boolean
+}
+
+const TOOL_NAME = /^[a-zA-Z0-9_-]{1,64}$/
 
 function truncate(text: string): string {
   if (text.length <= MAX_OUTPUT_CHARS) return text
@@ -108,7 +123,7 @@ function runCommand(command: string, ctx: ToolContext): Promise<string> {
   })
 }
 
-export const TOOLS: Record<string, ToolSpec> = {
+const BUILTIN_TOOLS: Record<string, Omit<ToolSpec, 'name'>> = {
   read_file: {
     description: 'Read a UTF-8 text file from the workspace. Returns the content with line numbers.',
     parameters: {
@@ -271,29 +286,93 @@ export const TOOLS: Record<string, ToolSpec> = {
   }
 }
 
-/** Tool definitions in the shape the chat completions API expects. */
-export const TOOL_DEFINITIONS = Object.entries(TOOLS).map(([name, spec]) => ({
-  type: 'function' as const,
-  function: { name, description: spec.description, parameters: spec.parameters }
-}))
+interface RegisteredTool {
+  spec: ToolSpec
+  parameters: Record<string, unknown>
+  source: string
+  needsPermission: boolean
+}
 
-/** Runs a tool and always resolves with text; failures become an error message for the model. */
-export async function executeTool(name: string, rawArgs: string, ctx: ToolContext): Promise<string> {
-  const spec = TOOLS[name]
-  if (!spec) return `Error: unknown tool "${name}"`
-  let args: Record<string, unknown>
-  try {
-    const parsed: unknown = JSON.parse(rawArgs || '{}')
-    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-      throw new Error('arguments must be a JSON object')
+/** Every tool the model can call, whoever provided it. */
+export class ToolRegistry {
+  private tools = new Map<string, RegisteredTool>()
+
+  /**
+   * Adds a tool and returns the function that removes it again.
+   * Throws on an invalid spec or a name that is already taken.
+   */
+  register(spec: ToolSpec, source: string): () => void {
+    if (typeof spec !== 'object' || spec === null) throw new Error('Tool spec must be an object')
+    const { name } = spec
+    if (typeof name !== 'string' || !TOOL_NAME.test(name)) {
+      throw new Error(`Invalid tool name ${JSON.stringify(name)}: use letters, digits, "_" and "-", at most 64 characters`)
     }
-    args = parsed as Record<string, unknown>
-  } catch (err) {
-    return `Error: invalid tool arguments: ${(err as Error).message}`
+    if (typeof spec.description !== 'string' || !spec.description.trim()) {
+      throw new Error(`Tool "${name}" needs a description`)
+    }
+    if (typeof spec.run !== 'function') throw new Error(`Tool "${name}" needs a run function`)
+    const parameters = spec.parameters ?? { type: 'object', properties: {} }
+    if (typeof parameters !== 'object' || parameters === null || Array.isArray(parameters)) {
+      throw new Error(`Tool "${name}": parameters must be a JSON Schema object`)
+    }
+    const existing = this.tools.get(name)
+    if (existing) throw new Error(`Tool "${name}" is already registered by ${existing.source}`)
+
+    const entry: RegisteredTool = { spec, parameters, source, needsPermission: spec.needsPermission !== false }
+    this.tools.set(name, entry)
+    return () => {
+      // Only remove our own entry: the name may have been re-registered since.
+      if (this.tools.get(name) === entry) this.tools.delete(name)
+    }
   }
-  try {
-    return await spec.run(args, ctx)
-  } catch (err) {
-    return `Error: ${(err as Error).message}`
+
+  list(): ToolInfo[] {
+    return [...this.tools.entries()].map(([name, t]) => ({
+      name,
+      description: t.spec.description,
+      source: t.source,
+      needsPermission: t.needsPermission
+    }))
   }
+
+  /** Tool definitions in the shape the chat completions API expects. */
+  definitions(): { type: 'function'; function: { name: string; description: string; parameters: Record<string, unknown> } }[] {
+    return [...this.tools.entries()].map(([name, t]) => ({
+      type: 'function' as const,
+      function: { name, description: t.spec.description, parameters: t.parameters }
+    }))
+  }
+
+  /** Unknown tools need no prompt: running them only reports the error to the model. */
+  needsPermission(name: string): boolean {
+    return this.tools.get(name)?.needsPermission ?? false
+  }
+
+  /** Runs a tool and always resolves with text; failures become an error message for the model. */
+  async execute(name: string, rawArgs: string, ctx: ToolContext): Promise<string> {
+    const tool = this.tools.get(name)
+    if (!tool) return `Error: unknown tool "${name}"`
+    let args: Record<string, unknown>
+    try {
+      const parsed: unknown = JSON.parse(rawArgs || '{}')
+      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+        throw new Error('arguments must be a JSON object')
+      }
+      args = parsed as Record<string, unknown>
+    } catch (err) {
+      return `Error: invalid tool arguments: ${(err as Error).message}`
+    }
+    try {
+      const result: unknown = await tool.spec.run(args, ctx)
+      if (typeof result === 'string') return truncate(result)
+      if (result === undefined || result === null) return '(no output)'
+      return truncate(JSON.stringify(result, null, 2) ?? String(result))
+    } catch (err) {
+      return `Error: ${err instanceof Error ? err.message : String(err)}`
+    }
+  }
+}
+
+export function registerBuiltinTools(registry: ToolRegistry): void {
+  for (const [name, spec] of Object.entries(BUILTIN_TOOLS)) registry.register({ name, ...spec }, 'builtin')
 }
