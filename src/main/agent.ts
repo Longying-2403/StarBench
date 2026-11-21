@@ -3,7 +3,7 @@
 // Nothing in this file depends on Electron.
 
 import OpenAI from 'openai'
-import type { AgentEvent, ChatMessage, PermissionDecision, ToolCall } from '../shared/types.ts'
+import type { AgentEvent, ChatMessage, PermissionDecision, ReasoningEffort, ToolCall } from '../shared/types.ts'
 import type { ToolRegistry } from './tools.ts'
 
 const MAX_STEPS = 50
@@ -12,6 +12,8 @@ export interface TurnOptions {
   apiKey: string
   baseURL: string
   model: string
+  /** Sent as `reasoning_effort`. Absent or `default` leaves the parameter out. */
+  reasoningEffort?: ReasoningEffort
   workspace: string
   /** Conversation so far, ending with the new user message. Mutated in place as the turn proceeds. */
   messages: ChatMessage[]
@@ -58,6 +60,7 @@ async function streamAssistant(
   const message: Extract<ChatMessage, { role: 'assistant' }> = { role: 'assistant', content: '' }
   const calls: ToolCall[] = []
   const tools = opts.tools.definitions()
+  const effort = opts.reasoningEffort
   try {
     const stream = await client.chat.completions.create(
       {
@@ -70,6 +73,8 @@ async function streamAssistant(
         ],
         // The API rejects an empty tools array.
         ...(tools.length ? { tools } : {}),
+        // Left out unless the user chose a level: not every OpenAI-compatible service knows the parameter.
+        ...(effort && effort !== 'default' ? { reasoning_effort: effort } : {}),
         stream: true
       },
       { signal: opts.signal }

@@ -5,17 +5,22 @@
 import { app, safeStorage } from 'electron'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
-import type { Session, SessionSummary, Settings, SettingsInput } from '../shared/types.ts'
+import { isReasoningEffort } from '../shared/types.ts'
+import type { ReasoningEffort, Session, SessionSummary, Settings, SettingsInput } from '../shared/types.ts'
 import { readJson, writeJson } from './json-file.ts'
+import { MAX_RECENT_FOLDERS, mergeFolders } from './workspaces.ts'
 
 interface StoredSettings {
   baseURL: string
   model: string
+  reasoningEffort: ReasoningEffort
   /** base64 of the safeStorage-encrypted key */
   encryptedKey?: string
+  /** Folders picked as a workspace, most recent first. */
+  recentWorkspaces?: string[]
 }
 
-const DEFAULTS: StoredSettings = { baseURL: 'https://api.deepseek.com', model: 'deepseek-flash' }
+const DEFAULTS: StoredSettings = { baseURL: 'https://api.deepseek.com', model: 'deepseek-flash', reasoningEffort: 'default' }
 
 const settingsFile = (): string => path.join(app.getPath('userData'), 'settings.json')
 const sessionsDir = (): string => path.join(app.getPath('userData'), 'sessions')
@@ -26,12 +31,17 @@ const sessionFile = (id: string): string => {
 }
 
 async function loadStored(): Promise<StoredSettings> {
-  return { ...DEFAULTS, ...(await readJson<StoredSettings>(settingsFile())) }
+  const stored = { ...DEFAULTS, ...(await readJson<StoredSettings>(settingsFile())) }
+  // The file can be edited by hand; a value the API does not know must not be sent to it.
+  if (!isReasoningEffort(stored.reasoningEffort)) stored.reasoningEffort = DEFAULTS.reasoningEffort
+  if (!Array.isArray(stored.recentWorkspaces)) delete stored.recentWorkspaces
+  return stored
 }
 
 const toPublic = (s: StoredSettings): Settings => ({
   baseURL: s.baseURL,
   model: s.model,
+  reasoningEffort: s.reasoningEffort,
   hasApiKey: Boolean(s.encryptedKey)
 })
 
@@ -55,6 +65,38 @@ export async function saveSettings(input: SettingsInput): Promise<Settings> {
   return toPublic(stored)
 }
 
+/** `effort` arrives over IPC, so it is checked here rather than trusted. */
+export async function setReasoningEffort(effort: unknown): Promise<Settings> {
+  if (!isReasoningEffort(effort)) throw new Error('Unknown reasoning effort.')
+  const stored = await loadStored()
+  stored.reasoningEffort = effort
+  await writeJson(settingsFile(), stored)
+  return toPublic(stored)
+}
+
+/** Moves a folder to the front of the remembered ones. */
+export async function rememberWorkspace(dir: string): Promise<void> {
+  const stored = await loadStored()
+  stored.recentWorkspaces = mergeFolders([[dir], stored.recentWorkspaces ?? []])
+  await writeJson(settingsFile(), stored)
+}
+
+/**
+ * The folders to offer when picking a workspace: the remembered ones, then those of saved
+ * sessions, most recent first. Folders that no longer exist are left out.
+ */
+export async function listWorkspaces(): Promise<string[]> {
+  const stored = await loadStored()
+  const fromSessions = (await listSessions()).map((s) => s.workspace)
+  const existing: string[] = []
+  for (const dir of mergeFolders([stored.recentWorkspaces ?? [], fromSessions], Infinity)) {
+    if (existing.length >= MAX_RECENT_FOLDERS) break
+    const isFolder = await fs.stat(dir).then((s) => s.isDirectory(), () => false)
+    if (isFolder) existing.push(dir)
+  }
+  return existing
+}
+
 async function encryptKey(key: string): Promise<string> {
   if (!(await safeStorage.isAsyncEncryptionAvailable())) {
     throw new Error('OS-level encryption is not available, so the API key cannot be stored safely.')
@@ -63,7 +105,12 @@ async function encryptKey(key: string): Promise<string> {
 }
 
 /** Main-process only: the decrypted connection details for an API call. */
-export async function getConnection(): Promise<{ apiKey: string; baseURL: string; model: string } | null> {
+export async function getConnection(): Promise<{
+  apiKey: string
+  baseURL: string
+  model: string
+  reasoningEffort: ReasoningEffort
+} | null> {
   const stored = await loadStored()
   if (!stored.encryptedKey) return null
   let decrypted: { result: string; shouldReEncrypt: boolean }
@@ -85,7 +132,7 @@ export async function getConnection(): Promise<{ apiKey: string; baseURL: string
       console.error('[store] could not re-encrypt the API key:', err)
     }
   }
-  return { apiKey: decrypted.result, baseURL: stored.baseURL, model: stored.model }
+  return { apiKey: decrypted.result, baseURL: stored.baseURL, model: stored.model, reasoningEffort: stored.reasoningEffort }
 }
 
 export async function listSessions(): Promise<SessionSummary[]> {
@@ -95,7 +142,7 @@ export async function listSessions(): Promise<SessionSummary[]> {
   )
   return sessions
     .filter((s): s is Session => s !== null)
-    .map(({ id, title, workspace, updatedAt }) => ({ id, title, workspace, updatedAt }))
+    .map(({ id, title, workspace, updatedAt, archived }) => ({ id, title, workspace, updatedAt, ...(archived ? { archived } : {}) }))
     .sort((a, b) => b.updatedAt - a.updatedAt)
 }
 
@@ -105,6 +152,16 @@ export function loadSession(id: string): Promise<Session | null> {
 
 export function saveSession(session: Session): Promise<void> {
   return writeJson(sessionFile(session.id), session)
+}
+
+/** Changes the name or the archived mark of a saved session. `updatedAt` stays, so the list keeps its order. */
+export async function updateSession(id: string, change: { title?: string; archived?: boolean }): Promise<void> {
+  const session = await loadSession(id)
+  if (!session) throw new Error('This session no longer exists.')
+  if (change.title !== undefined) session.title = change.title
+  if (change.archived === true) session.archived = true
+  if (change.archived === false) delete session.archived
+  await saveSession(session)
 }
 
 export async function deleteSession(id: string): Promise<void> {

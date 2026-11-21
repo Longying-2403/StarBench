@@ -1,19 +1,35 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { KeyboardEvent } from 'react'
-import type { SkillInfo } from '../../shared/types.ts'
+import type { ModelInfo, ReasoningEffort, SkillInfo } from '../../shared/types.ts'
+import { EffortControl } from './EffortControl.tsx'
+import { EnterIcon, StopIcon } from './icons.tsx'
+import { popupSide } from './util.ts'
 
 const api = window.harness
 
-/** The message box, with a menu for picking a skill by button or by typing "/". */
+/**
+ * The message box: the text, a menu for picking a skill by button or by typing "/",
+ * the model with its thinking effort, and the send button.
+ */
 export function Composer({
   blocked,
   running,
+  model,
+  modelInfo,
+  effort,
+  onEffortChange,
   onSend,
   onStop
 }: {
   /** Why sending is impossible right now; empty when it is possible. */
   blocked: string
   running: boolean
+  /** The model id from the settings. */
+  model: string
+  /** What the service says about that model, once known. */
+  modelInfo: ModelInfo | null
+  effort: ReasoningEffort
+  onEffortChange: (effort: ReasoningEffort) => void
   onSend: (text: string, skill?: string) => void
   onStop: () => void
 }) {
@@ -25,6 +41,7 @@ export function Composer({
   /** The draft for which Escape closed the "/" menu, so it stays closed until the text changes. */
   const [dismissed, setDismissed] = useState<string | null>(null)
   const [active, setActive] = useState(0)
+  const [menuSide, setMenuSide] = useState<'up' | 'down'>('up')
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const areaRef = useRef<HTMLDivElement>(null)
 
@@ -35,6 +52,11 @@ export function Composer({
   const filter = slashOpen ? slash[1].toLowerCase() : ''
   const matches = visible ? skills.filter((s) => s.name.toLowerCase().includes(filter)) : []
   const activeIndex = Math.min(active, Math.max(matches.length - 1, 0))
+
+  // Below the box while it sits in the middle of a new chat, above it once it is at the bottom.
+  useLayoutEffect(() => {
+    if (visible) setMenuSide(popupSide(areaRef.current, 320))
+  }, [visible])
 
   // Read the list each time the menu opens: skills can be added while the app is running.
   useEffect(() => {
@@ -101,83 +123,99 @@ export function Composer({
   }
 
   return (
-    <div className="composer">
-      <div className="composer-main" ref={areaRef}>
-        {visible && (
-          <div className="skill-menu" id="skill-menu" role="listbox" aria-label="Skills">
-            {matches.length === 0 ? (
-              <div className="skill-empty">
-                {skills.length === 0 ? '还没有 Skill。在"设置 → Skills"里可以打开文件夹添加。' : '没有匹配的 Skill'}
+    <div
+      className="composer"
+      ref={areaRef}
+      // The whole card is the text box: a click on its padding puts the cursor in the text.
+      onMouseDown={(e) => {
+        if (e.target !== e.currentTarget) return
+        e.preventDefault()
+        inputRef.current?.focus()
+      }}
+    >
+      {visible && (
+        <div className="skill-menu" id="skill-menu" role="listbox" aria-label="Skills" data-side={menuSide}>
+          {matches.length === 0 ? (
+            <div className="skill-empty">
+              {skills.length === 0 ? '还没有 Skill。在"设置 → Skills"里可以打开文件夹添加。' : '没有匹配的 Skill'}
+            </div>
+          ) : (
+            matches.map((skill, index) => (
+              <div
+                key={skill.name}
+                role="option"
+                aria-selected={index === activeIndex}
+                className={`skill-option ${index === activeIndex ? 'skill-option-active' : ''}`}
+                title={skill.description}
+                onMouseEnter={() => setActive(index)}
+                // mousedown, not click: picking must not take focus away from the text box.
+                onMouseDown={(e) => {
+                  e.preventDefault()
+                  pick(skill.name)
+                }}
+              >
+                <span className="skill-name">{skill.name}</span>
+                {skill.description && <span className="skill-desc">{skill.description}</span>}
               </div>
-            ) : (
-              matches.map((skill, index) => (
-                <div
-                  key={skill.name}
-                  role="option"
-                  aria-selected={index === activeIndex}
-                  className={`skill-option ${index === activeIndex ? 'skill-option-active' : ''}`}
-                  title={skill.description}
-                  onMouseEnter={() => setActive(index)}
-                  // mousedown, not click: picking must not take focus away from the text box.
-                  onMouseDown={(e) => {
-                    e.preventDefault()
-                    pick(skill.name)
-                  }}
-                >
-                  <span className="skill-name">{skill.name}</span>
-                  {skill.description && <span className="skill-desc">{skill.description}</span>}
-                </div>
-              ))
-            )}
-          </div>
-        )}
-        <div className="composer-bar">
-          <button
-            type="button"
-            className="btn btn-small"
-            aria-haspopup="listbox"
-            aria-expanded={visible}
-            disabled={Boolean(blocked)}
-            onClick={() => {
-              setActive(0)
-              setMenuOpen((open) => !open)
-              inputRef.current?.focus()
-            }}
-          >
-            Skills
-          </button>
-          {picked && (
-            <span className="chip">
-              {picked}
-              <button className="chip-remove" onClick={() => setPicked(null)} aria-label={`取消使用 Skill ${picked}`}>
-                ×
-              </button>
-            </span>
+            ))
           )}
         </div>
-        <textarea
-          ref={inputRef}
-          value={draft}
-          onChange={(e) => {
-            setDraft(e.target.value)
-            setActive(0)
-          }}
-          onKeyDown={onKeyDown}
-          placeholder={blocked || '输入消息，Enter 发送，Shift+Enter 换行，输入 / 选择 Skill'}
-          disabled={Boolean(blocked)}
-          rows={3}
-          aria-controls={visible ? 'skill-menu' : undefined}
-        />
-      </div>
-      {running ? (
-        <button className="btn" onClick={onStop}>
-          停止
-        </button>
-      ) : (
-        <button className="btn btn-primary" onClick={submit} disabled={Boolean(blocked) || !draft.trim()}>
-          发送
-        </button>
       )}
+      <textarea
+        ref={inputRef}
+        value={draft}
+        onChange={(e) => {
+          setDraft(e.target.value)
+          setActive(0)
+        }}
+        onKeyDown={onKeyDown}
+        placeholder={blocked || '输入消息，Shift+Enter 换行，输入 / 选择 Skill'}
+        disabled={Boolean(blocked)}
+        rows={1}
+        aria-label="消息"
+        aria-controls={visible ? 'skill-menu' : undefined}
+      />
+      <div className="composer-bar">
+        <button
+          type="button"
+          className="btn btn-small"
+          aria-haspopup="listbox"
+          aria-expanded={visible}
+          disabled={Boolean(blocked)}
+          onClick={() => {
+            setActive(0)
+            setMenuOpen((open) => !open)
+            inputRef.current?.focus()
+          }}
+        >
+          Skills
+        </button>
+        {picked && (
+          <span className="chip">
+            {picked}
+            <button className="chip-remove" onClick={() => setPicked(null)} aria-label={`取消使用 Skill ${picked}`}>
+              ×
+            </button>
+          </span>
+        )}
+        <EffortControl model={model} modelInfo={modelInfo} effort={effort} onChange={onEffortChange} />
+        {running ? (
+          <button type="button" className="send send-stop" onClick={onStop} aria-label="停止" title="停止">
+            <StopIcon />
+          </button>
+        ) : (
+          <button
+            type="button"
+            className="send"
+            onClick={submit}
+            disabled={Boolean(blocked) || !draft.trim()}
+            aria-label="发送"
+            title="发送（Enter）"
+          >
+            <EnterIcon />
+          </button>
+        )}
+      </div>
     </div>
   )
 }

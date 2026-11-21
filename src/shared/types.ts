@@ -31,14 +31,36 @@ export interface Session {
   title: string
   workspace: string
   updatedAt: number
+  /** Put away: kept, but out of the main list. */
+  archived?: boolean
   messages: ChatMessage[]
 }
 
-export type SessionSummary = Pick<Session, 'id' | 'title' | 'workspace' | 'updatedAt'>
+export type SessionSummary = Pick<Session, 'id' | 'title' | 'workspace' | 'updatedAt' | 'archived'>
+
+/**
+ * How hard the model thinks before it answers. `default` sends nothing and leaves the choice to
+ * the service; `none` turns thinking off. The others are values of the API's `reasoning_effort`.
+ */
+export const REASONING_EFFORTS = ['default', 'none', 'low', 'high', 'max'] as const
+export type ReasoningEffort = (typeof REASONING_EFFORTS)[number]
+export const isReasoningEffort = (value: unknown): value is ReasoningEffort =>
+  (REASONING_EFFORTS as readonly unknown[]).includes(value)
+
+/** What the model service reports about the configured model. Services differ, so everything is optional. */
+export interface ModelInfo {
+  /** Readable name with the version, e.g. "DeepSeek-V4.1-Flash". */
+  name?: string
+  /** The thinking levels the model accepts. */
+  efforts?: Exclude<ReasoningEffort, 'default'>[]
+  /** The level the service uses when none is sent. */
+  defaultEffort?: Exclude<ReasoningEffort, 'default'>
+}
 
 export interface Settings {
   baseURL: string
   model: string
+  reasoningEffort: ReasoningEffort
   /** The key itself never leaves the main process. */
   hasApiKey: boolean
 }
@@ -103,6 +125,10 @@ export interface SessionEvent {
 export interface HarnessApi {
   getSettings(): Promise<Settings>
   saveSettings(input: SettingsInput): Promise<Settings>
+  /** Applies from the next message on. Resolves with the updated settings. */
+  setReasoningEffort(effort: ReasoningEffort): Promise<Settings>
+  /** Asks the model service about the configured model. Null when it has nothing to say or cannot be reached. */
+  getModelInfo(): Promise<ModelInfo | null>
   listPlugins(): Promise<PluginInfo[]>
   /** Resolves with the refreshed list. */
   setPluginEnabled(id: string, enabled: boolean): Promise<PluginInfo[]>
@@ -115,10 +141,16 @@ export interface HarnessApi {
   saveMcp(config: string): Promise<McpServerStatus[]>
   reconnectMcp(): Promise<McpServerStatus[]>
   mcpStatus(): Promise<McpServerStatus[]>
+  /** Opens the system folder dialog. Resolves with null when it is cancelled. */
   pickWorkspace(): Promise<string | null>
+  /** Folders used before that still exist, most recent first. */
+  listWorkspaces(): Promise<string[]>
   listSessions(): Promise<SessionSummary[]>
   loadSession(id: string): Promise<Session | null>
   deleteSession(id: string): Promise<void>
+  renameSession(id: string, title: string): Promise<void>
+  /** Archived sessions stay on disk and can be brought back. */
+  setSessionArchived(id: string, archived: boolean): Promise<void>
   /**
    * Starts a turn. Creates the session when `sessionId` is null. Resolves with the session id.
    * `skill` names a skill the user picked for this message.

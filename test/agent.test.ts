@@ -25,7 +25,11 @@ const call = (index: number, id: string, name: string, args: object): string[] =
 
 /** Serves one scripted response per request and records the request bodies. */
 async function fakeModel(scripts: string[][]) {
-  const requests: { messages: Record<string, any>[]; tools?: { function: { name: string } }[] }[] = []
+  const requests: {
+    messages: Record<string, any>[]
+    tools?: { function: { name: string } }[]
+    reasoning_effort?: string
+  }[] = []
   const server = http.createServer((req, res) => {
     let body = ''
     req.on('data', (d) => (body += d))
@@ -181,4 +185,31 @@ test('a picked skill and the skills list reach the model', async () => {
   assert.deepEqual(user, { role: 'user', content: 'SKILL TEXT\n\ndo it' })
   assert.equal(model.requests[0].tools, undefined, 'no tools parameter when nothing is registered')
   assert.equal(messages[0], stored, 'the stored message keeps its skill field')
+})
+
+test('the chosen reasoning effort is sent, and nothing is sent by default', async () => {
+  const model = await fakeModel([[chunk({ content: 'a' })], [chunk({ content: 'b' })], [chunk({ content: 'c' })], [chunk({ content: 'd' })]])
+  const efforts = [undefined, 'default', 'none', 'max'] as const
+  for (const reasoningEffort of efforts) {
+    await runTurn({
+      apiKey: 'test',
+      baseURL: model.baseURL,
+      model: 'fake',
+      ...(reasoningEffort ? { reasoningEffort } : {}),
+      workspace: os.tmpdir(),
+      messages: [{ role: 'user', content: 'hi' }],
+      signal: new AbortController().signal,
+      tools: new ToolRegistry(),
+      alwaysAllowed: new Set(),
+      emit: () => {},
+      checkpoint: () => {},
+      requestPermission: async () => 'deny'
+    })
+  }
+  await model.close()
+
+  assert.deepEqual(
+    model.requests.map((r) => ('reasoning_effort' in r ? r.reasoning_effort : '(absent)')),
+    ['(absent)', '(absent)', 'none', 'max']
+  )
 })

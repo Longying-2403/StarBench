@@ -2,8 +2,9 @@ import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
 import { randomUUID } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
-import type { PermissionDecision, Session, SessionEvent, SettingsInput } from '../shared/types.ts'
+import type { ModelInfo, PermissionDecision, Session, SessionEvent, SettingsInput } from '../shared/types.ts'
 import { runTurn } from './agent.ts'
+import { fetchModelInfo } from './models.ts'
 import { createKernel } from './kernel.ts'
 import type { Kernel } from './kernel.ts'
 import { McpManager } from './mcp.ts'
@@ -120,12 +121,34 @@ function send(payload: SessionEvent): void {
 function registerIpc(): void {
   ipcMain.handle('settings:get', () => store.getSettings())
   ipcMain.handle('settings:save', (_e, input: SettingsInput) => store.saveSettings(input))
+  ipcMain.handle('settings:setEffort', (_e, effort: unknown) => store.setReasoningEffort(effort))
+
+  // Asked again whenever the settings change; the answer is kept so that costs one request per model.
+  // A failure is kept for a minute only, so a service that was unreachable at startup gets another try.
+  let modelInfo: { key: string; at: number; value: Promise<ModelInfo | null> } | null = null
+  ipcMain.handle('models:info', async () => {
+    const connection = await store.getConnection().catch(() => null)
+    if (!connection) return null
+    // The key is part of it so that correcting a wrong key asks again at once.
+    const key = `${connection.baseURL}\n${connection.model}\n${connection.apiKey}`
+    const cached = modelInfo?.key === key ? modelInfo : null
+    if (cached && ((await cached.value) !== null || Date.now() - cached.at < 60_000)) return cached.value
+    const value = fetchModelInfo(connection).catch((err) => {
+      console.error('[models] could not read the model list:', err instanceof Error ? err.message : err)
+      return null
+    })
+    modelInfo = { key, at: Date.now(), value }
+    return value
+  })
 
   ipcMain.handle('workspace:pick', async () => {
     if (!mainWindow) return null
     const result = await dialog.showOpenDialog(mainWindow, { properties: ['openDirectory', 'createDirectory'] })
-    return result.canceled ? null : result.filePaths[0]
+    if (result.canceled || !result.filePaths[0]) return null
+    await store.rememberWorkspace(result.filePaths[0])
+    return result.filePaths[0]
   })
+  ipcMain.handle('workspace:list', () => store.listWorkspaces())
 
   const pluginManager = async (): Promise<PluginManager> => {
     if (!pluginsReady) throw new Error('Plugins are not available yet.')
@@ -166,6 +189,20 @@ function registerIpc(): void {
 
   ipcMain.handle('sessions:list', () => store.listSessions())
   ipcMain.handle('sessions:load', (_e, id: string) => store.loadSession(id))
+  // A running session is saved from memory at every step, which would undo a change made to its file.
+  const notWhileRunning = (id: string): void => {
+    if (activeRuns.has(id)) throw new Error('This session is running. Try again when it has finished.')
+  }
+  ipcMain.handle('sessions:rename', async (_e, id: string, title: unknown) => {
+    notWhileRunning(id)
+    const clean = typeof title === 'string' ? title.replace(/\s+/g, ' ').trim().slice(0, 120) : ''
+    if (!clean) throw new Error('A session needs a name.')
+    await store.updateSession(id, { title: clean })
+  })
+  ipcMain.handle('sessions:archive', async (_e, id: string, archived: unknown) => {
+    notWhileRunning(id)
+    await store.updateSession(id, { archived: archived === true })
+  })
   ipcMain.handle('sessions:delete', async (_e, id: string) => {
     activeRuns.get(id)?.controller.abort()
     alwaysAllowed.delete(id)
@@ -191,6 +228,10 @@ function registerIpc(): void {
       }
     }
     const current = session
+    // Writing in an archived session brings it back to the list.
+    delete current.archived
+    // Keeps the folder list in order of use. Not worth failing the message over.
+    store.rememberWorkspace(current.workspace).catch((err) => console.error('[store] could not remember the folder:', err))
     current.messages.push({ role: 'user', content: text, ...(pickedSkill ? { skill: pickedSkill } : {}) })
 
     const run: ActiveRun = { controller: new AbortController(), pending: new Set() }

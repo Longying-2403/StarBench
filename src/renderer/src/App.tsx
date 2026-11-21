@@ -1,11 +1,20 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import type { PermissionDecision, SessionSummary, Settings, ToolCall } from '../../shared/types.ts'
+import type {
+  ModelInfo,
+  PermissionDecision,
+  ReasoningEffort,
+  SessionSummary,
+  Settings,
+  ToolCall
+} from '../../shared/types.ts'
 import { Composer } from './Composer.tsx'
+import { FolderMenu } from './FolderMenu.tsx'
 import { itemsFromMessages, itemsReducer } from './items.ts'
 import type { Item } from './items.ts'
 import { SettingsDialog } from './Settings.tsx'
+import { Sidebar } from './Sidebar.tsx'
 import { errorText } from './util.ts'
 
 const api = window.harness
@@ -65,7 +74,9 @@ function ToolDetails({ call }: { call: ToolCall }) {
 function toolStatus(output: string | undefined): { label: string; failed: boolean } {
   if (output === undefined) return { label: '运行中…', failed: false }
   if (output === 'The user denied this tool call.') return { label: '已拒绝', failed: true }
-  if (output === 'Cancelled by user') return { label: '已取消', failed: true }
+  // A command stopped part-way keeps the output it had and ends with the reason in brackets.
+  if (output === 'Cancelled by user' || output.endsWith('[Cancelled by user]')) return { label: '已取消', failed: true }
+  if (/\[Timed out after \d+s\]$/.test(output)) return { label: '超时', failed: true }
   if (output.startsWith('Error:')) return { label: '失败', failed: true }
   return { label: '完成', failed: false }
 }
@@ -167,6 +178,9 @@ function PermissionBar({
 
 export function App() {
   const [settings, setSettings] = useState<Settings | null>(null)
+  const [modelInfo, setModelInfo] = useState<ModelInfo | null>(null)
+  /** Counts saves of the settings dialog. */
+  const [saves, setSaves] = useState(0)
   const [showSettings, setShowSettings] = useState(false)
   const [sessions, setSessions] = useState<SessionSummary[]>([])
   const [sessionId, setSessionId] = useState<string | null>(null)
@@ -202,6 +216,23 @@ export function App() {
     })
   }, [refreshSessions])
 
+  // The service is asked again when the connection changes; an older answer must not overwrite a newer one.
+  // `saves` covers a corrected API key, which changes none of the three values the page can see.
+  const { baseURL, model, hasApiKey } = settings ?? {}
+  useEffect(() => {
+    let current = true
+    setModelInfo(null)
+    if (hasApiKey) {
+      api.getModelInfo().then(
+        (info) => current && setModelInfo(info),
+        () => {}
+      )
+    }
+    return () => {
+      current = false
+    }
+  }, [baseURL, model, hasApiKey, saves])
+
   useEffect(() => {
     const el = scrollRef.current
     if (el && stickToBottom.current) el.scrollTop = el.scrollHeight
@@ -217,10 +248,21 @@ export function App() {
     dispatch({ type: 'reset', items: itemsFromMessages(session.messages) })
   }
 
-  const newChat = (): void => {
+  const chooseWorkspace = (dir: string): void => {
+    setWorkspace(dir)
+    try {
+      localStorage.setItem(LAST_WORKSPACE_KEY, dir)
+    } catch {
+      // Remembering the folder is a convenience; the app works without it.
+    }
+  }
+
+  /** Starts an empty chat: in the given folder, or else in the one used last. */
+  const newChat = (dir?: string): void => {
     sessionRef.current = null
     setSessionId(null)
-    setWorkspace(readLastWorkspace())
+    if (dir) chooseWorkspace(dir)
+    else setWorkspace(readLastWorkspace())
     dispatch({ type: 'reset', items: [] })
   }
 
@@ -230,15 +272,21 @@ export function App() {
     refreshSessions()
   }
 
+  const renameSession = async (id: string, title: string): Promise<void> => {
+    await api.renameSession(id, title)
+    refreshSessions()
+  }
+
+  const archiveSession = async (id: string, archived: boolean): Promise<void> => {
+    await api.setSessionArchived(id, archived)
+    // The session leaves the list, so the window moves on from it too.
+    if (archived && id === sessionId) newChat()
+    refreshSessions()
+  }
+
   const pickWorkspace = async (): Promise<void> => {
     const picked = await api.pickWorkspace()
-    if (!picked) return
-    setWorkspace(picked)
-    try {
-      localStorage.setItem(LAST_WORKSPACE_KEY, picked)
-    } catch {
-      // Remembering the folder is a convenience; the app works without it.
-    }
+    if (picked) chooseWorkspace(picked)
   }
 
   const send = async (text: string, skill?: string): Promise<void> => {
@@ -257,6 +305,15 @@ export function App() {
     }
   }
 
+  const changeEffort = (effort: ReasoningEffort): void => {
+    // Shown at once; the saved settings replace it when they come back.
+    setSettings((s) => (s ? { ...s, reasoningEffort: effort } : s))
+    api.setReasoningEffort(effort).then(setSettings, (err) => {
+      dispatch({ type: 'event', event: { type: 'error', message: errorText(err) } })
+      void api.getSettings().then(setSettings)
+    })
+  }
+
   const decide = (decision: PermissionDecision): void => {
     if (!permission) return
     void api.respondPermission(permission.id, decision)
@@ -264,86 +321,81 @@ export function App() {
   }
 
   const blocked = !settings?.hasApiKey ? '请先在设置中填写 API Key' : !workspace ? '请先选择工作文件夹' : ''
+  /** A new chat with nothing in it: the message box sits in the middle of the window. */
+  const empty = items.length === 0
 
   return (
     <div className="app">
-      <aside className="sidebar">
-        <button className="btn btn-primary" onClick={newChat} disabled={running}>
-          新对话
-        </button>
-        <nav className="sessions" aria-label="历史会话">
-          {sessions.map((s) => (
-            <div key={s.id} className={`session ${s.id === sessionId ? 'session-active' : ''}`}>
-              <button
-                className="session-open"
-                disabled={running}
-                onClick={() => void openSession(s.id)}
-                title={s.workspace}
-              >
-                {s.title}
-              </button>
-              <button
-                className="session-delete"
-                disabled={running}
-                onClick={() => void removeSession(s.id)}
-                aria-label={`删除会话 ${s.title}`}
-                title="删除"
-              >
-                ×
-              </button>
-            </div>
-          ))}
-        </nav>
-        <button className="btn" onClick={() => setShowSettings(true)}>
-          设置
-        </button>
-      </aside>
+      <Sidebar
+        sessions={sessions}
+        activeId={sessionId}
+        busy={running}
+        onNewChat={newChat}
+        onOpen={(id) => void openSession(id)}
+        onRename={renameSession}
+        onArchive={archiveSession}
+        onDelete={removeSession}
+        onSettings={() => setShowSettings(true)}
+      />
 
-      <main className="main">
-        <header className="header">
-          <span className="workspace" title={workspace}>
-            {workspace || '未选择工作文件夹'}
-          </span>
-          {/* A session is tied to the folder it started in. */}
-          {!sessionId && (
-            <button className="btn" onClick={() => void pickWorkspace()}>
-              选择文件夹
-            </button>
-          )}
-          <span className="model">{settings?.model}</span>
-        </header>
+      <main className={`main ${empty ? 'main-empty' : ''}`}>
+        {empty ? (
+          <h1 className="hero">StarBench</h1>
+        ) : (
+          <>
+            <header className="header">
+              <span className="workspace" title={workspace}>
+                {workspace || '未选择工作文件夹'}
+              </span>
+              {/* A session is tied to the folder it started in. */}
+              {!sessionId && (
+                <button className="btn" onClick={() => void pickWorkspace()}>
+                  选择文件夹
+                </button>
+              )}
+            </header>
 
-        <div
-          className="transcript"
-          ref={scrollRef}
-          onScroll={(e) => {
-            const el = e.currentTarget
-            stickToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80
-          }}
-        >
-          {items.length === 0 ? (
-            <div className="empty">
-              <h1>StarBench</h1>
-              <p>选择一个工作文件夹，然后告诉我要做什么。</p>
+            <div
+              className="transcript"
+              ref={scrollRef}
+              onScroll={(e) => {
+                const el = e.currentTarget
+                stickToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80
+              }}
+            >
+              <Transcript items={items} />
+              {running && !permission && <div className="working">工作中…</div>}
             </div>
-          ) : (
-            <Transcript items={items} />
-          )}
-          {running && !permission && <div className="working">工作中…</div>}
-        </div>
+          </>
+        )}
 
         {permission && <PermissionBar call={permission.call} onDecide={decide} />}
 
-        <Composer
-          blocked={blocked}
-          running={running}
-          onSend={(text, skill) => void send(text, skill)}
-          onStop={() => sessionId && void api.stop(sessionId)}
-        />
+        <div className="dock">
+          {/* Before the first message the folder is chosen right above the box it applies to. */}
+          {empty && <FolderMenu workspace={workspace} onChoose={chooseWorkspace} />}
+          <Composer
+            blocked={blocked}
+            running={running}
+            model={settings?.model ?? ''}
+            modelInfo={modelInfo}
+            effort={settings?.reasoningEffort ?? 'default'}
+            onEffortChange={changeEffort}
+            onSend={(text, skill) => void send(text, skill)}
+            onStop={() => sessionId && void api.stop(sessionId)}
+          />
+        </div>
       </main>
 
       {showSettings && settings && (
-        <SettingsDialog settings={settings} onClose={() => setShowSettings(false)} onSaved={setSettings} />
+        <SettingsDialog
+          settings={settings}
+          onClose={() => setShowSettings(false)}
+          onSaved={(saved) => {
+            setSettings(saved)
+            setSaves((n) => n + 1)
+          }}
+        />
       )}
     </div>
   )
