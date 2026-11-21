@@ -110,3 +110,31 @@ test('a turn streams, runs tools with permission checks and feeds results back',
   assert.equal(events.at(-1)?.type, 'turn_end')
   assert.equal(events.some((e) => e.type === 'error'), false)
 })
+
+test('a picked skill and the skills list reach the model', async () => {
+  const model = await fakeModel([[chunk({ content: 'ok' })]])
+  const stored: ChatMessage = { role: 'user', content: 'do it', skill: { name: 'style', prompt: 'SKILL TEXT' } }
+  const messages: ChatMessage[] = [stored]
+  await runTurn({
+    apiKey: 'test',
+    baseURL: model.baseURL,
+    model: 'fake',
+    workspace: os.tmpdir(),
+    messages,
+    systemExtra: 'Skills:\n- style: House style',
+    signal: new AbortController().signal,
+    tools: new ToolRegistry(),
+    alwaysAllowed: new Set(),
+    emit: () => {},
+    checkpoint: () => {},
+    requestPermission: async () => 'deny'
+  })
+  await model.close()
+
+  const [system, user] = model.requests[0].messages
+  assert.ok(system.content.endsWith('\n\nSkills:\n- style: House style'))
+  // The skill text goes in front of what the user typed, and the internal field is not sent.
+  assert.deepEqual(user, { role: 'user', content: 'SKILL TEXT\n\ndo it' })
+  assert.equal(model.requests[0].tools, undefined, 'no tools parameter when nothing is registered')
+  assert.equal(messages[0], stored, 'the stored message keeps its skill field')
+})

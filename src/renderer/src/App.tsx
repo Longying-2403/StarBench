@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
-import type { KeyboardEvent } from 'react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import type { PermissionDecision, SessionSummary, Settings, ToolCall } from '../../shared/types.ts'
+import { Composer } from './Composer.tsx'
 import { itemsFromMessages, itemsReducer } from './items.ts'
 import type { Item } from './items.ts'
 import { SettingsDialog } from './Settings.tsx'
@@ -31,11 +31,12 @@ function parseArgs(call: ToolCall): Record<string, unknown> {
 /** The one argument that best identifies a tool call at a glance. */
 function callSummary(call: ToolCall): string {
   const args = parseArgs(call)
-  const value = args.command ?? args.path ?? args.pattern ?? ''
+  const value = args.command ?? args.path ?? args.pattern ?? args.name ?? ''
   return typeof value === 'string' ? value : ''
 }
 
 const TOOL_LABELS: Record<string, string> = {
+  load_skill: '加载 Skill',
   read_file: '读取文件',
   write_file: '写入文件',
   edit_file: '编辑文件',
@@ -88,6 +89,7 @@ function Transcript({ items }: { items: Item[] }) {
         if (item.kind === 'user') {
           return (
             <div key={index} className="msg msg-user">
+              {item.skill && <span className="chip chip-block">Skill · {item.skill}</span>}
               {item.text}
             </div>
           )
@@ -162,7 +164,6 @@ export function App() {
   const [items, dispatch] = useReducer(itemsReducer, [])
   const [running, setRunning] = useState(false)
   const [permission, setPermission] = useState<{ id: string; call: ToolCall } | null>(null)
-  const [draft, setDraft] = useState('')
 
   // The event listener is registered once, so it reads the current session through a ref.
   const sessionRef = useRef<string | null>(null)
@@ -230,15 +231,13 @@ export function App() {
     }
   }
 
-  const send = async (): Promise<void> => {
-    const text = draft.trim()
-    if (!text || running || !workspace) return
-    setDraft('')
+  const send = async (text: string, skill?: string): Promise<void> => {
+    if (running || !workspace) return
     setRunning(true)
     stickToBottom.current = true
-    dispatch({ type: 'user', text })
+    dispatch({ type: 'user', text, skill })
     try {
-      const id = await api.send(sessionId, workspace, text)
+      const id = await api.send(sessionId, workspace, text, skill)
       sessionRef.current = id
       setSessionId(id)
       refreshSessions()
@@ -252,14 +251,6 @@ export function App() {
     if (!permission) return
     void api.respondPermission(permission.id, decision)
     setPermission(null)
-  }
-
-  const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>): void => {
-    // isComposing: Enter that confirms an IME candidate must not send the message.
-    if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
-      e.preventDefault()
-      void send()
-    }
   }
 
   const blocked = !settings?.hasApiKey ? '请先在设置中填写 API Key' : !workspace ? '请先选择工作文件夹' : ''
@@ -333,25 +324,12 @@ export function App() {
 
         {permission && <PermissionBar call={permission.call} onDecide={decide} />}
 
-        <div className="composer">
-          <textarea
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            onKeyDown={onKeyDown}
-            placeholder={blocked || '输入消息，Enter 发送，Shift+Enter 换行'}
-            disabled={Boolean(blocked)}
-            rows={3}
-          />
-          {running ? (
-            <button className="btn" onClick={() => sessionId && void api.stop(sessionId)}>
-              停止
-            </button>
-          ) : (
-            <button className="btn btn-primary" onClick={() => void send()} disabled={Boolean(blocked) || !draft.trim()}>
-              发送
-            </button>
-          )}
-        </div>
+        <Composer
+          blocked={blocked}
+          running={running}
+          onSend={(text, skill) => void send(text, skill)}
+          onStop={() => sessionId && void api.stop(sessionId)}
+        />
       </main>
 
       {showSettings && settings && (

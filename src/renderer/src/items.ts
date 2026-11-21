@@ -4,7 +4,8 @@
 import type { AgentEvent, ChatMessage, ToolCall } from '../../shared/types.ts'
 
 export type Item =
-  | { kind: 'user'; text: string }
+  /** `skill` is the name of a skill the user picked for the message. */
+  | { kind: 'user'; text: string; skill?: string }
   /** `open` is true while the model is still streaming into this message. */
   | { kind: 'assistant'; reasoning: string; text: string; open: boolean }
   | { kind: 'tool'; call: ToolCall; output?: string }
@@ -14,7 +15,7 @@ export function itemsFromMessages(messages: ChatMessage[]): Item[] {
   const items: Item[] = []
   for (const message of messages) {
     if (message.role === 'user') {
-      items.push({ kind: 'user', text: message.content })
+      items.push({ kind: 'user', text: message.content, skill: message.skill?.name })
     } else if (message.role === 'assistant') {
       if (message.content || message.reasoning_content) {
         items.push({
@@ -36,7 +37,7 @@ export function itemsFromMessages(messages: ChatMessage[]): Item[] {
 
 export type ItemsAction =
   | { type: 'reset'; items: Item[] }
-  | { type: 'user'; text: string }
+  | { type: 'user'; text: string; skill?: string }
   | { type: 'event'; event: AgentEvent }
 
 function appendDelta(items: Item[], field: 'reasoning' | 'text', text: string): Item[] {
@@ -49,7 +50,7 @@ function appendDelta(items: Item[], field: 'reasoning' | 'text', text: string): 
 
 export function itemsReducer(items: Item[], action: ItemsAction): Item[] {
   if (action.type === 'reset') return action.items
-  if (action.type === 'user') return [...items, { kind: 'user', text: action.text }]
+  if (action.type === 'user') return [...items, { kind: 'user', text: action.text, skill: action.skill }]
 
   const { event } = action
   switch (event.type) {

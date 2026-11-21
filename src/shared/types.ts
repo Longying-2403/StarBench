@@ -9,7 +9,15 @@ export interface ToolCall {
 
 /** One message of the conversation, in the shape the chat completions API expects. */
 export type ChatMessage =
-  | { role: 'user'; content: string }
+  | {
+      role: 'user'
+      content: string
+      /**
+       * A skill the user picked for this message. `prompt` is the skill text exactly as it was
+       * sent to the model, kept so later requests replay the same conversation.
+       */
+      skill?: { name: string; prompt: string }
+    }
   | {
       role: 'assistant'
       content: string
@@ -54,6 +62,15 @@ export interface PluginInfo {
   error?: string
   /** Names of the tools it currently provides. */
   tools: string[]
+  /** Names of the skills it currently provides. */
+  skills: string[]
+}
+
+export interface SkillInfo {
+  name: string
+  description: string
+  /** "user" for the user's own skills folder, otherwise the id of the plugin that ships it. */
+  source: string
 }
 
 export type PermissionDecision = 'allow' | 'always' | 'deny'
@@ -81,12 +98,17 @@ export interface HarnessApi {
   /** Resolves with the refreshed list. */
   setPluginEnabled(id: string, enabled: boolean): Promise<PluginInfo[]>
   openPluginsFolder(): Promise<void>
+  listSkills(): Promise<SkillInfo[]>
+  openSkillsFolder(): Promise<void>
   pickWorkspace(): Promise<string | null>
   listSessions(): Promise<SessionSummary[]>
   loadSession(id: string): Promise<Session | null>
   deleteSession(id: string): Promise<void>
-  /** Starts a turn. Creates the session when `sessionId` is null. Resolves with the session id. */
-  send(sessionId: string | null, workspace: string, text: string): Promise<string>
+  /**
+   * Starts a turn. Creates the session when `sessionId` is null. Resolves with the session id.
+   * `skill` names a skill the user picked for this message.
+   */
+  send(sessionId: string | null, workspace: string, text: string, skill?: string): Promise<string>
   stop(sessionId: string): Promise<void>
   respondPermission(id: string, decision: PermissionDecision): Promise<void>
   onEvent(listener: (e: SessionEvent) => void): () => void

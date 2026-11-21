@@ -1,11 +1,13 @@
 import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
 import { randomUUID } from 'node:crypto'
+import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import type { PermissionDecision, Session, SessionEvent, SettingsInput } from '../shared/types.ts'
 import { runTurn } from './agent.ts'
 import { createKernel } from './kernel.ts'
 import type { Kernel } from './kernel.ts'
 import { PluginManager } from './plugins.ts'
+import { SkillStore, loadSkillTool, selectedSkillPrompt, skillsPrompt } from './skills.ts'
 import * as store from './store.ts'
 import { ToolRegistry, registerBuiltinTools } from './tools.ts'
 
@@ -23,6 +25,8 @@ let mainWindow: BrowserWindow | null = null
 
 const tools = new ToolRegistry()
 registerBuiltinTools(tools)
+const skills = new SkillStore(path.join(app.getPath('userData'), 'skills'))
+tools.register(loadSkillTool(skills), 'builtin')
 let kernel: Kernel | null = null
 let plugins: PluginManager | null = null
 /** Resolves once enabled plugins have been started; plugin IPC waits for it. */
@@ -34,6 +38,7 @@ async function startPlugins(): Promise<PluginManager> {
   plugins = new PluginManager({
     root: kernel.root,
     tools,
+    skills,
     dir: path.join(userData, 'plugins'),
     stateFile: path.join(userData, 'plugins.json')
   })
@@ -126,6 +131,13 @@ function registerIpc(): void {
     if (error) throw new Error(error)
   })
 
+  ipcMain.handle('skills:list', () => skills.list())
+  ipcMain.handle('skills:openFolder', async () => {
+    await fs.mkdir(skills.userDir, { recursive: true })
+    const error = await shell.openPath(skills.userDir)
+    if (error) throw new Error(error)
+  })
+
   ipcMain.handle('sessions:list', () => store.listSessions())
   ipcMain.handle('sessions:load', (_e, id: string) => store.loadSession(id))
   ipcMain.handle('sessions:delete', async (_e, id: string) => {
@@ -134,10 +146,13 @@ function registerIpc(): void {
     await store.deleteSession(id)
   })
 
-  ipcMain.handle('agent:send', async (_e, sessionId: string | null, workspace: string, text: string) => {
+  ipcMain.handle('agent:send', async (_e, sessionId: string | null, workspace: string, text: string, skill?: string) => {
     const connection = await store.getConnection()
     if (!connection) throw new Error('No API key configured. Open Settings and add one.')
     if (sessionId && activeRuns.has(sessionId)) throw new Error('This session is already running.')
+    // Loaded before anything is saved, so a skill that vanished fails the send instead of the turn.
+    const pickedSkill = skill ? { name: skill, prompt: selectedSkillPrompt(skill, await skills.load(skill)) } : undefined
+    const systemExtra = skillsPrompt(await skills.list())
 
     let session: Session | null = sessionId ? await store.loadSession(sessionId) : null
     if (!session) {
@@ -150,7 +165,7 @@ function registerIpc(): void {
       }
     }
     const current = session
-    current.messages.push({ role: 'user', content: text })
+    current.messages.push({ role: 'user', content: text, ...(pickedSkill ? { skill: pickedSkill } : {}) })
 
     const run: ActiveRun = { controller: new AbortController(), pending: new Set() }
     activeRuns.set(current.id, run)
@@ -170,6 +185,7 @@ function registerIpc(): void {
       ...connection,
       workspace: current.workspace,
       messages: current.messages,
+      systemExtra,
       signal: run.controller.signal,
       tools,
       alwaysAllowed: allowed,

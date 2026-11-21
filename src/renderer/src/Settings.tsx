@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
-import type { PluginInfo, Settings } from '../../shared/types.ts'
+import type { PluginInfo, Settings, SkillInfo } from '../../shared/types.ts'
 import { errorText } from './util.ts'
 
 const api = window.harness
 
 const TABS = [
   { id: 'model', label: '模型' },
-  { id: 'plugins', label: '插件' }
+  { id: 'plugins', label: '插件' },
+  { id: 'skills', label: 'Skills' }
 ] as const
 type TabId = (typeof TABS)[number]['id']
 
@@ -147,6 +148,7 @@ function PluginsTab() {
               </div>
               {plugin.description && <div className="row-desc">{plugin.description}</div>}
               {plugin.tools.length > 0 && <div className="row-meta">工具：{plugin.tools.join('、')}</div>}
+              {plugin.skills.length > 0 && <div className="row-meta">Skills：{plugin.skills.join('、')}</div>}
               {plugin.error && <div className="row-error">{plugin.error}</div>}
             </div>
             <input
@@ -158,6 +160,53 @@ function PluginsTab() {
               onChange={() => void toggle(plugin)}
               aria-label={`启用插件 ${plugin.name}`}
             />
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+}
+
+function SkillsTab() {
+  const [skills, setSkills] = useState<SkillInfo[] | null>(null)
+  const [error, setError] = useState('')
+
+  const refresh = useCallback(() => {
+    setError('')
+    api.listSkills().then(setSkills, (err) => setError(errorText(err)))
+  }, [])
+  useEffect(refresh, [refresh])
+
+  return (
+    <div className="tab-body">
+      <p className="hint">
+        Skill 是一个文件夹加一份 SKILL.md，用来教模型按某种流程或规范做事。模型平时只看到名字和说明，用得上时才读正文；你也可以在输入框里输入
+        / 手动选择。
+      </p>
+      <div className="toolbar">
+        <button className="btn" onClick={() => api.openSkillsFolder().catch((err) => setError(errorText(err)))}>
+          打开 Skills 文件夹
+        </button>
+        <button className="btn" onClick={refresh}>
+          刷新
+        </button>
+      </div>
+      {error && (
+        <div className="msg-error" role="alert">
+          {error}
+        </div>
+      )}
+      {skills?.length === 0 && <p className="hint">还没有 Skill。把 Skill 文件夹放进去就能用，不需要重启。</p>}
+      <ul className="rows">
+        {skills?.map((skill) => (
+          <li key={skill.name} className="row">
+            <div className="row-main">
+              <div className="row-title">
+                {skill.name}
+                <span className="row-meta">{skill.source === 'user' ? '我的 Skill' : `来自插件 ${skill.source}`}</span>
+              </div>
+              <div className="row-desc">{skill.description || '（没有填写说明，模型无法判断何时使用它）'}</div>
+            </div>
           </li>
         ))}
       </ul>
@@ -208,6 +257,7 @@ export function SettingsDialog({
         </div>
         {tab === 'model' && <ModelTab settings={settings} onClose={onClose} onSaved={onSaved} />}
         {tab === 'plugins' && <PluginsTab />}
+        {tab === 'skills' && <SkillsTab />}
       </div>
     </div>
   )

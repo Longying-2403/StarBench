@@ -15,6 +15,8 @@ export interface TurnOptions {
   workspace: string
   /** Conversation so far, ending with the new user message. Mutated in place as the turn proceeds. */
   messages: ChatMessage[]
+  /** Extra system prompt text, such as the list of available skills. */
+  systemExtra?: string
   signal: AbortSignal
   /** Read on every model request, so tools added mid-turn are picked up at the next step. */
   tools: Pick<ToolRegistry, 'definitions' | 'needsPermission' | 'execute'>
@@ -27,9 +29,9 @@ export interface TurnOptions {
   checkpoint(): void
 }
 
-function systemPrompt(workspace: string): string {
+function systemPrompt(workspace: string, extra?: string): string {
   const shell = process.platform === 'win32' ? 'PowerShell' : '/bin/sh'
-  return [
+  const base = [
     'You are a coding agent running inside a desktop app on the user\'s computer.',
     'You help with software tasks by reading and editing files and running commands through the provided tools.',
     '',
@@ -45,6 +47,7 @@ function systemPrompt(workspace: string): string {
     '- The user approves file changes and commands individually. If a request is denied, do not retry it unchanged; adjust or ask.',
     '- When the work is done, reply with a short summary of what changed. Answer in the language the user writes in.'
   ].join('\n')
+  return extra ? `${base}\n\n${extra}` : base
 }
 
 /** Reads one streamed assistant message, emitting deltas as they arrive. */
@@ -62,7 +65,7 @@ async function streamAssistant(
         // reasoning_content is not in the SDK's message type, but DeepSeek requires it
         // to be passed back on every assistant message when tools are in the request.
         messages: [
-          { role: 'system', content: systemPrompt(opts.workspace) },
+          { role: 'system', content: systemPrompt(opts.workspace, opts.systemExtra) },
           ...(opts.messages as unknown as OpenAI.Chat.ChatCompletionMessageParam[])
         ],
         // The API rejects an empty tools array.
@@ -101,7 +104,12 @@ async function streamAssistant(
   return message
 }
 
-function toApiToolCalls(message: ChatMessage): ChatMessage {
+/** Converts a stored message into the shape the API expects. */
+function toApiMessage(message: ChatMessage): ChatMessage {
+  if (message.role === 'user') {
+    // A skill the user picked travels in front of what they typed; the API knows no `skill` field.
+    return { role: 'user', content: message.skill ? `${message.skill.prompt}\n\n${message.content}` : message.content }
+  }
   // Stored tool calls are flat; the API wants them wrapped as { type, function }.
   if (message.role !== 'assistant' || !message.tool_calls) return message
   return {
@@ -121,7 +129,7 @@ export async function runTurn(opts: TurnOptions): Promise<void> {
 
   try {
     for (let step = 0; step < MAX_STEPS; step++) {
-      const assistant = await streamAssistant(client, { ...opts, messages: stored.map(toApiToolCalls) })
+      const assistant = await streamAssistant(client, { ...opts, messages: stored.map(toApiMessage) })
       if (assistant.content || assistant.tool_calls || assistant.reasoning_content) stored.push(assistant)
       opts.emit({ type: 'assistant_done' })
       opts.checkpoint()

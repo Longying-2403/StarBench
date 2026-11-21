@@ -1,9 +1,10 @@
 // Finds plugins on disk and starts or stops them on the kernel.
 //
 // A plugin is a folder under the plugins directory with a package.json and an
-// ES module exporting `apply(ctx, config)` and optionally `inject`. Plugins
-// run inside the main process with its full privileges, so each one stays off
-// until the user enables it.
+// ES module exporting `apply(ctx, config)` and optionally `inject`. It may also
+// ship a `skills/` folder, and may consist of nothing else. Plugins run inside
+// the main process with its full privileges, so each one stays off until the
+// user enables it.
 
 import type { Context, Fiber } from 'cordis'
 import { promises as fs } from 'node:fs'
@@ -11,6 +12,7 @@ import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import type { PluginInfo } from '../shared/types.ts'
 import { readJson, writeJson } from './json-file.ts'
+import type { SkillStore } from './skills.ts'
 import type { ToolRegistry } from './tools.ts'
 
 /** How long enabling waits for a plugin to start before reporting it as still waiting. */
@@ -38,14 +40,18 @@ interface PluginModule {
 }
 
 interface Running {
-  fiber: Fiber
+  /** Absent for a plugin that only ships skills. */
+  fiber?: Fiber
   inject: string[]
   error?: string
+  removeSkills?: () => void
 }
 
 export interface PluginManagerOptions {
   root: Context
   tools: ToolRegistry
+  /** When given, an enabled plugin's `skills/` folder is added to it. */
+  skills?: Pick<SkillStore, 'addRoot' | 'list'>
   /** Folder holding one sub-folder per plugin. */
   dir: string
   /** JSON file remembering which plugins are enabled and their config. */
@@ -102,6 +108,7 @@ export class PluginManager {
 
   async list(): Promise<PluginInfo[]> {
     const tools = this.opts.tools.list()
+    const skills = (await this.opts.skills?.list()) ?? []
     const infos: PluginInfo[] = []
     for (const id of await this.discover()) {
       const manifest = (await this.readManifest(id)) ?? {}
@@ -113,12 +120,13 @@ export class PluginManager {
         description: typeof manifest.description === 'string' ? manifest.description : '',
         enabled: Boolean(this.state[id]?.enabled),
         status: 'disabled',
-        tools: tools.filter((t) => t.source === id).map((t) => t.name)
+        tools: tools.filter((t) => t.source === id).map((t) => t.name),
+        skills: skills.filter((s) => s.source === id).map((s) => s.name)
       }
       const loadError = this.loadErrors.get(id)
       if (running) {
-        const state = running.fiber.state as number
-        if (state === FIBER_ACTIVE) {
+        const state = running.fiber?.state as number | undefined
+        if (state === undefined || state === FIBER_ACTIVE) {
           info.status = 'active'
         } else if (state === FIBER_FAILED || running.error) {
           info.status = 'error'
@@ -172,33 +180,44 @@ export class PluginManager {
 
   private async start(id: string): Promise<void> {
     this.loadErrors.delete(id)
-    let fiber: Fiber | undefined
+    let started = false
     try {
       const folder = path.join(this.opts.dir, id)
       const manifest = (await this.readManifest(id)) ?? {}
-      const main = typeof manifest.main === 'string' && manifest.main ? manifest.main : 'index.js'
+      const declaredMain = typeof manifest.main === 'string' && manifest.main ? manifest.main : undefined
+      const main = declaredMain ?? 'index.js'
       const entry = path.resolve(folder, main)
       const relative = path.relative(folder, entry)
       if (relative.startsWith('..') || path.isAbsolute(relative)) {
         throw new Error(`"main" points outside the plugin folder: ${main}`)
       }
+      const skillsDir = path.join(folder, 'skills')
+      const hasSkills = Boolean(this.opts.skills) && (await isDirectory(skillsDir))
+      const hasEntry = await fs.stat(entry).then((s) => s.isFile(), () => false)
+      if (!hasEntry && (declaredMain || !hasSkills)) throw new Error(`Entry file not found: ${main}`)
+
+      const running: Running = { inject: [] }
+      if (hasSkills) running.removeSkills = this.opts.skills?.addRoot(skillsDir, id)
+      this.running.set(id, running)
+      started = true
+      // A plugin without code only contributes its skills.
+      if (!hasEntry) return
+
       // The query string makes Node evaluate the entry file again after a disable/enable.
       // Files it imports stay cached, so deeper code changes still need an app restart.
       const url = `${pathToFileURL(entry).href}?v=${Date.now()}`
       const plugin = resolveModule((await import(/* @vite-ignore */ url)) as Record<string, unknown>)
-      const inject = injectNames(plugin.inject)
+      running.inject = injectNames(plugin.inject)
 
       // The wrapper pins the Cordis name to the plugin id, which is how tools are attributed.
-      const started = this.opts.root.plugin(
-        { name: id, inject, apply: (ctx: Context, config: unknown) => plugin.apply(ctx, config) },
+      const fiber = this.opts.root.plugin(
+        { name: id, inject: running.inject, apply: (ctx: Context, config: unknown) => plugin.apply(ctx, config) },
         this.state[id]?.config ?? {}
       )
-      fiber = started
-      const running: Running = { fiber: started, inject }
-      this.running.set(id, running)
+      running.fiber = fiber
 
       const outcome = await Promise.race([
-        Promise.resolve(started).then(
+        Promise.resolve(fiber).then(
           () => undefined,
           (err: unknown) => describe(err)
         ),
@@ -206,8 +225,9 @@ export class PluginManager {
       ])
       if (outcome !== undefined) running.error = outcome
     } catch (err) {
+      // The module could not be loaded: undo whatever was set up before the failure.
+      if (started) await this.stop(id)
       this.loadErrors.set(id, describe(err))
-      if (fiber) await this.stop(id)
     }
   }
 
@@ -215,9 +235,17 @@ export class PluginManager {
     const running = this.running.get(id)
     if (!running) return
     this.running.delete(id)
+    running.removeSkills?.()
     // Disposing the fiber undoes every effect the plugin created, including its tools.
-    await running.fiber.dispose().catch((err: unknown) => {
+    await running.fiber?.dispose().catch((err: unknown) => {
       console.error(`[plugins] ${id} failed while stopping: ${describe(err)}`)
     })
   }
+}
+
+function isDirectory(dir: string): Promise<boolean> {
+  return fs.stat(dir).then(
+    (s) => s.isDirectory(),
+    () => false
+  )
 }
