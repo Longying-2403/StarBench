@@ -11,6 +11,13 @@ export type Item =
   | { kind: 'tool'; call: ToolCall; output?: string }
   /** `hint` marks errors that are shown with a way out instead of as plain text. */
   | { kind: 'error'; message: string; hint?: ErrorHint }
+  /** Something worth knowing that did not stop the turn. */
+  | { kind: 'notice'; text: string }
+
+/** What the notices say, by the code they come with. */
+const NOTICES: Record<Extract<AgentEvent, { type: 'notice' }>['code'], string> = {
+  'fast-mode-refused': '这个模型在当前账户下不支持 Fast Mode，已经自动关闭，这条消息按普通速度发送。'
+}
 
 export function itemsFromMessages(messages: ChatMessage[]): Item[] {
   const items: Item[] = []
@@ -68,6 +75,8 @@ export function itemsReducer(items: Item[], action: ItemsAction): Item[] {
       return items.map((i) => (i.kind === 'tool' && i.call.id === event.id ? { ...i, output: event.output } : i))
     case 'error':
       return [...items, { kind: 'error', message: event.message, ...(event.hint ? { hint: event.hint } : {}) }]
+    case 'notice':
+      return [...items, { kind: 'notice', text: NOTICES[event.code] ?? event.message }]
     default:
       return items
   }

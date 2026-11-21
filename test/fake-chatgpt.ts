@@ -33,7 +33,7 @@ export interface Knobs {
   tamper: null | 'nonce' | 'audience' | 'signature'
   /** The status revocation answers with. */
   revokeStatus: number
-  /** How the Responses API answers. `no-fast` refuses requests that ask for faster answers. */
+  /** How the Responses API answers. `no-fast`: the model has no faster answers, and requests that ask for them are refused. */
   responses: 'ok' | 'usage-limit' | 'usage-limit-http' | 'cut-off' | 'reject-token-once' | 'no-fast'
 }
 
@@ -175,11 +175,10 @@ export async function startFakeChatGpt(port = 0): Promise<FakeChatGpt> {
       ])
     }
     if (knobs.responses === 'cut-off') return stream([{ type: 'response.output_text.delta', delta: 'Half an ans' }])
-    if (knobs.responses === 'no-fast' && body.service_tier) {
-      return json(res, 400, {
-        error: { code: 'subscription_sharing_unsupported_capability', message: 'This request field is not available here.', param: 'service_tier' }
-      })
-    }
+    // Faster answers go by one name here ("priority"); the name the API also takes is turned down,
+    // in the bare shape the real service uses for it. Some models have no faster answers at all.
+    const tier = body.service_tier
+    if (tier && (tier !== 'priority' || knobs.responses === 'no-fast')) return json(res, 400, { detail: `Unsupported service_tier: ${tier}` })
     if (last?.type === 'function_call_output') {
       const text = `The file says: ${String(last.output).replace(/^\d+\t/, '')}`
       return stream([

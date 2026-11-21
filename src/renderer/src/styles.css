@@ -1403,6 +1403,16 @@ a.btn {
   margin-left: 0;
 }
 
+/* Something worth knowing that did not stop the turn */
+.msg-notice {
+  padding: 6px 10px;
+  border-left: 3px solid var(--warn);
+  border-radius: 4px;
+  background: var(--raised);
+  color: var(--muted);
+  font-size: 13px;
+}
+
 /* An error with something to do about it */
 .error-notice {
   display: flex;

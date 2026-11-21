@@ -267,6 +267,8 @@ export type AgentEvent =
   | { type: 'permission_request'; id: string; call: ToolCall }
   | { type: 'turn_end' }
   | { type: 'error'; message: string; hint?: ErrorHint }
+  /** Something the person should know that did not stop the turn. `code` is what the page words it by. */
+  | { type: 'notice'; code: 'fast-mode-refused'; message: string }
 
 export interface SessionEvent {
   sessionId: string

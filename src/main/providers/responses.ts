@@ -109,12 +109,19 @@ function planFailure(failure: Failure): Error {
     failure.requestID ? `request ${failure.requestID}` : ''
   ].filter(Boolean)
   const detail = said.length ? ` (${said.join(', ')})` : ''
-  // The one request field of this app's that is the person's own choice, and so theirs to take back.
-  const advice = failure.param?.includes('service_tier') ? ' Turn Fast Mode off for this model and send the message again.' : ''
-  const text = `${known || (failure.message ?? 'The service reported that the request failed.')}${advice}${detail}`
+  const text = `${known || (failure.message ?? 'The service reported that the request failed.')}${detail}`
   if (failure.code === 'subscription_sharing_usage_limit_exceeded') return new ServiceError(text, 'chatgpt-usage', failure.status)
   // The status stays readable: a 401 is what makes the caller try a newer token.
   return Object.assign(new Error(text), failure.status ? { status: failure.status } : {})
+}
+
+/**
+ * Whether a request was turned down for the service tier it named. Faster answers exist for some
+ * models and accounts only, and the service says so in more than one shape: an error naming the
+ * parameter, or a bare `{"detail": "Unsupported service_tier: ..."}`.
+ */
+function tierRefused(err: unknown): boolean {
+  return err instanceof OpenAI.APIError && err.status === 400 && /service_tier/i.test(`${err.param ?? ''} ${err.message}`)
 }
 
 function clientFor(connection: Connection): OpenAI {
@@ -150,9 +157,9 @@ async function run(request: ModelRequest, withSummary: boolean): Promise<ModelRe
         },
         // Without stored responses, this is what lets the model pick its reasoning up again after a tool call.
         include: ['reasoning.encrypted_content'],
-        // "Fast mode": the same model writing faster, at about twice the price. The service may still
-        // answer at the usual speed (and price) when it has no room.
-        ...(connection.fast ? { service_tier: 'fast' as const } : {}),
+        // "Fast mode": the same model writing faster, at about twice the price. On the wire it goes by
+        // its older name: the API takes both, a ChatGPT sign-in only this one ("fast" is refused there).
+        ...(connection.fast ? { service_tier: 'priority' as const } : {}),
         store: false,
         stream: true
       },
@@ -211,6 +218,11 @@ async function run(request: ModelRequest, withSummary: boolean): Promise<ModelRe
     if (signal.aborted) return { message }
     // Nothing reached the user yet, so the request can simply be made again without the summary.
     if (withSummary && !streamed && summaryRefused(err)) return run(request, false)
+    // Likewise without the faster answers, which this model or account turns out not to have.
+    if (connection.fast && !streamed && tierRefused(err)) {
+      request.onFastRefused?.()
+      return run({ ...request, connection: { ...connection, fast: false } }, withSummary)
+    }
     if (connection.plan && err instanceof OpenAI.APIError) {
       throw planFailure({ code: err.code, message: err.message, status: err.status, param: err.param, requestID: err.requestID })
     }

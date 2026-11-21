@@ -138,6 +138,11 @@ export function setFastMode(on: unknown): Promise<Settings> {
   return mutate((settings) => model.setFast(settings, on === true))
 }
 
+/** Takes the choice back for a model the service turned out not to give faster answers. */
+export function dropFastMode(providerId: string, modelId: string): Promise<Settings> {
+  return mutate((settings) => model.setFastFor(settings, providerId, modelId, false))
+}
+
 /** Moves a folder to the front of the remembered ones. */
 export async function rememberWorkspace(dir: string): Promise<void> {
   await mutate((settings) => ({ ...settings, recentWorkspaces: mergeFolders([[dir], settings.recentWorkspaces ?? []]) }))

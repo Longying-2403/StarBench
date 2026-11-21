@@ -46,6 +46,11 @@ export interface ModelRequest {
   signal: AbortSignal
   onText(delta: string): void
   onReasoning(delta: string): void
+  /**
+   * Called when the service turned down the faster answers `connection.fast` asked for (not
+   * every model or account has them) and the request went out again without.
+   */
+  onFastRefused?(): void
 }
 
 export interface ModelReply {

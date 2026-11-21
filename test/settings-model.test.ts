@@ -157,6 +157,11 @@ test('faster answers are remembered for each model, and offered only where the s
   settings = model.saveProvider(settings, { id: 'openai', name: 'OpenAI', kind: 'openai-responses', baseURL: 'https://api.openai.com/v1', model: 'gpt-6.2-sol' })
   assert.equal(model.toPublic(settings).fastMode, true)
 
+  // It can be taken back for a model by name, whichever provider is in use at that moment.
+  const elsewhere = model.setFastFor({ ...settings, activeProviderId: 'deepseek' }, 'openai', 'gpt-6.2-sol', false)
+  assert.equal(elsewhere.providers[1].fast, undefined)
+  assert.equal(model.setFastFor(settings, 'ghost', 'gpt-6.2-sol', false), settings)
+
   settings = model.setFast(settings, false)
   assert.equal(settings.providers[1].fast, undefined)
   assert.equal(model.toPublic(settings).fastMode, false)

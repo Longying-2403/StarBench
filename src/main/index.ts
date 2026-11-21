@@ -345,6 +345,9 @@ function registerIpc(): void {
       alwaysAllowed: allowed,
       emit: (event) => send({ sessionId: current.id, event }),
       checkpoint,
+      onFastRefused: () => {
+        store.dropFastMode(connection.provider, connection.model).catch((err) => console.error('[store] could not switch fast mode off:', err))
+      },
       requestPermission: (call) =>
         new Promise<PermissionDecision>((resolve) => {
           const id = randomUUID()

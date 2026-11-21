@@ -28,6 +28,8 @@ export interface TurnOptions {
   requestPermission(call: ToolCall): Promise<PermissionDecision>
   /** Called whenever `messages` reached a consistent state worth persisting. */
   checkpoint(): void
+  /** Called when the service would not give this model the faster answers that were asked for, so the choice can be taken back. */
+  onFastRefused?(): void
 }
 
 function systemPrompt(workspace: string, extra?: string): string {
@@ -100,17 +102,28 @@ async function ask(adapter: ProviderAdapter, request: ModelRequest): Promise<Mod
 export async function runTurn(opts: TurnOptions): Promise<void> {
   const adapter = adapterFor(opts.connection.kind)
   const stored = opts.messages
+  let connection = opts.connection
 
   try {
     for (let step = 0; step < MAX_STEPS; step++) {
       const { message: assistant, stopped } = await ask(adapter, {
-        connection: opts.connection,
+        connection,
         system: systemPrompt(opts.workspace, opts.systemExtra),
         messages: stored,
         tools: opts.tools.specs(),
         signal: opts.signal,
         onText: (text) => opts.emit({ type: 'text_delta', text }),
-        onReasoning: (text) => opts.emit({ type: 'reasoning_delta', text })
+        onReasoning: (text) => opts.emit({ type: 'reasoning_delta', text }),
+        onFastRefused: () => {
+          // Not asked again for the rest of the turn: it would be refused at every step.
+          connection = { ...connection, fast: false }
+          opts.emit({
+            type: 'notice',
+            code: 'fast-mode-refused',
+            message: 'The service does not offer Fast Mode for this model here. It was switched off and the message sent at the usual speed.'
+          })
+          opts.onFastRefused?.()
+        }
       })
       if (assistant.content || assistant.tool_calls || assistant.reasoning_content) stored.push(assistant)
       opts.emit({ type: 'assistant_done' })

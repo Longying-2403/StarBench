@@ -308,14 +308,20 @@ export function setEffort(settings: StoredSettings, effort: ReasoningEffort): St
   return { ...settings, providers: settings.providers.map((p) => (p === active ? next : p)) }
 }
 
+/** Turns faster answers on or off for one model of one provider. */
+export function setFastFor(settings: StoredSettings, providerId: string, model: string, on: boolean): StoredSettings {
+  const provider = settings.providers.find((p) => p.id === providerId)
+  // Like the effort, the choice belongs to a model.
+  if (!provider || !model) return settings
+  const others = (provider.fast ?? []).filter((m) => m !== model)
+  const fast = on ? [...others, model] : others
+  const { fast: _dropped, ...rest } = provider
+  const next: StoredProvider = fast.length ? { ...rest, fast } : rest
+  return { ...settings, providers: settings.providers.map((p) => (p === provider ? next : p)) }
+}
+
 /** Turns faster answers on or off for the active provider's current model. */
 export function setFast(settings: StoredSettings, on: boolean): StoredSettings {
   const active = activeProvider(settings)
-  // Like the effort, the choice belongs to a model.
-  if (!active.model) return settings
-  const others = (active.fast ?? []).filter((m) => m !== active.model)
-  const fast = on ? [...others, active.model] : others
-  const { fast: _dropped, ...rest } = active
-  const next: StoredProvider = fast.length ? { ...rest, fast } : rest
-  return { ...settings, providers: settings.providers.map((p) => (p === active ? next : p)) }
+  return setFastFor(settings, active.id, active.model, on)
 }

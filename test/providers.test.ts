@@ -457,7 +457,17 @@ test("faster answers are asked for in each service's own way, and given up when 
   }))
   await turn(connection('openai-responses', openai.baseURL), [{ role: 'user', content: 'hi' }])
   await turn(connection('openai-responses', openai.baseURL, { fast: true }), [{ role: 'user', content: 'hi' }])
-  assert.deepEqual(openai.posts().map((p) => p.body.service_tier), [undefined, 'fast'])
+  assert.deepEqual(openai.posts().map((p) => p.body.service_tier), [undefined, 'priority'])
+  // A model without faster answers refuses the tier; the request goes out again without it.
+  const picky = await fakeService((seen) =>
+    seen.body?.service_tier
+      ? { status: 400, type: 'application/json', body: JSON.stringify({ error: { message: 'This model does not support the requested service tier.', type: 'invalid_request_error', param: 'service_tier' } }) }
+      : { body: sse([{ type: 'response.output_text.delta', delta: 'ok' } as never, { type: 'response.completed', response: { status: 'completed' } } as never]) }
+  )
+  const settled = await turn(connection('openai-responses', picky.baseURL, { fast: true }), [{ role: 'user', content: 'hi' }])
+  assert.deepEqual([settled.errors, settled.text], [[], 'ok'])
+  assert.deepEqual(picky.posts().map((p) => p.body.service_tier), ['priority', undefined])
+  assert.equal(settled.events.filter((e) => e.type === 'notice').length, 1)
 
   // Claude: a speed, which only the real API is sent.
   const params = (baseURL: string, fast: boolean) =>

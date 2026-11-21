@@ -153,6 +153,13 @@ function Transcript({ items, onOpenSettings }: { items: Item[]; onOpenSettings: 
           )
         }
         if (item.kind === 'tool') return <ToolCard key={index} item={item} />
+        if (item.kind === 'notice') {
+          return (
+            <div key={index} className="msg msg-notice" role="status">
+              {item.text}
+            </div>
+          )
+        }
         if (item.hint === 'chatgpt-usage') {
           return (
             <ErrorNotice
@@ -247,6 +254,8 @@ export function App() {
     })
     refreshSessions()
     return api.onEvent(({ sessionId: id, event }) => {
+      // The switch was taken back for the model, whichever session found out; the page shows it at once.
+      if (event.type === 'notice' && event.code === 'fast-mode-refused') setSettings((s) => (s ? { ...s, fastMode: false } : s))
       if (id !== sessionRef.current) return
       if (event.type === 'permission_request') setPermission({ id: event.id, call: event.call })
       if (event.type === 'turn_end') {

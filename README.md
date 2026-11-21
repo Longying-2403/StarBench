@@ -50,7 +50,7 @@ npm run dev
 | xAI | OpenAI 兼容（Chat Completions） | 尚未用真实接口测试 |
 | OpenAI | Responses API | 尚未用真实接口测试 |
 | Anthropic | Messages API | 尚未用真实接口测试 |
-| ChatGPT 套餐 | Responses API，用 ChatGPT 账号登录 | 不需要 API Key。尚未用真实账号测试 |
+| ChatGPT 套餐 | Responses API，用 ChatGPT 账号登录 | 不需要 API Key。用真实账户走通过登录和对话 |
 | 其他服务 | 三种类型任选 | 填接口地址即可，多数第三方服务选"OpenAI 兼容" |
 
 标"尚未用真实接口测试"的几种，只对照各家的文档、用本地模拟的服务验证过请求和响应的处理。
@@ -64,7 +64,8 @@ API Key 是按量计费的，和聊天产品的订阅分开。OpenAI 为开源�
 - 能用哪些模型由账号的套餐决定，应用从 OpenAI 返回的列表里取。
 - 达到用量上限时应用会停下来，给出去 ChatGPT 用量页面的入口，不会自己改用别的付费方式。
 - OpenAI 把这项功能标为预览，能不能用取决于你的账号和 OpenAI 开放的范围。应用按它的要求发请求：不保存会话（`store: false`）、流式返回、工具放在一个命名空间里。
-- **尚未用真实的 ChatGPT 账号测试过。** 整个流程对照文档实现，用本地模拟的登录服务（[`test/fake-chatgpt.ts`](test/fake-chatgpt.ts)）验证。
+- ChatGPT Business 的工作空间需要管理员先放行：在 [admin.openai.com](https://admin.openai.com/external-access) 的"外部访问（External access）"里，把"所有开源软件 (OSS)"的"使用 ChatGPT 套餐"设为允许。没有放行时，登录页面会显示"你所在组织限制对此开源应用的访问"（`3p_delegated_access_policy_denied`）。
+- 登录、选模型和对话已经用真实的 ChatGPT 账户走通过。不常遇到的分支（令牌到期续期、达到用量上限、撤销授权等）只对照文档实现，用本地模拟的登录服务（[`test/fake-chatgpt.ts`](test/fake-chatgpt.ts)）验证过。
 - 登录按钮按 OpenAI 的要求使用原文 "Continue with ChatGPT"；它还要求按钮带 ChatGPT 的图标，目前没有加。
 
 其他家的订阅不能这样用：Anthropic 不允许第三方应用提供 Claude.ai 登录或使用订阅额度，xAI 没有公开面向第三方应用的登录方式，所以这两家只能用 API Key。
@@ -74,7 +75,8 @@ API Key 是按量计费的，和聊天产品的订阅分开。OpenAI 为开源�
 - 对话中途换模型时，之前的文字、工具调用和结果都会带过去；各家模型不公开的思考内容（加密的或带签名的）只交还给写下它的那个服务。
 - Anthropic 的部分模型出于安全原因可能拒绝某个请求。对支持的模型，应用会让服务自动改由另一个模型回答（`fallbacks`，测试版功能），不成功时显示拒绝的提示。
 - 模型给出的工具参数不完整时（例如输出被截断），工具不会执行，错误会交还给模型让它重来。
-- Fast Mode 用的是各家自己的开关，只在官方接口上发送：OpenAI 是 `service_tier: "fast"`（API Key 和 ChatGPT 套餐登录都可以开），Anthropic 是 `speed: "fast"`（目前是 Claude Fable 5.2、Mythos 5.2 和 Opus 5.5）。DeepSeek 和 xAI 没有这个选项。Anthropic 的 Fast Mode 有单独的限流，用完时应用会自动按普通速度重发这一次请求。尚未用真实接口测试；ChatGPT 套餐这条通道是否接受这个开关，OpenAI 的文档没有写，被拒绝时应用会提示把它关掉。
+- Fast Mode 用的是各家自己的开关，只在官方接口上发送：OpenAI 是 `service_tier: "priority"`（API Key 和 ChatGPT 套餐登录都可以开；ChatGPT 这条通道不认 `"fast"` 这个新名字，所以统一用旧名字），Anthropic 是 `speed: "fast"`（目前是 Claude Fable 5.2、Mythos 5.2 和 Opus 5.5）。DeepSeek 和 xAI 没有这个选项。
+- 不是每个模型和账户都有 Fast Mode。服务拒绝时，应用会自动按普通速度重发这条消息，把这个模型的开关关掉，并在对话里说明。Anthropic 的 Fast Mode 另有单独的限流，用完时这一次请求同样会改按普通速度发送。
 - 思考档位在服务不说明模型支持哪些时按上面的默认表给出。模型不认识的档位（例如旧模型不认识"最高"）会在发消息时由服务报错。
 
 其他命令：

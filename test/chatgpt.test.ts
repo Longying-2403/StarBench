@@ -280,7 +280,7 @@ test('signing out tells the service, and reports when it could not be told', asy
 })
 
 /** Runs one turn with the built-in tools in a folder that holds note.txt, and reports what happened. */
-async function turn(conn: Connection, messages: ChatMessage[]) {
+async function turn(conn: Connection, messages: ChatMessage[], onFastRefused?: () => void) {
   const workspace = await mkdtemp(path.join(os.tmpdir(), 'starbench-chatgpt-'))
   await writeFile(path.join(workspace, 'note.txt'), 'the magic word is plover')
   const tools = new ToolRegistry()
@@ -295,7 +295,8 @@ async function turn(conn: Connection, messages: ChatMessage[]) {
     alwaysAllowed: new Set(),
     emit: (e) => events.push(e),
     checkpoint: () => {},
-    requestPermission: async () => 'allow'
+    requestPermission: async () => 'allow',
+    ...(onFastRefused ? { onFastRefused } : {})
   })
   const errors = events.filter((e): e is Extract<AgentEvent, { type: 'error' }> => e.type === 'error')
   const text = events.map((e) => (e.type === 'text_delta' ? e.text : '')).join('')
@@ -405,12 +406,21 @@ test('requests on a ChatGPT plan carry the token of the moment, the tools in a g
   assert.equal('service_tier' in posts().at(-1)?.body, false)
   const hurried = await turn({ ...conn, fast: true }, [{ role: 'user', content: 'hello' }])
   assert.deepEqual(hurried.errors, [])
-  assert.equal(posts().at(-1)?.body.service_tier, 'fast')
-  // Where the plan does not allow that, the refusal says what to switch off.
+  // Under the one name this route knows them by: "fast", which the API also takes, is refused here.
+  assert.equal(posts().at(-1)?.body.service_tier, 'priority')
+  assert.deepEqual(hurried.events.filter((e) => e.type === 'notice'), [])
+
+  // A model that has no faster answers refuses the request. It goes out again without asking, the
+  // person is told, the choice is taken back, and the rest of the turn does not ask again.
   fake.knobs.responses = 'no-fast'
-  const unwelcome = await turn({ ...conn, fast: true }, [{ role: 'user', content: 'hello' }])
-  assert.match(unwelcome.errors[0].message, /does not offer\. Turn Fast Mode off.*subscription_sharing_unsupported_capability, in service_tier, HTTP 400/)
-  assert.deepEqual((await turn(conn, [{ role: 'user', content: 'hello' }])).errors, [], 'without the field the same request is fine')
+  count = posts().length
+  let takenBack = 0
+  const unhurried = await turn({ ...conn, fast: true }, [{ role: 'user', content: 'What is in note.txt?' }], () => takenBack++)
+  assert.deepEqual(unhurried.errors, [])
+  assert.equal(unhurried.text, 'The file says: the magic word is plover')
+  assert.deepEqual(posts().slice(count).map((p) => p.body.service_tier), ['priority', undefined, undefined])
+  assert.deepEqual(unhurried.events.flatMap((e) => (e.type === 'notice' ? [e.code] : [])), ['fast-mode-refused'])
+  assert.equal(takenBack, 1)
 
   // A reply the service never declared complete is a lost connection, not an answer.
   fake.knobs.responses = 'cut-off'
