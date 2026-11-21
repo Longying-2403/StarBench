@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
+import type { ReactNode } from 'react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import { CHATGPT_USAGE_URL } from '../../shared/types.ts'
 import type {
   ModelInfo,
   PermissionDecision,
@@ -101,7 +103,22 @@ function ToolCard({ item }: { item: Extract<Item, { kind: 'tool' }> }) {
   )
 }
 
-function Transcript({ items }: { items: Item[] }) {
+/**
+ * An error that comes with something to do about it. `detail` is what the service said, kept
+ * small underneath for looking the problem up.
+ */
+function ErrorNotice({ title, text, detail, children }: { title: string; text: string; detail: string; children: ReactNode }) {
+  return (
+    <div className="msg error-notice" role="alert">
+      <div className="error-notice-title">{title}</div>
+      <div>{text}</div>
+      <div className="error-notice-actions">{children}</div>
+      <div className="error-notice-detail">{detail}</div>
+    </div>
+  )
+}
+
+function Transcript({ items, onOpenSettings }: { items: Item[]; onOpenSettings: () => void }) {
   return (
     <>
       {items.map((item, index) => {
@@ -136,6 +153,29 @@ function Transcript({ items }: { items: Item[] }) {
           )
         }
         if (item.kind === 'tool') return <ToolCard key={index} item={item} />
+        if (item.hint === 'chatgpt-usage') {
+          return (
+            <ErrorNotice
+              key={index}
+              title="ChatGPT 套餐：已达到用量上限"
+              text="请到 ChatGPT 的设置里查看你的套餐用量，或者给这个应用设置的用量上限。"
+              detail={item.message}
+            >
+              <a className="btn btn-primary" href={CHATGPT_USAGE_URL} target="_blank" rel="noreferrer">
+                管理用量
+              </a>
+            </ErrorNotice>
+          )
+        }
+        if (item.hint === 'chatgpt-sign-in') {
+          return (
+            <ErrorNotice key={index} title="ChatGPT 登录已失效" text="需要重新用 ChatGPT 登录，才能继续使用套餐额度。" detail={item.message}>
+              <button className="btn btn-primary" onClick={onOpenSettings}>
+                打开设置重新登录
+              </button>
+            </ErrorNotice>
+          )
+        }
         return (
           <div key={index} className="msg msg-error" role="alert">
             {item.message}
@@ -182,6 +222,8 @@ export function App() {
   /** Counts saves of the settings dialog. */
   const [saves, setSaves] = useState(0)
   const [showSettings, setShowSettings] = useState(false)
+  /** The note shown once, after the first sign-in with ChatGPT plan usage. */
+  const [welcome, setWelcome] = useState(false)
   const [sessions, setSessions] = useState<SessionSummary[]>([])
   const [sessionId, setSessionId] = useState<string | null>(null)
   const [workspace, setWorkspace] = useState(readLastWorkspace)
@@ -212,17 +254,31 @@ export function App() {
         setPermission(null)
         refreshSessions()
       }
+      // The sign-in was given up behind the page's back; what it shows about it is out of date.
+      if (event.type === 'error' && event.hint === 'chatgpt-sign-in') void api.getSettings().then(setSettings)
       dispatch({ type: 'event', event })
     })
   }, [refreshSessions])
 
+  // The welcome note sits on top of everything, so Escape closes it and nothing underneath.
+  useEffect(() => {
+    if (!welcome) return
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key !== 'Escape') return
+      e.stopImmediatePropagation()
+      setWelcome(false)
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  }, [welcome])
+
   // The service is asked again when the connection changes; an older answer must not overwrite a newer one.
   // `saves` covers a corrected API key, which changes none of the three values the page can see.
-  const { baseURL, model, hasApiKey } = settings ?? {}
+  const { activeProviderId, model, hasApiKey } = settings ?? {}
   useEffect(() => {
     let current = true
     setModelInfo(null)
-    if (hasApiKey) {
+    if (hasApiKey && model) {
       api.getModelInfo().then(
         (info) => current && setModelInfo(info),
         () => {}
@@ -231,7 +287,7 @@ export function App() {
     return () => {
       current = false
     }
-  }, [baseURL, model, hasApiKey, saves])
+  }, [activeProviderId, model, hasApiKey, saves])
 
   useEffect(() => {
     const el = scrollRef.current
@@ -302,6 +358,8 @@ export function App() {
     } catch (err) {
       setRunning(false)
       dispatch({ type: 'event', event: { type: 'error', message: errorText(err) } })
+      // A sign-in that turned out to be over is the usual reason; the page then says so by the message box.
+      void api.getSettings().then(setSettings)
     }
   }
 
@@ -314,13 +372,41 @@ export function App() {
     })
   }
 
+  const changeFast = (on: boolean): void => {
+    // Shown at once, like the effort; the saved settings replace it when they come back.
+    setSettings((s) => (s ? { ...s, fastMode: on } : s))
+    api.setFastMode(on).then(setSettings, (err) => {
+      dispatch({ type: 'event', event: { type: 'error', message: errorText(err) } })
+      void api.getSettings().then(setSettings)
+    })
+  }
+
+  const selectModel = (providerId: string, modelId: string): void => {
+    api.selectModel(providerId, modelId).then(setSettings, (err) => {
+      dispatch({ type: 'event', event: { type: 'error', message: errorText(err) } })
+    })
+  }
+
   const decide = (decision: PermissionDecision): void => {
     if (!permission) return
     void api.respondPermission(permission.id, decision)
     setPermission(null)
   }
 
-  const blocked = !settings?.hasApiKey ? '请先在设置中填写 API Key' : !workspace ? '请先选择工作文件夹' : ''
+  const active = settings?.providers.find((p) => p.id === settings.activeProviderId)
+  /** Requests go to a signed-in ChatGPT account and count against its plan. */
+  const onPlan = active?.auth === 'chatgpt' && active.hasApiKey
+  const blocked = !settings?.hasApiKey
+    ? active?.auth !== 'chatgpt'
+      ? '请先在设置中填写 API Key'
+      : active.account?.signedIn
+        ? '请先在设置中启用 ChatGPT 套餐额度'
+        : '请先在设置中用 ChatGPT 登录'
+    : !settings.model
+      ? '请先在右下角选择模型'
+      : !workspace
+        ? '请先选择工作文件夹'
+        : ''
   /** A new chat with nothing in it: the message box sits in the middle of the window. */
   const empty = items.length === 0
 
@@ -363,7 +449,7 @@ export function App() {
                 stickToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80
               }}
             >
-              <Transcript items={items} />
+              <Transcript items={items} onOpenSettings={() => setShowSettings(true)} />
               {running && !permission && <div className="working">工作中…</div>}
             </div>
           </>
@@ -377,13 +463,24 @@ export function App() {
           <Composer
             blocked={blocked}
             running={running}
-            model={settings?.model ?? ''}
+            settings={settings}
             modelInfo={modelInfo}
-            effort={settings?.reasoningEffort ?? 'default'}
             onEffortChange={changeEffort}
+            onFastChange={changeFast}
+            onSelectModel={selectModel}
+            onOpenSettings={() => setShowSettings(true)}
             onSend={(text, skill) => void send(text, skill)}
             onStop={() => sessionId && void api.stop(sessionId)}
           />
+          {/* Whose quota a message uses is said where the message is written. */}
+          {onPlan && (
+            <div className="plan-note">
+              正在使用 ChatGPT 套餐 ·{' '}
+              <a href={CHATGPT_USAGE_URL} target="_blank" rel="noreferrer">
+                管理用量
+              </a>
+            </div>
+          )}
         </div>
       </main>
 
@@ -395,7 +492,27 @@ export function App() {
             setSettings(saved)
             setSaves((n) => n + 1)
           }}
+          onWelcome={() => setWelcome(true)}
         />
+      )}
+
+      {welcome && (
+        <div className="overlay">
+          <div className="dialog dialog-small" role="dialog" aria-modal="true" aria-labelledby="welcome-title">
+            <h2 id="welcome-title">你正在使用 ChatGPT 套餐</h2>
+            <p className="plan-text">
+              在 StarBench 里用这个 ChatGPT 账号发出的请求，会计入你的 ChatGPT 套餐额度。用量可以在 ChatGPT 的设置里查看和管理。
+            </p>
+            <div className="dialog-actions">
+              <a className="btn" href={CHATGPT_USAGE_URL} target="_blank" rel="noreferrer">
+                管理用量
+              </a>
+              <button className="btn btn-primary" autoFocus onClick={() => setWelcome(false)}>
+                知道了
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   )

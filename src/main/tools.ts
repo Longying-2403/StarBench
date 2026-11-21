@@ -42,7 +42,57 @@ export interface ToolInfo {
   needsPermission: boolean
 }
 
+/** A tool as the model is told about it, independent of any provider's format. */
+export interface ToolDefinition {
+  name: string
+  description: string
+  /** JSON Schema of the arguments object. */
+  parameters: Record<string, unknown>
+}
+
 const TOOL_NAME = /^[a-zA-Z0-9_-]{1,64}$/
+
+const TYPE_CHECKS: Record<string, (value: unknown) => boolean> = {
+  string: (v) => typeof v === 'string',
+  boolean: (v) => typeof v === 'boolean',
+  array: (v) => Array.isArray(v),
+  object: (v) => typeof v === 'object' && v !== null && !Array.isArray(v),
+  null: (v) => v === null,
+  // Models now and then send a number as text; tools read numbers leniently, so that passes.
+  number: (v) => typeof v === 'number' || (typeof v === 'string' && v.trim() !== '' && Number.isFinite(Number(v))),
+  integer: (v) => typeof v === 'number' || (typeof v === 'string' && v.trim() !== '' && Number.isFinite(Number(v)))
+}
+
+/**
+ * Checks arguments against the parts of a tool's JSON Schema that show an input is incomplete or
+ * of the wrong kind: required properties, and the basic type of each value given. It is not a
+ * full schema validator; nested schemas, formats and limits are left to the tool.
+ * Returns what is wrong, or null.
+ */
+export function checkArguments(schema: Record<string, unknown>, args: Record<string, unknown>): string | null {
+  const properties = typeof schema.properties === 'object' && schema.properties !== null ? (schema.properties as Record<string, unknown>) : {}
+  /** The basic types a property may have, as far as the schema names ones this check knows. */
+  const typesOf = (key: string): string[] => {
+    const declared = properties[key]
+    if (typeof declared !== 'object' || declared === null) return []
+    const type = (declared as { type?: unknown }).type
+    return (Array.isArray(type) ? type : [type]).filter((t): t is string => typeof t === 'string' && t in TYPE_CHECKS)
+  }
+
+  const required = Array.isArray(schema.required) ? schema.required.filter((k): k is string => typeof k === 'string') : []
+  const missing = required.filter((key) => args[key] === undefined || (args[key] === null && !typesOf(key).includes('null')))
+  if (missing.length > 0) return `missing ${missing.map((k) => JSON.stringify(k)).join(', ')}`
+
+  for (const [key, value] of Object.entries(args)) {
+    // Models often write null for an optional argument they do not use.
+    if (value === null || value === undefined) continue
+    const allowed = typesOf(key)
+    if (allowed.length > 0 && !allowed.some((t) => TYPE_CHECKS[t](value))) {
+      return `${JSON.stringify(key)} must be ${allowed.join(' or ')}`
+    }
+  }
+  return null
+}
 
 function truncate(text: string): string {
   if (text.length <= MAX_OUTPUT_CHARS) return text
@@ -346,12 +396,9 @@ export class ToolRegistry {
     }))
   }
 
-  /** Tool definitions in the shape the chat completions API expects. */
-  definitions(): { type: 'function'; function: { name: string; description: string; parameters: Record<string, unknown> } }[] {
-    return [...this.tools.entries()].map(([name, t]) => ({
-      type: 'function' as const,
-      function: { name, description: t.spec.description, parameters: t.parameters }
-    }))
+  /** What the model is told about each tool. Each provider turns this into its own request format. */
+  specs(): ToolDefinition[] {
+    return [...this.tools.entries()].map(([name, t]) => ({ name, description: t.spec.description, parameters: t.parameters }))
   }
 
   /** Unknown tools need no prompt: running them only reports the error to the model. */
@@ -373,6 +420,11 @@ export class ToolRegistry {
     } catch (err) {
       return `Error: invalid tool arguments: ${(err as Error).message}`
     }
+    // A model can send arguments that parse but are incomplete, for instance when its output was
+    // cut short. Saying exactly what is wrong lets it send the call again, instead of the tool
+    // running on half an input.
+    const problem = checkArguments(tool.parameters, args)
+    if (problem) return `Error: invalid arguments for ${name}: ${problem}. Received: ${rawArgs.slice(0, 2000)}`
     try {
       const result: unknown = await tool.spec.run(args, ctx)
       if (typeof result === 'string') return truncate(result)

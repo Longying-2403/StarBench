@@ -2,9 +2,20 @@ import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
 import { randomUUID } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
-import type { ModelInfo, PermissionDecision, Session, SessionEvent, SettingsInput } from '../shared/types.ts'
+import type {
+  ModelInfo,
+  PermissionDecision,
+  ProviderInput,
+  Session,
+  SessionEvent,
+  Settings,
+  SignInOptions,
+  SignInResult
+} from '../shared/types.ts'
 import { runTurn } from './agent.ts'
-import { fetchModelInfo } from './models.ts'
+import { SignInError, startAttempt } from './chatgpt/login.ts'
+import type { Attempt } from './chatgpt/login.ts'
+import { adapterFor } from './providers/index.ts'
 import { createKernel } from './kernel.ts'
 import type { Kernel } from './kernel.ts'
 import { McpManager } from './mcp.ts'
@@ -57,7 +68,12 @@ async function startPlugins(): Promise<PluginManager> {
   return plugins
 }
 
+/** The ChatGPT sign-in under way, or the one that ended last. There is one at a time. */
+let signIn: { attempt: Attempt; outcome: Promise<SignInResult> } | null = null
+
 async function shutdown(): Promise<void> {
+  // Closes the listener a sign-in nobody finished is still holding open.
+  signIn?.attempt.cancel()
   // MCP servers are child processes; closing the connections is what stops them.
   await Promise.allSettled([mcp.dispose(), plugins?.dispose()])
   await kernel?.dispose()
@@ -65,6 +81,8 @@ async function shutdown(): Promise<void> {
 
 interface ActiveRun {
   controller: AbortController
+  /** The provider the run talks to. */
+  provider: string
   /** Permission prompts of this run that are still waiting for the user. */
   pending: Set<string>
 }
@@ -120,23 +138,91 @@ function send(payload: SessionEvent): void {
 
 function registerIpc(): void {
   ipcMain.handle('settings:get', () => store.getSettings())
-  ipcMain.handle('settings:save', (_e, input: SettingsInput) => store.saveSettings(input))
   ipcMain.handle('settings:setEffort', (_e, effort: unknown) => store.setReasoningEffort(effort))
+  ipcMain.handle('settings:setFast', (_e, on: unknown) => store.setFastMode(on))
+  ipcMain.handle('providers:save', (_e, input: ProviderInput) => store.saveProvider(input))
+  ipcMain.handle('providers:remove', (_e, id: string) => store.removeProvider(id))
+  ipcMain.handle('models:select', (_e, providerId: string, model: string) => store.selectModel(providerId, model))
+
+  ipcMain.handle('models:list', async (_e, providerId: string) => {
+    const connection = await store.getConnection(providerId)
+    if (!connection) throw new Error('This provider has no API key or sign-in yet.')
+    return adapterFor(connection.kind).listModels(connection)
+  })
+
+  /** A freshly signed-in account has no model chosen; the first one its plan lists is a sensible start. */
+  const chooseFirstModel = async (providerId: string): Promise<Settings | null> => {
+    const connection = await store.getConnection(providerId)
+    if (!connection || connection.model) return null
+    const [first] = await adapterFor(connection.kind).listModels(connection)
+    return first ? store.setProviderModel(providerId, first.id) : null
+  }
+
+  ipcMain.handle('signin:start', async (_e, raw: unknown) => {
+    const options: SignInOptions = typeof raw === 'object' && raw !== null ? raw : {}
+    const providerId = typeof options.providerId === 'string' ? options.providerId : undefined
+    const stored = providerId ? await store.signInOf(providerId) : null
+    if (stored?.tokens && options.otherAccount === true) throw new Error('Sign out before signing in with another account.')
+    // Signing in to the same account again continues its registration; anything else starts a new one.
+    const known = stored && options.otherAccount !== true ? stored : undefined
+    signIn?.attempt.cancel()
+    const attempt = await startAttempt({
+      service: store.signInService,
+      hostId: await store.signInHostId(),
+      ...(known ? { known, consent: options.consent === true } : {}),
+      // With a stand-in service there is nobody to sign in; whoever runs the test opens the address.
+      openBrowser: (url) => (store.signInIsTest ? undefined : shell.openExternal(url))
+    })
+    const outcome = attempt.result
+      .then(async (record): Promise<SignInResult> => {
+        const saved = await store.saveSignIn(providerId, record)
+        const withModel = await chooseFirstModel(saved.providerId).catch((err) => {
+          console.error('[sign-in] could not list the models of the account:', err instanceof Error ? err.message : err)
+          return null
+        })
+        // The person is in the browser at this point; the app comes back to them.
+        if (mainWindow?.isMinimized()) mainWindow.restore()
+        mainWindow?.show()
+        mainWindow?.focus()
+        return { ok: true, settings: withModel ?? saved.settings, providerId: saved.providerId, welcome: saved.welcome }
+      })
+      .catch(
+        (err): SignInResult => ({
+          ok: false,
+          reason: err instanceof SignInError ? err.reason : 'failed',
+          detail: err instanceof Error ? err.message : String(err)
+        })
+      )
+    signIn = { attempt, outcome }
+    return { url: attempt.url }
+  })
+  ipcMain.handle(
+    'signin:finish',
+    (): Promise<SignInResult> | SignInResult => signIn?.outcome ?? { ok: false, reason: 'failed', detail: 'No sign-in is under way.' }
+  )
+  ipcMain.handle('signin:cancel', () => signIn?.attempt.cancel())
+  ipcMain.handle('signin:out', async (_e, providerId: string) => {
+    // Requests stop first, then the tokens they were using are given up.
+    for (const run of activeRuns.values()) if (run.provider === providerId) run.controller.abort()
+    return store.signOut(providerId)
+  })
 
   // Asked again whenever the settings change; the answer is kept so that costs one request per model.
   // A failure is kept for a minute only, so a service that was unreachable at startup gets another try.
   let modelInfo: { key: string; at: number; value: Promise<ModelInfo | null> } | null = null
   ipcMain.handle('models:info', async () => {
     const connection = await store.getConnection().catch(() => null)
-    if (!connection) return null
+    if (!connection || !connection.model) return null
     // The key is part of it so that correcting a wrong key asks again at once.
-    const key = `${connection.baseURL}\n${connection.model}\n${connection.apiKey}`
+    const key = `${connection.provider}\n${connection.baseURL}\n${connection.model}\n${connection.apiKey}`
     const cached = modelInfo?.key === key ? modelInfo : null
     if (cached && ((await cached.value) !== null || Date.now() - cached.at < 60_000)) return cached.value
-    const value = fetchModelInfo(connection).catch((err) => {
-      console.error('[models] could not read the model list:', err instanceof Error ? err.message : err)
-      return null
-    })
+    const value = adapterFor(connection.kind)
+      .modelInfo(connection)
+      .catch((err) => {
+        console.error('[models] could not ask the service about the model:', err instanceof Error ? err.message : err)
+        return null
+      })
     modelInfo = { key, at: Date.now(), value }
     return value
   })
@@ -211,7 +297,8 @@ function registerIpc(): void {
 
   ipcMain.handle('agent:send', async (_e, sessionId: string | null, workspace: string, text: string, skill?: string) => {
     const connection = await store.getConnection()
-    if (!connection) throw new Error('No API key configured. Open Settings and add one.')
+    if (!connection) throw new Error('The model service in use has no API key or sign-in yet. Open Settings to add one.')
+    if (!connection.model) throw new Error('No model chosen yet. Pick one next to the message box.')
     if (sessionId && activeRuns.has(sessionId)) throw new Error('This session is already running.')
     // Loaded before anything is saved, so a skill that vanished fails the send instead of the turn.
     const pickedSkill = skill ? { name: skill, prompt: selectedSkillPrompt(skill, await skills.load(skill)) } : undefined
@@ -234,7 +321,7 @@ function registerIpc(): void {
     store.rememberWorkspace(current.workspace).catch((err) => console.error('[store] could not remember the folder:', err))
     current.messages.push({ role: 'user', content: text, ...(pickedSkill ? { skill: pickedSkill } : {}) })
 
-    const run: ActiveRun = { controller: new AbortController(), pending: new Set() }
+    const run: ActiveRun = { controller: new AbortController(), provider: connection.provider, pending: new Set() }
     activeRuns.set(current.id, run)
     let allowed = alwaysAllowed.get(current.id)
     if (!allowed) alwaysAllowed.set(current.id, (allowed = new Set()))
@@ -249,7 +336,7 @@ function registerIpc(): void {
     checkpoint()
 
     void runTurn({
-      ...connection,
+      connection,
       workspace: current.workspace,
       messages: current.messages,
       systemExtra,

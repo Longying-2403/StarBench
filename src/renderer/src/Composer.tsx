@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { KeyboardEvent } from 'react'
-import type { ModelInfo, ReasoningEffort, SkillInfo } from '../../shared/types.ts'
-import { EffortControl } from './EffortControl.tsx'
+import type { ModelInfo, ReasoningEffort, Settings, SkillInfo } from '../../shared/types.ts'
+import { ModelControl } from './ModelControl.tsx'
 import { EnterIcon, StopIcon } from './icons.tsx'
 import { popupSide } from './util.ts'
 
@@ -14,22 +14,26 @@ const api = window.harness
 export function Composer({
   blocked,
   running,
-  model,
+  settings,
   modelInfo,
-  effort,
   onEffortChange,
+  onFastChange,
+  onSelectModel,
+  onOpenSettings,
   onSend,
   onStop
 }: {
   /** Why sending is impossible right now; empty when it is possible. */
   blocked: string
   running: boolean
-  /** The model id from the settings. */
-  model: string
-  /** What the service says about that model, once known. */
+  /** Null until the settings have been read. */
+  settings: Settings | null
+  /** What the service says about the current model, once known. */
   modelInfo: ModelInfo | null
-  effort: ReasoningEffort
   onEffortChange: (effort: ReasoningEffort) => void
+  onFastChange: (on: boolean) => void
+  onSelectModel: (providerId: string, model: string) => void
+  onOpenSettings: () => void
   onSend: (text: string, skill?: string) => void
   onStop: () => void
 }) {
@@ -198,7 +202,16 @@ export function Composer({
             </button>
           </span>
         )}
-        <EffortControl model={model} modelInfo={modelInfo} effort={effort} onChange={onEffortChange} />
+        {settings && (
+          <ModelControl
+            settings={settings}
+            modelInfo={modelInfo}
+            onEffortChange={onEffortChange}
+            onFastChange={onFastChange}
+            onSelectModel={onSelectModel}
+            onOpenSettings={onOpenSettings}
+          />
+        )}
         {running ? (
           <button type="button" className="send send-stop" onClick={onStop} aria-label="停止" title="停止">
             <StopIcon />

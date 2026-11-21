@@ -55,7 +55,7 @@ test('registry coerces results and defaults to asking permission', async () => {
   assert.equal(await tools.execute('missing', '{}', { workspace: '.', signal }), 'Error: unknown tool "missing"')
   assert.equal(tools.needsPermission('obj'), true)
   assert.equal(tools.needsPermission('nothing'), false)
-  assert.deepEqual(tools.definitions()[0].function.parameters, { type: 'object', properties: {} })
+  assert.deepEqual(tools.specs()[0].parameters, { type: 'object', properties: {} })
 })
 
 test('the example plugin can be enabled, used, disabled and re-enabled', async () => {

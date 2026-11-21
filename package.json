@@ -26,8 +26,10 @@
     "dist": "electron-vite build && electron-builder --publish never"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^1.12.0",
     "@modelcontextprotocol/sdk": "^1.32.2",
     "cordis": "4.0.0-rc.13",
+    "jose": "^6.2.18",
     "openai": "^7.62.0"
   },
   "devDependencies": {

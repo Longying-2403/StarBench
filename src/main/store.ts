@@ -1,26 +1,20 @@
 // Settings and session persistence under Electron's per-user data directory.
-// The API key is encrypted with the OS credential store (DPAPI / Keychain / libsecret)
-// and is never written in plain text or sent to the renderer.
+// API keys and ChatGPT sign-ins are encrypted with the OS credential store (DPAPI / Keychain /
+// libsecret); they are never written in plain text or sent to the renderer.
 
 import { app, safeStorage } from 'electron'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
-import { isReasoningEffort } from '../shared/types.ts'
-import type { ReasoningEffort, Session, SessionSummary, Settings, SettingsInput } from '../shared/types.ts'
+import type { ChatGptAccount, ProviderInput, ReasoningEffort, Session, SessionSummary, Settings } from '../shared/types.ts'
+import { isReasoningEffort, offersFastMode } from '../shared/types.ts'
+import { OPENAI, canUsePlan, clientIsGone, newHostId, readRecord, refreshed, renewalDue, revoke, tokensAreDead } from './chatgpt/oauth.ts'
+import type { AuthService, LoginRecord } from './chatgpt/oauth.ts'
 import { readJson, writeJson } from './json-file.ts'
+import type { Connection } from './providers/index.ts'
+import { ServiceError } from './providers/types.ts'
+import * as model from './settings-model.ts'
+import type { StoredProvider, StoredSettings } from './settings-model.ts'
 import { MAX_RECENT_FOLDERS, mergeFolders } from './workspaces.ts'
-
-interface StoredSettings {
-  baseURL: string
-  model: string
-  reasoningEffort: ReasoningEffort
-  /** base64 of the safeStorage-encrypted key */
-  encryptedKey?: string
-  /** Folders picked as a workspace, most recent first. */
-  recentWorkspaces?: string[]
-}
-
-const DEFAULTS: StoredSettings = { baseURL: 'https://api.deepseek.com', model: 'deepseek-flash', reasoningEffort: 'default' }
 
 const settingsFile = (): string => path.join(app.getPath('userData'), 'settings.json')
 const sessionsDir = (): string => path.join(app.getPath('userData'), 'sessions')
@@ -30,55 +24,123 @@ const sessionFile = (id: string): string => {
   return path.join(sessionsDir(), `${id}.json`)
 }
 
+/**
+ * Where signing in with ChatGPT happens. For testing, STARBENCH_SIGNIN_TEST_SERVER names a
+ * stand-in; the browser is then not opened, and a sign-in made at OpenAI is left unused.
+ */
+const testServer = process.env.STARBENCH_SIGNIN_TEST_SERVER ? new URL(process.env.STARBENCH_SIGNIN_TEST_SERVER).origin : ''
+export const signInService: AuthService = testServer ? { issuer: testServer, resource: `${testServer}/v1` } : OPENAI
+export const signInIsTest = Boolean(testServer)
+
+/** Also converts a settings file written by an earlier version; the next save stores the new shape. */
 async function loadStored(): Promise<StoredSettings> {
-  const stored = { ...DEFAULTS, ...(await readJson<StoredSettings>(settingsFile())) }
-  // The file can be edited by hand; a value the API does not know must not be sent to it.
-  if (!isReasoningEffort(stored.reasoningEffort)) stored.reasoningEffort = DEFAULTS.reasoningEffort
-  if (!Array.isArray(stored.recentWorkspaces)) delete stored.recentWorkspaces
-  return stored
+  return model.readSettings(await readJson<unknown>(settingsFile()))
 }
 
-const toPublic = (s: StoredSettings): Settings => ({
-  baseURL: s.baseURL,
-  model: s.model,
-  reasoningEffort: s.reasoningEffort,
-  hasApiKey: Boolean(s.encryptedKey)
-})
+/** Sign-ins as they were decrypted, by their stored form, so each is decrypted once. */
+const opened = new Map<string, LoginRecord | null>()
 
-export async function getSettings(): Promise<Settings> {
-  return toPublic(await loadStored())
+/** The sign-in stored with a provider. Null when there is none that this computer and this service can use. */
+async function loginOf(provider: StoredProvider | undefined): Promise<LoginRecord | null> {
+  const stored = provider?.auth === 'chatgpt' ? provider.encryptedLogin : undefined
+  if (!stored) return null
+  let record = opened.get(stored)
+  if (record === undefined) {
+    try {
+      const { result } = await safeStorage.decryptStringAsync(Buffer.from(stored, 'base64'))
+      record = readRecord(JSON.parse(result))
+    } catch {
+      // Typically a profile copied from another computer or user account: as if nobody had signed in.
+      record = null
+    }
+    if (opened.size > 16) opened.clear()
+    opened.set(stored, record)
+  }
+  // Tokens are only ever used with the service that issued them.
+  return record && record.issuer === signInService.issuer && record.resource === signInService.resource ? record : null
 }
 
-export async function saveSettings(input: SettingsInput): Promise<Settings> {
-  const stored = await loadStored()
-  stored.baseURL = input.baseURL.trim() || DEFAULTS.baseURL
-  stored.model = input.model.trim() || DEFAULTS.model
-  if (input.apiKey !== undefined) {
-    const key = input.apiKey.trim()
-    if (!key) {
-      delete stored.encryptedKey
-    } else {
-      stored.encryptedKey = await encryptKey(key)
+/** What the page may see of the settings. */
+async function visible(stored: StoredSettings): Promise<Settings> {
+  const accounts: Record<string, ChatGptAccount> = {}
+  for (const provider of stored.providers) {
+    if (provider.auth !== 'chatgpt') continue
+    const record = await loginOf(provider)
+    accounts[provider.id] = {
+      signedIn: Boolean(record?.tokens),
+      planUsage: canUsePlan(record),
+      ...(record?.email ? { email: record.email } : {})
     }
   }
-  await writeJson(settingsFile(), stored)
-  return toPublic(stored)
+  return model.toPublic(stored, accounts)
+}
+
+/** Changes are made one after another: two that both read before either wrote would each undo the other's. */
+let lastChange: Promise<unknown> = Promise.resolve()
+
+/** Reads the settings, applies a change and writes them back. Resolves with what the page may see. */
+function mutate(apply: (settings: StoredSettings) => StoredSettings | Promise<StoredSettings>): Promise<Settings> {
+  const changed = lastChange.then(async () => {
+    const next = await apply(await loadStored())
+    await writeJson(settingsFile(), next)
+    return next
+  })
+  lastChange = changed.catch(() => {})
+  return changed.then(visible)
+}
+
+export async function getSettings(): Promise<Settings> {
+  return visible(await loadStored())
+}
+
+async function encrypt(secret: string, what: string): Promise<string> {
+  if (!(await safeStorage.isAsyncEncryptionAvailable())) {
+    throw new Error(`OS-level encryption is not available, so the ${what} cannot be stored safely.`)
+  }
+  return (await safeStorage.encryptStringAsync(secret)).toString('base64')
+}
+const encryptKey = (key: string): Promise<string> => encrypt(key, 'API key')
+
+/** The input arrives over IPC; the settings model checks it. An empty key removes the stored one. */
+export function saveProvider(input: ProviderInput): Promise<Settings> {
+  return mutate(async (settings) => {
+    const key = typeof input?.apiKey === 'string' ? input.apiKey.trim() : undefined
+    return model.saveProvider(settings, input, key === undefined ? undefined : key ? await encryptKey(key) : null)
+  })
+}
+
+export function removeProvider(id: string): Promise<Settings> {
+  return mutate(async (settings) => {
+    // Its tokens would stay valid at OpenAI with nobody left to revoke them.
+    const login = await loginOf(settings.providers.find((p) => p.id === id))
+    if (login?.tokens) throw new Error('Sign out of ChatGPT before removing this provider.')
+    return model.removeProvider(settings, id)
+  })
+}
+
+export function selectModel(providerId: string, modelId: string): Promise<Settings> {
+  return mutate((settings) => model.selectModel(settings, providerId, modelId))
+}
+
+/** Names the model to use with a provider, without switching to that provider. */
+export function setProviderModel(providerId: string, modelId: string): Promise<Settings> {
+  return mutate((settings) => model.setModel(settings, providerId, modelId))
 }
 
 /** `effort` arrives over IPC, so it is checked here rather than trusted. */
-export async function setReasoningEffort(effort: unknown): Promise<Settings> {
-  if (!isReasoningEffort(effort)) throw new Error('Unknown reasoning effort.')
-  const stored = await loadStored()
-  stored.reasoningEffort = effort
-  await writeJson(settingsFile(), stored)
-  return toPublic(stored)
+export function setReasoningEffort(effort: unknown): Promise<Settings> {
+  if (!isReasoningEffort(effort)) return Promise.reject(new Error('Unknown reasoning effort.'))
+  return mutate((settings) => model.setEffort(settings, effort as ReasoningEffort))
+}
+
+/** Applies to the active provider's current model. `on` arrives over IPC; anything but `true` turns it off. */
+export function setFastMode(on: unknown): Promise<Settings> {
+  return mutate((settings) => model.setFast(settings, on === true))
 }
 
 /** Moves a folder to the front of the remembered ones. */
 export async function rememberWorkspace(dir: string): Promise<void> {
-  const stored = await loadStored()
-  stored.recentWorkspaces = mergeFolders([[dir], stored.recentWorkspaces ?? []])
-  await writeJson(settingsFile(), stored)
+  await mutate((settings) => ({ ...settings, recentWorkspaces: mergeFolders([[dir], settings.recentWorkspaces ?? []]) }))
 }
 
 /**
@@ -97,26 +159,11 @@ export async function listWorkspaces(): Promise<string[]> {
   return existing
 }
 
-async function encryptKey(key: string): Promise<string> {
-  if (!(await safeStorage.isAsyncEncryptionAvailable())) {
-    throw new Error('OS-level encryption is not available, so the API key cannot be stored safely.')
-  }
-  return (await safeStorage.encryptStringAsync(key)).toString('base64')
-}
-
-/** Main-process only: the decrypted connection details for an API call. */
-export async function getConnection(): Promise<{
-  apiKey: string
-  baseURL: string
-  model: string
-  reasoningEffort: ReasoningEffort
-} | null> {
-  const stored = await loadStored()
-  if (!stored.encryptedKey) return null
+async function decryptKey(provider: StoredProvider): Promise<string> {
   let decrypted: { result: string; shouldReEncrypt: boolean }
   try {
     // Also reads keys saved by earlier versions with the synchronous API.
-    decrypted = await safeStorage.decryptStringAsync(Buffer.from(stored.encryptedKey, 'base64'))
+    decrypted = await safeStorage.decryptStringAsync(Buffer.from(provider.encryptedKey ?? '', 'base64'))
   } catch {
     // Typically a profile copied from another computer or user account: the OS key differs.
     throw new Error('The saved API key could not be decrypted on this computer. Enter it again in Settings.')
@@ -124,15 +171,169 @@ export async function getConnection(): Promise<{
   if (decrypted.shouldReEncrypt) {
     // The OS rotated its key. Failing to re-save is harmless: the old value still decrypts.
     try {
-      const latest = await loadStored()
-      if (latest.encryptedKey === stored.encryptedKey) {
-        await writeJson(settingsFile(), { ...latest, encryptedKey: await encryptKey(decrypted.result) })
-      }
+      const fresh = await encryptKey(decrypted.result)
+      await mutate((latest) => ({
+        ...latest,
+        providers: latest.providers.map((p) =>
+          p.id === provider.id && p.encryptedKey === provider.encryptedKey ? { ...p, encryptedKey: fresh } : p
+        )
+      }))
     } catch (err) {
       console.error('[store] could not re-encrypt the API key:', err)
     }
   }
-  return { apiKey: decrypted.result, baseURL: stored.baseURL, model: stored.model, reasoningEffort: stored.reasoningEffort }
+  return decrypted.result
+}
+
+/** Stores a sign-in with a provider; without an id, a provider is added for it. */
+async function keepLogin(providerId: string | undefined, record: LoginRecord): Promise<{ settings: Settings; providerId: string }> {
+  const encrypted = await encrypt(JSON.stringify(record), 'ChatGPT sign-in')
+  opened.set(encrypted, record)
+  let id = providerId ?? ''
+  const settings = await mutate((stored) => {
+    const saved = model.saveLogin(stored, providerId, { encrypted, ready: canUsePlan(record), baseURL: record.resource })
+    id = saved.providerId
+    return saved.settings
+  })
+  return { settings, providerId: id }
+}
+
+/** One at a time for each provider: a refresh token works once, so nothing else may touch the sign-in while it is renewed. */
+const busy = new Map<string, Promise<unknown>>()
+function inTurn<T>(providerId: string, task: () => Promise<T>): Promise<T> {
+  const mine = (busy.get(providerId) ?? Promise.resolve()).then(task)
+  const tail = mine.catch(() => {})
+  busy.set(providerId, tail)
+  void tail.then(() => {
+    if (busy.get(providerId) === tail) busy.delete(providerId)
+  })
+  return mine
+}
+
+const signInAgain = (): ServiceError => new ServiceError('The ChatGPT sign-in is no longer valid. Sign in again in Settings.', 'chatgpt-sign-in')
+
+/**
+ * A token the API takes right now for a ChatGPT sign-in, renewed first when it is about to run
+ * out. `rejected` names a token the API has just turned down: if that is still the stored one,
+ * a new one is fetched whatever its age.
+ */
+async function currentToken(providerId: string, rejected?: string): Promise<string> {
+  const record = await loginOf((await loadStored()).providers.find((p) => p.id === providerId))
+  if (!record?.tokens) throw signInAgain()
+  if (!canUsePlan(record)) throw new Error('This ChatGPT account has not allowed its plan to be used here. Enable it in Settings.')
+  const { tokens } = record
+  const now = Date.now()
+  if (!renewalDue(tokens, now, rejected)) return tokens.access
+  const expired = now >= tokens.expiresAt
+  const turnedDown = rejected !== undefined && rejected === tokens.access
+
+  try {
+    const next = await refreshed(signInService, record)
+    // Stored before it is used: the token this one replaced works no more.
+    await keepLogin(providerId, next)
+    return next.tokens?.access ?? tokens.access
+  } catch (err) {
+    if (tokensAreDead(err) || (!tokens.refresh && (expired || turnedDown))) {
+      // The account is still known, and so is the registration: signing in again picks both up.
+      const { tokens: _gone, ...rest } = record
+      await keepLogin(providerId, { ...rest, savedAt: new Date().toISOString() })
+      throw signInAgain()
+    }
+    if (clientIsGone(err)) {
+      // The registration itself is unknown to the service now; the next sign-in makes a new one.
+      await mutate((stored) => model.dropLogin(stored, providerId))
+      throw signInAgain()
+    }
+    // The service could not be asked. What is in hand may still do; nothing is thrown away over a bad connection.
+    if (!expired && !turnedDown) return tokens.access
+    throw new Error(`The ChatGPT sign-in could not be renewed: ${err instanceof Error ? err.message : String(err)}`)
+  }
+}
+
+const planToken = (providerId: string, rejected?: string): Promise<string> => inTurn(providerId, () => currentToken(providerId, rejected))
+
+/**
+ * Main-process only: what is needed to call a provider, with its key decrypted. The active
+ * provider unless an id is given. Null when that provider has no key and no usable sign-in.
+ */
+export async function getConnection(providerId?: string): Promise<Connection | null> {
+  const stored = await loadStored()
+  const provider = providerId ? stored.providers.find((p) => p.id === providerId) : model.activeProvider(stored)
+  if (!provider) return null
+  const common = {
+    provider: provider.id,
+    kind: provider.kind,
+    model: provider.model,
+    reasoningEffort: model.effortOf(provider),
+    // Asked for only where it exists: a service that does not know the request field would refuse the request.
+    ...(model.fastOf(provider) && offersFastMode(provider) ? { fast: true } : {})
+  }
+  if (provider.auth === 'chatgpt') {
+    const record = await loginOf(provider)
+    if (!record || !canUsePlan(record)) return null
+    const { id } = provider
+    return {
+      ...common,
+      apiKey: await planToken(id),
+      // Not the address in the settings file: the tokens are for the API the sign-in names, and go nowhere else.
+      baseURL: record.resource,
+      plan: { token: (rejected) => planToken(id, rejected) }
+    }
+  }
+  if (!provider.encryptedKey) return null
+  return { ...common, apiKey: await decryptKey(provider), baseURL: provider.baseURL }
+}
+
+/** The id this installation signs in to ChatGPT with: made on first use, then kept. */
+export async function signInHostId(): Promise<string> {
+  const existing = (await loadStored()).hostId
+  if (existing) return existing
+  let made = ''
+  await mutate((stored) => {
+    made = stored.hostId ?? newHostId()
+    return { ...stored, hostId: made }
+  })
+  return made
+}
+
+/** The sign-in a provider holds, for signing in to the same account again. Null when it holds none. */
+export async function signInOf(providerId: string): Promise<LoginRecord | null> {
+  return loginOf((await loadStored()).providers.find((p) => p.id === providerId))
+}
+
+/**
+ * Stores a completed sign-in. `welcome` is true the first time one that may use the plan is
+ * stored: the moment to tell the person what that means, once.
+ */
+export async function saveSignIn(
+  providerId: string | undefined,
+  record: LoginRecord
+): Promise<{ settings: Settings; providerId: string; welcome: boolean }> {
+  const kept = await (providerId ? inTurn(providerId, () => keepLogin(providerId, record)) : keepLogin(undefined, record))
+  if (!canUsePlan(record)) return { ...kept, welcome: false }
+  let welcome = false
+  const settings = await mutate((stored) => {
+    welcome = !stored.chatgptWelcomed
+    return { ...stored, chatgptWelcomed: true }
+  })
+  return { settings, providerId: kept.providerId, welcome }
+}
+
+/**
+ * Signs a provider out of ChatGPT: the service is told to stop honouring the tokens, and they are
+ * removed here whether or not it could be told. The account and the registration stay known, so
+ * signing in again continues with them.
+ */
+export function signOut(providerId: string): Promise<{ settings: Settings; revoked: boolean }> {
+  // After a renewal that may be under way: revoking the token it is replacing would leave the new one alive.
+  return inTurn(providerId, async () => {
+    const record = await signInOf(providerId)
+    if (!record) return { settings: await getSettings(), revoked: true }
+    const revoked = await revoke(signInService, record)
+    const { tokens: _tokens, idToken: _idToken, ...rest } = record
+    const { settings } = await keepLogin(providerId, { ...rest, savedAt: new Date().toISOString() })
+    return { settings, revoked }
+  })
 }
 
 export async function listSessions(): Promise<SessionSummary[]> {

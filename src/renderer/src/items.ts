@@ -1,7 +1,7 @@
 // The transcript as the UI shows it, built either from a stored session or
 // incrementally from streamed agent events.
 
-import type { AgentEvent, ChatMessage, ToolCall } from '../../shared/types.ts'
+import type { AgentEvent, ChatMessage, ErrorHint, ToolCall } from '../../shared/types.ts'
 
 export type Item =
   /** `skill` is the name of a skill the user picked for the message. */
@@ -9,7 +9,8 @@ export type Item =
   /** `open` is true while the model is still streaming into this message. */
   | { kind: 'assistant'; reasoning: string; text: string; open: boolean }
   | { kind: 'tool'; call: ToolCall; output?: string }
-  | { kind: 'error'; message: string }
+  /** `hint` marks errors that are shown with a way out instead of as plain text. */
+  | { kind: 'error'; message: string; hint?: ErrorHint }
 
 export function itemsFromMessages(messages: ChatMessage[]): Item[] {
   const items: Item[] = []
@@ -66,7 +67,7 @@ export function itemsReducer(items: Item[], action: ItemsAction): Item[] {
     case 'tool_result':
       return items.map((i) => (i.kind === 'tool' && i.call.id === event.id ? { ...i, output: event.output } : i))
     case 'error':
-      return [...items, { kind: 'error', message: event.message }]
+      return [...items, { kind: 'error', message: event.message, ...(event.hint ? { hint: event.hint } : {}) }]
     default:
       return items
   }

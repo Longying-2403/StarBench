@@ -122,6 +122,22 @@ export function TrashIcon() {
   )
 }
 
+export function ChevronLeftIcon() {
+  return (
+    <svg {...line}>
+      <path d="m15 6-6 6 6 6" />
+    </svg>
+  )
+}
+
+export function ChevronRightIcon() {
+  return (
+    <svg {...line} width={12} height={12}>
+      <path d="m9 6 6 6-6 6" />
+    </svg>
+  )
+}
+
 export function ChevronDownIcon() {
   return (
     <svg {...line} width={12} height={12}>

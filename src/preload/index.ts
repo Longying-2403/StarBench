@@ -3,8 +3,16 @@ import type { HarnessApi, SessionEvent } from '../shared/types.ts'
 
 const api: HarnessApi = {
   getSettings: () => ipcRenderer.invoke('settings:get'),
-  saveSettings: (input) => ipcRenderer.invoke('settings:save', input),
+  saveProvider: (input) => ipcRenderer.invoke('providers:save', input),
+  removeProvider: (id) => ipcRenderer.invoke('providers:remove', id),
+  startSignIn: (options) => ipcRenderer.invoke('signin:start', options),
+  finishSignIn: () => ipcRenderer.invoke('signin:finish'),
+  cancelSignIn: () => ipcRenderer.invoke('signin:cancel'),
+  signOut: (providerId) => ipcRenderer.invoke('signin:out', providerId),
+  selectModel: (providerId, model) => ipcRenderer.invoke('models:select', providerId, model),
+  listModels: (providerId) => ipcRenderer.invoke('models:list', providerId),
   setReasoningEffort: (effort) => ipcRenderer.invoke('settings:setEffort', effort),
+  setFastMode: (on) => ipcRenderer.invoke('settings:setFast', on),
   getModelInfo: () => ipcRenderer.invoke('models:info'),
   listPlugins: () => ipcRenderer.invoke('plugins:list'),
   setPluginEnabled: (id, enabled) => ipcRenderer.invoke('plugins:setEnabled', id, enabled),

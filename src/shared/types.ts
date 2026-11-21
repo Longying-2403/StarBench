@@ -7,7 +7,14 @@ export interface ToolCall {
   arguments: string
 }
 
-/** One message of the conversation, in the shape the chat completions API expects. */
+/** The wire format a model service speaks. */
+export type ProviderKind = 'openai-chat' | 'openai-responses' | 'anthropic'
+export const PROVIDER_KINDS: readonly ProviderKind[] = ['openai-chat', 'openai-responses', 'anthropic']
+
+/**
+ * One message of the conversation, in a form every provider's format can be built from:
+ * text, the calls the model made, and the results of those calls.
+ */
 export type ChatMessage =
   | {
       role: 'user'
@@ -21,8 +28,16 @@ export type ChatMessage =
   | {
       role: 'assistant'
       content: string
+      /** The model's thinking, or the summary of it the service returned. Shown to the user. */
       reasoning_content?: string
       tool_calls?: ToolCall[]
+      /**
+       * Who wrote the message. `replay` holds what that service wants to see again to carry on from
+       * this message exactly (signed thinking blocks, encrypted reasoning); only the same provider
+       * reads it, anyone else builds the message from the fields above. Absent on messages written
+       * before the app knew more than one provider.
+       */
+      origin?: { provider: string; kind: ProviderKind; model: string; replay?: unknown }
     }
   | { role: 'tool'; tool_call_id: string; content: string }
 
@@ -39,38 +54,174 @@ export interface Session {
 export type SessionSummary = Pick<Session, 'id' | 'title' | 'workspace' | 'updatedAt' | 'archived'>
 
 /**
- * How hard the model thinks before it answers. `default` sends nothing and leaves the choice to
- * the service; `none` turns thinking off. The others are values of the API's `reasoning_effort`.
+ * How hard the model thinks before it answers, lowest first. `default` sends nothing and leaves
+ * the choice to the service; `none` turns thinking off. The others are the names the services
+ * use; no service offers all of them.
  */
-export const REASONING_EFFORTS = ['default', 'none', 'low', 'high', 'max'] as const
+export const REASONING_EFFORTS = ['default', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const
 export type ReasoningEffort = (typeof REASONING_EFFORTS)[number]
+/** A level the user can put the slider on, as opposed to "nothing chosen". */
+export type EffortLevel = Exclude<ReasoningEffort, 'default'>
 export const isReasoningEffort = (value: unknown): value is ReasoningEffort =>
   (REASONING_EFFORTS as readonly unknown[]).includes(value)
+
+const hostOf = (url: string): string => {
+  try {
+    return new URL(url).host.toLowerCase()
+  } catch {
+    return ''
+  }
+}
+
+/**
+ * The ladder most services have settled on (OpenAI and Anthropic both use exactly this one).
+ * Thinking cannot be switched off on their current models, so there is no "none".
+ */
+const COMMON_EFFORTS: readonly EffortLevel[] = ['low', 'medium', 'high', 'xhigh', 'max']
+/** The services whose models take other levels, by the host of their address. */
+const EFFORTS_BY_HOST: Record<string, readonly EffortLevel[]> = {
+  // Thinking can be switched off here, and there is nothing between low and high.
+  'api.deepseek.com': ['none', 'low', 'high', 'max'],
+  // The scale ends one step earlier.
+  'api.x.ai': ['low', 'medium', 'high', 'xhigh']
+}
+
+/**
+ * The levels to offer when a service does not say which ones a model takes. A level the model
+ * turns out not to know is reported by the service when a message is sent.
+ */
+export function usualEfforts(baseURL: string): readonly EffortLevel[] {
+  return EFFORTS_BY_HOST[hostOf(baseURL)] ?? COMMON_EFFORTS
+}
 
 /** What the model service reports about the configured model. Services differ, so everything is optional. */
 export interface ModelInfo {
   /** Readable name with the version, e.g. "DeepSeek-V4.1-Flash". */
   name?: string
   /** The thinking levels the model accepts. */
-  efforts?: Exclude<ReasoningEffort, 'default'>[]
+  efforts?: EffortLevel[]
   /** The level the service uses when none is sent. */
-  defaultEffort?: Exclude<ReasoningEffort, 'default'>
+  defaultEffort?: EffortLevel
 }
 
-export interface Settings {
+/** A model a provider offers, for the list the user picks from. */
+export interface ModelChoice {
+  id: string
+  /** Readable name, when the service gives one. */
+  name?: string
+}
+
+/** The ChatGPT account behind a provider that is signed in to rather than given a key. */
+export interface ChatGptAccount {
+  /** Whether a sign-in is in place. */
+  signedIn: boolean
+  /** The account's address, to tell accounts apart. Still known after signing out. */
+  email?: string
+  /** False when the account is signed in but did not allow the app to use its plan for requests. */
+  planUsage: boolean
+}
+
+/** A configured model service, as the page sees it: everything but the key. */
+export interface ProviderInfo {
+  id: string
+  name: string
+  kind: ProviderKind
   baseURL: string
+  /** The model used with this provider; empty until one is chosen. */
   model: string
-  reasoningEffort: ReasoningEffort
-  /** The key itself never leaves the main process. */
+  /**
+   * Whether requests can be made: a key is stored or, for a ChatGPT sign-in, the account is signed
+   * in and allows its plan to be used. The key and the tokens themselves never leave the main process.
+   */
   hasApiKey: boolean
+  /** Set when requests use a person's ChatGPT plan after signing in, instead of an API key. */
+  auth?: 'chatgpt'
+  /** Present exactly when `auth` is. */
+  account?: ChatGptAccount
 }
 
-export interface SettingsInput {
+export interface ProviderInput {
+  /** Omit to add a provider; give the id to change one. */
+  id?: string
+  name: string
+  kind: ProviderKind
   baseURL: string
   model: string
   /** Omit to keep the stored key; empty string clears it. */
   apiKey?: string
 }
+
+export interface Settings {
+  providers: ProviderInfo[]
+  /** The provider messages are sent to. */
+  activeProviderId: string
+  /** The fields below describe the active provider, for the parts of the page that only care about that one. */
+  kind: ProviderKind
+  model: string
+  /** The effort chosen for the active provider's current model. */
+  reasoningEffort: ReasoningEffort
+  /** Whether faster answers were asked for with that model. It only has an effect where `offersFastMode` says so. */
+  fastMode: boolean
+  hasApiKey: boolean
+}
+
+/** The Claude models that answer faster on request, with nothing to apply for first. */
+const FAST_CLAUDE = new Set(['claude-fable-5-2', 'claude-mythos-5-2', 'claude-opus-5-5'])
+
+/**
+ * Whether a provider's current model can be asked to write its answers faster, for a higher
+ * price ("fast mode"). OpenAI offers this on its own API and with a ChatGPT sign-in, Anthropic
+ * for some models on its own API; a gateway in front of either may not know the request field.
+ */
+export function offersFastMode(provider: Pick<ProviderInfo, 'kind' | 'baseURL' | 'model' | 'auth'>): boolean {
+  if (!provider.model) return false
+  const host = hostOf(provider.baseURL)
+  if (provider.kind === 'openai-responses') return provider.auth === 'chatgpt' || host === 'api.openai.com'
+  if (provider.kind === 'anthropic') return host === 'api.anthropic.com' && FAST_CLAUDE.has(provider.model)
+  return false
+}
+
+/** Starting points for the services the app knows how to talk to. */
+export const PROVIDER_PRESETS: readonly (Omit<ProviderInfo, 'hasApiKey'> & { keyHint: string })[] = [
+  { id: 'deepseek', name: 'DeepSeek', kind: 'openai-chat', baseURL: 'https://api.deepseek.com', model: 'deepseek-flash', keyHint: 'sk-…' },
+  { id: 'openai', name: 'OpenAI', kind: 'openai-responses', baseURL: 'https://api.openai.com/v1', model: '', keyHint: 'sk-…' },
+  { id: 'anthropic', name: 'Anthropic', kind: 'anthropic', baseURL: 'https://api.anthropic.com', model: 'claude-opus-5-5', keyHint: 'sk-ant-…' },
+  { id: 'xai', name: 'xAI', kind: 'openai-chat', baseURL: 'https://api.x.ai/v1', model: '', keyHint: 'xai-…' }
+]
+
+/** Where a person sees and limits what apps use of their ChatGPT plan. */
+export const CHATGPT_USAGE_URL = 'https://chatgpt.com/settings/usage'
+/** OpenAI's own explanations of using a ChatGPT plan in other apps. */
+export const CHATGPT_HELP_URL = 'https://help.openai.com'
+
+/** What may be asked for when starting a ChatGPT sign-in. */
+export interface SignInOptions {
+  /** The provider to sign in to again. Without one, a provider is added. */
+  providerId?: string
+  /** Forget the account that provider was registered with and let the person pick any account. */
+  otherAccount?: boolean
+  /** Ask the account again for the permission to use its plan. */
+  consent?: boolean
+}
+
+/** How a ChatGPT sign-in ended. */
+export type SignInResult =
+  | {
+      ok: true
+      settings: Settings
+      providerId: string
+      /** True the first time a sign-in with plan usage succeeds on this computer: the moment to explain what it means. */
+      welcome: boolean
+    }
+  | {
+      ok: false
+      /** `denied`: the person said no on the sign-in page. */
+      reason: 'cancelled' | 'denied' | 'timeout' | 'failed'
+      detail: string
+    }
+
+/** Errors the page presents with a way out (a link, a button) instead of as plain text. */
+export type ErrorHint = 'chatgpt-usage' | 'chatgpt-sign-in'
 
 export interface PluginInfo {
   /** Folder name under the plugins directory. */
@@ -115,7 +266,7 @@ export type AgentEvent =
   | { type: 'tool_result'; id: string; output: string }
   | { type: 'permission_request'; id: string; call: ToolCall }
   | { type: 'turn_end' }
-  | { type: 'error'; message: string }
+  | { type: 'error'; message: string; hint?: ErrorHint }
 
 export interface SessionEvent {
   sessionId: string
@@ -124,10 +275,32 @@ export interface SessionEvent {
 
 export interface HarnessApi {
   getSettings(): Promise<Settings>
-  saveSettings(input: SettingsInput): Promise<Settings>
-  /** Applies from the next message on. Resolves with the updated settings. */
+  /** Adds a provider or changes one. Resolves with the updated settings. */
+  saveProvider(input: ProviderInput): Promise<Settings>
+  /** The last provider cannot be removed. */
+  removeProvider(id: string): Promise<Settings>
+  /**
+   * Opens the ChatGPT sign-in page in the browser. Resolves once it is open, with the page's
+   * address for a person whose browser did not come up; `finishSignIn` tells how it ended.
+   */
+  startSignIn(options?: SignInOptions): Promise<{ url: string }>
+  /** Resolves when the sign-in started last has ended, one way or another. */
+  finishSignIn(): Promise<SignInResult>
+  cancelSignIn(): Promise<void>
+  /**
+   * Signs a provider out of ChatGPT. `revoked` is false when OpenAI could not be told: the tokens
+   * are gone from this computer either way, but the person may want to disconnect the app in ChatGPT.
+   */
+  signOut(providerId: string): Promise<{ settings: Settings; revoked: boolean }>
+  /** Makes a provider and one of its models the one messages go to. */
+  selectModel(providerId: string, model: string): Promise<Settings>
+  /** The models a provider offers. Rejects when the service cannot be asked (no key, unreachable). */
+  listModels(providerId: string): Promise<ModelChoice[]>
+  /** Applies to the current model, from the next message on. Resolves with the updated settings. */
   setReasoningEffort(effort: ReasoningEffort): Promise<Settings>
-  /** Asks the model service about the configured model. Null when it has nothing to say or cannot be reached. */
+  /** Asks for faster answers from the current model, or stops asking. Resolves with the updated settings. */
+  setFastMode(on: boolean): Promise<Settings>
+  /** Asks the model service about the current model. Null when it has nothing to say or cannot be reached. */
   getModelInfo(): Promise<ModelInfo | null>
   listPlugins(): Promise<PluginInfo[]>
   /** Resolves with the refreshed list. */

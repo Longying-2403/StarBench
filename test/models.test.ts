@@ -24,9 +24,9 @@ test('parseModelInfo keeps the name and the thinking levels it knows', () => {
     defaultEffort: 'high'
   })
   assert.deepEqual(parseModelInfo({ id: 'x', display_name: '  Some Model  ' }), { name: 'Some Model' })
-  // Levels the app cannot send are dropped; "default" is the app's own word, not a level.
-  assert.deepEqual(parseModelInfo({ id: 'x', effort: { supported_levels: ['minimal', 'low', 'default', 7], default_level: 'medium' } }), {
-    efforts: ['low']
+  // Levels the app does not know are dropped; "default" is the app's own word, not a level.
+  assert.deepEqual(parseModelInfo({ id: 'x', effort: { supported_levels: ['turbo', 'low', 'default', 7, 'xhigh'], default_level: 'ultra' } }), {
+    efforts: ['low', 'xhigh']
   })
   // A plain OpenAI-style entry has nothing the app can use.
   assert.equal(parseModelInfo({ id: 'gpt-x', object: 'model', owned_by: 'someone' }), null)

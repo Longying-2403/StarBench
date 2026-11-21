@@ -2,18 +2,17 @@
 // feed the results back, repeat until it answers without tool calls.
 // Nothing in this file depends on Electron.
 
-import OpenAI from 'openai'
-import type { AgentEvent, ChatMessage, PermissionDecision, ReasoningEffort, ToolCall } from '../shared/types.ts'
+import type { AgentEvent, ChatMessage, PermissionDecision, ToolCall } from '../shared/types.ts'
+import { adapterFor } from './providers/index.ts'
+import type { Connection, ModelReply, ModelRequest, ProviderAdapter } from './providers/index.ts'
+import { ServiceError } from './providers/types.ts'
 import type { ToolRegistry } from './tools.ts'
 
 const MAX_STEPS = 50
 
 export interface TurnOptions {
-  apiKey: string
-  baseURL: string
-  model: string
-  /** Sent as `reasoning_effort`. Absent or `default` leaves the parameter out. */
-  reasoningEffort?: ReasoningEffort
+  /** The provider and model this turn talks to. */
+  connection: Connection
   workspace: string
   /** Conversation so far, ending with the new user message. Mutated in place as the turn proceeds. */
   messages: ChatMessage[]
@@ -21,7 +20,7 @@ export interface TurnOptions {
   systemExtra?: string
   signal: AbortSignal
   /** Read on every model request, so tools added mid-turn are picked up at the next step. */
-  tools: Pick<ToolRegistry, 'definitions' | 'needsPermission' | 'execute'>
+  tools: Pick<ToolRegistry, 'specs' | 'needsPermission' | 'execute'>
   /** Tool names the user chose to always allow; owned by the caller so it outlives one turn. */
   alwaysAllowed: Set<string>
   emit(event: AgentEvent): void
@@ -52,81 +51,6 @@ function systemPrompt(workspace: string, extra?: string): string {
   return extra ? `${base}\n\n${extra}` : base
 }
 
-/** Reads one streamed assistant message, emitting deltas as they arrive. */
-async function streamAssistant(
-  client: OpenAI,
-  opts: TurnOptions
-): Promise<Extract<ChatMessage, { role: 'assistant' }>> {
-  const message: Extract<ChatMessage, { role: 'assistant' }> = { role: 'assistant', content: '' }
-  const calls: ToolCall[] = []
-  const tools = opts.tools.definitions()
-  const effort = opts.reasoningEffort
-  try {
-    const stream = await client.chat.completions.create(
-      {
-        model: opts.model,
-        // reasoning_content is not in the SDK's message type, but DeepSeek requires it
-        // to be passed back on every assistant message when tools are in the request.
-        messages: [
-          { role: 'system', content: systemPrompt(opts.workspace, opts.systemExtra) },
-          ...(opts.messages as unknown as OpenAI.Chat.ChatCompletionMessageParam[])
-        ],
-        // The API rejects an empty tools array.
-        ...(tools.length ? { tools } : {}),
-        // Left out unless the user chose a level: not every OpenAI-compatible service knows the parameter.
-        ...(effort && effort !== 'default' ? { reasoning_effort: effort } : {}),
-        stream: true
-      },
-      { signal: opts.signal }
-    )
-    for await (const chunk of stream) {
-      const delta = chunk.choices[0]?.delta as
-        | (OpenAI.Chat.ChatCompletionChunk.Choice.Delta & { reasoning_content?: string | null })
-        | undefined
-      if (!delta) continue
-      if (delta.reasoning_content) {
-        message.reasoning_content = (message.reasoning_content ?? '') + delta.reasoning_content
-        opts.emit({ type: 'reasoning_delta', text: delta.reasoning_content })
-      }
-      if (delta.content) {
-        message.content += delta.content
-        opts.emit({ type: 'text_delta', text: delta.content })
-      }
-      for (const part of delta.tool_calls ?? []) {
-        const call = (calls[part.index] ??= { id: '', name: '', arguments: '' })
-        if (part.id) call.id = part.id
-        if (part.function?.name) call.name += part.function.name
-        if (part.function?.arguments) call.arguments += part.function.arguments
-      }
-    }
-  } catch (err) {
-    // A stop request keeps whatever text arrived; half-received tool calls are dropped.
-    if (!opts.signal.aborted) throw err
-    return message
-  }
-  const complete = calls.filter((c) => c && c.id && c.name)
-  if (complete.length) message.tool_calls = complete
-  return message
-}
-
-/** Converts a stored message into the shape the API expects. */
-function toApiMessage(message: ChatMessage): ChatMessage {
-  if (message.role === 'user') {
-    // A skill the user picked travels in front of what they typed; the API knows no `skill` field.
-    return { role: 'user', content: message.skill ? `${message.skill.prompt}\n\n${message.content}` : message.content }
-  }
-  // Stored tool calls are flat; the API wants them wrapped as { type, function }.
-  if (message.role !== 'assistant' || !message.tool_calls) return message
-  return {
-    ...message,
-    tool_calls: message.tool_calls.map((c) => ({
-      id: c.id,
-      type: 'function',
-      function: { name: c.name, arguments: c.arguments }
-    }))
-  } as unknown as ChatMessage
-}
-
 /** Result texts the UI recognises to label a call as cancelled or refused. */
 const CANCELLED = 'Cancelled by user'
 const DENIED = 'The user denied this tool call.'
@@ -144,16 +68,58 @@ async function runToolCall(call: ToolCall, opts: TurnOptions): Promise<string> {
   return opts.tools.execute(call.name, call.arguments, { workspace: opts.workspace, signal: opts.signal })
 }
 
+const statusOf = (err: unknown): unknown => (typeof err === 'object' && err !== null ? (err as { status?: unknown }).status : undefined)
+
+/**
+ * Makes one request to the model. A provider that is signed in to is asked for a token that is
+ * good now; should the service turn that one down before anything arrived, a new one is
+ * fetched and the request made once more.
+ */
+async function ask(adapter: ProviderAdapter, request: ModelRequest): Promise<ModelReply> {
+  const { plan } = request.connection
+  if (!plan) return adapter.complete(request)
+  let arrived = false
+  const withToken = (apiKey: string): ModelRequest => ({
+    ...request,
+    connection: { ...request.connection, apiKey },
+    onText: (delta) => ((arrived = true), request.onText(delta)),
+    onReasoning: (delta) => ((arrived = true), request.onReasoning(delta))
+  })
+  const token = await plan.token()
+  try {
+    return await adapter.complete(withToken(token))
+  } catch (err) {
+    if (statusOf(err) !== 401 || arrived || request.signal.aborted) throw err
+    const fresh = await plan.token(token)
+    // The same token again means there was no newer one to be had.
+    if (fresh === token) throw err
+    return adapter.complete(withToken(fresh))
+  }
+}
+
 export async function runTurn(opts: TurnOptions): Promise<void> {
-  const client = new OpenAI({ apiKey: opts.apiKey, baseURL: opts.baseURL })
+  const adapter = adapterFor(opts.connection.kind)
   const stored = opts.messages
 
   try {
     for (let step = 0; step < MAX_STEPS; step++) {
-      const assistant = await streamAssistant(client, { ...opts, messages: stored.map(toApiMessage) })
+      const { message: assistant, stopped } = await ask(adapter, {
+        connection: opts.connection,
+        system: systemPrompt(opts.workspace, opts.systemExtra),
+        messages: stored,
+        tools: opts.tools.specs(),
+        signal: opts.signal,
+        onText: (text) => opts.emit({ type: 'text_delta', text }),
+        onReasoning: (text) => opts.emit({ type: 'reasoning_delta', text })
+      })
       if (assistant.content || assistant.tool_calls || assistant.reasoning_content) stored.push(assistant)
       opts.emit({ type: 'assistant_done' })
       opts.checkpoint()
+      // The service declined, or cut the reply short: what came is kept, nothing in it is run.
+      if (stopped) {
+        opts.emit({ type: 'error', message: stopped })
+        return
+      }
       if (!assistant.tool_calls || opts.signal.aborted) return
 
       for (const call of assistant.tool_calls) {
@@ -167,7 +133,11 @@ export async function runTurn(opts: TurnOptions): Promise<void> {
     }
     opts.emit({ type: 'error', message: `Stopped after ${MAX_STEPS} steps without finishing.` })
   } catch (err) {
-    opts.emit({ type: 'error', message: err instanceof Error ? err.message : String(err) })
+    opts.emit({
+      type: 'error',
+      message: err instanceof Error ? err.message : String(err),
+      ...(err instanceof ServiceError ? { hint: err.hint } : {})
+    })
   } finally {
     opts.checkpoint()
     opts.emit({ type: 'turn_end' })

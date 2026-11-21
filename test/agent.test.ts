@@ -7,8 +7,19 @@ import os from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
 import { runTurn } from '../src/main/agent.ts'
+import type { Connection } from '../src/main/providers/index.ts'
 import { ToolRegistry, registerBuiltinTools } from '../src/main/tools.ts'
-import type { AgentEvent, ChatMessage } from '../src/shared/types.ts'
+import type { AgentEvent, ChatMessage, ReasoningEffort } from '../src/shared/types.ts'
+
+/** A chat-completions provider at the fake server. */
+const connectionTo = (baseURL: string, reasoningEffort: ReasoningEffort = 'default'): Connection => ({
+  provider: 'test',
+  kind: 'openai-chat',
+  apiKey: 'test',
+  baseURL,
+  model: 'fake',
+  reasoningEffort
+})
 
 const chunk = (delta: object): string =>
   `data: ${JSON.stringify({ id: 'x', object: 'chat.completion.chunk', choices: [{ index: 0, delta }] })}\n\n`
@@ -72,9 +83,7 @@ test('a turn streams, runs tools with permission checks and feeds results back',
   const events: AgentEvent[] = []
   const asked: string[] = []
   await runTurn({
-    apiKey: 'test',
-    baseURL: model.baseURL,
-    model: 'fake',
+    connection: connectionTo(model.baseURL),
     workspace,
     messages,
     signal: new AbortController().signal,
@@ -110,7 +119,11 @@ test('a turn streams, runs tools with permission checks and feeds results back',
   assert.deepEqual(asked, ['write_file', 'run_command', 'edit_file', 'plugin_tool'])
   assert.equal(await readFile(path.join(workspace, 'sub/a.txt'), 'utf8'), 'line1\r\ncost $& $2\r\n', 'edit keeps CRLF and literal $')
 
-  assert.deepEqual(messages.at(-1), { role: 'assistant', content: 'All done.' })
+  assert.deepEqual(messages.at(-1), {
+    role: 'assistant',
+    content: 'All done.',
+    origin: { provider: 'test', kind: 'openai-chat', model: 'fake' }
+  })
   assert.equal(events.at(-1)?.type, 'turn_end')
   assert.equal(events.some((e) => e.type === 'error'), false)
 })
@@ -132,9 +145,7 @@ test('stopping while a permission prompt is open cancels the remaining calls', a
   const messages: ChatMessage[] = [{ role: 'user', content: 'go' }]
   const events: AgentEvent[] = []
   await runTurn({
-    apiKey: 'test',
-    baseURL: model.baseURL,
-    model: 'fake',
+    connection: connectionTo(model.baseURL),
     workspace,
     messages,
     signal: controller.signal,
@@ -164,9 +175,7 @@ test('a picked skill and the skills list reach the model', async () => {
   const stored: ChatMessage = { role: 'user', content: 'do it', skill: { name: 'style', prompt: 'SKILL TEXT' } }
   const messages: ChatMessage[] = [stored]
   await runTurn({
-    apiKey: 'test',
-    baseURL: model.baseURL,
-    model: 'fake',
+    connection: connectionTo(model.baseURL),
     workspace: os.tmpdir(),
     messages,
     systemExtra: 'Skills:\n- style: House style',
@@ -189,13 +198,10 @@ test('a picked skill and the skills list reach the model', async () => {
 
 test('the chosen reasoning effort is sent, and nothing is sent by default', async () => {
   const model = await fakeModel([[chunk({ content: 'a' })], [chunk({ content: 'b' })], [chunk({ content: 'c' })], [chunk({ content: 'd' })]])
-  const efforts = [undefined, 'default', 'none', 'max'] as const
+  const efforts = ['default', 'none', 'max', 'xhigh'] as const
   for (const reasoningEffort of efforts) {
     await runTurn({
-      apiKey: 'test',
-      baseURL: model.baseURL,
-      model: 'fake',
-      ...(reasoningEffort ? { reasoningEffort } : {}),
+      connection: connectionTo(model.baseURL, reasoningEffort),
       workspace: os.tmpdir(),
       messages: [{ role: 'user', content: 'hi' }],
       signal: new AbortController().signal,
@@ -210,6 +216,6 @@ test('the chosen reasoning effort is sent, and nothing is sent by default', asyn
 
   assert.deepEqual(
     model.requests.map((r) => ('reasoning_effort' in r ? r.reasoning_effort : '(absent)')),
-    ['(absent)', '(absent)', 'none', 'max']
+    ['(absent)', 'none', 'max', 'xhigh']
   )
 })

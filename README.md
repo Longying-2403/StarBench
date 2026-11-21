@@ -1,6 +1,6 @@
 # StarBench
 
-一个桌面端的 AI 编程助手外壳（agent harness）：选一个工作文件夹，用对话的方式让模型读写文件、搜索代码、执行命令。默认接入 DeepSeek，也可以换成任何兼容 OpenAI 接口格式的服务。
+一个桌面端的 AI 编程助手外壳（agent harness）：选一个工作文件夹，用对话的方式让模型读写文件、搜索代码、执行命令。可以同时配置多个模型服务：DeepSeek、OpenAI、Anthropic、xAI，以及任何兼容 OpenAI 接口格式的服务；OpenAI 的模型也可以用 ChatGPT 账号登录，使用 ChatGPT 套餐的额度。
 
 > 早期版本，主要为作者自用而写。欢迎试用和提 issue。
 
@@ -8,13 +8,16 @@
 
 - 流式对话，可展开查看模型的思考过程
 - 新对话时从用过的文件夹里选择工作文件夹，也可以新增一个
-- 点击输入框右下角的模型名，用滑杆调整思考强度：关闭 / 低 / 高 / 最高，对应接口的 `reasoning_effort` 参数。没有调整过，或者按"重设"回到推荐值时，不发送这个参数，由服务自己决定，所以不认识这个参数的服务也能用
+- 多个模型服务，各用各的 API Key；点击输入框右下角的模型名就能在它们的模型之间切换，同一个会话里也可以中途换模型
+- 用 ChatGPT 账号登录后，可以不填 API Key，直接使用 ChatGPT 套餐里的额度（见下文"用 ChatGPT 套餐登录"）
+- 用滑杆调整思考强度，档位随服务和模型而定：OpenAI 和 Anthropic 是低 / 中 / 高 / 超高 / 最高，xAI 到超高为止，DeepSeek 是关闭 / 低 / 高 / 最高。没有调整过，或者按"重设"回到推荐值时，不发送这个参数，由服务自己决定。每个模型各自记住自己的档位
+- 滑杆左边的闪电按钮是 Fast Mode：同一个模型更快地输出，价格（或套餐用量）约为 2 倍。只有服务提供这个选项的模型才能开启，同样按模型记住
 - 模型的版本名（例如 DeepSeek-V4.1-Flash）和它支持的思考档位从服务的模型列表里读取；服务不提供时显示你填写的模型名
 - 六个内置工具：读取文件、写入文件、编辑文件、列出目录、搜索、执行命令
 - 写文件和执行命令前需要确认，可以选择"本次会话始终允许"
 - 文件操作限制在所选的工作文件夹内
 - 会话历史保存在本机，在侧栏里按工作文件夹分组，可以重命名、归档和删除
-- API Key 使用系统凭据加密后保存（Windows DPAPI / macOS Keychain / Linux libsecret），不会进入项目目录
+- API Key 和 ChatGPT 登录信息使用系统凭据加密后保存（Windows DPAPI / macOS Keychain / Linux libsecret），不会进入项目目录
 
 ## 扩展
 
@@ -37,7 +40,42 @@ npm install
 npm run dev
 ```
 
-首次启动会弹出设置窗口，填入 API Key 即可。默认接口地址是 `https://api.deepseek.com`，默认模型是 `deepseek-flash`。
+首次启动会弹出设置窗口，填入 DeepSeek 的 API Key 即可；想用别的服务，在"设置 → 模型"里添加。
+
+### 模型服务
+
+| 服务 | 接口类型 | 说明 |
+|---|---|---|
+| DeepSeek | OpenAI 兼容（Chat Completions） | 默认。用真实接口测试过 |
+| xAI | OpenAI 兼容（Chat Completions） | 尚未用真实接口测试 |
+| OpenAI | Responses API | 尚未用真实接口测试 |
+| Anthropic | Messages API | 尚未用真实接口测试 |
+| ChatGPT 套餐 | Responses API，用 ChatGPT 账号登录 | 不需要 API Key。尚未用真实账号测试 |
+| 其他服务 | 三种类型任选 | 填接口地址即可，多数第三方服务选"OpenAI 兼容" |
+
+标"尚未用真实接口测试"的几种，只对照各家的文档、用本地模拟的服务验证过请求和响应的处理。
+
+### 用 ChatGPT 套餐登录
+
+API Key 是按量计费的，和聊天产品的订阅分开。OpenAI 为开源应用提供了一种官方的登录方式（[Sign in with ChatGPT](https://developers.openai.com/siwc/token-sharing-open-source)），登录后请求计入你 ChatGPT 套餐的额度。StarBench 用的就是这种方式，没有模拟官方客户端，也不读取网页版的登录状态。
+
+- 在"设置 → 模型"里点 **Continue with ChatGPT**。登录和授权在你自己的浏览器里完成，应用看不到你的密码；完成后浏览器跳回本机的 `http://127.0.0.1:1455/auth/callback`（这个端口被占用时换一个），应用在那里接收结果。
+- 登录得到的令牌加密保存在本机，一小时过期一次，由应用自动续期。退出登录时会通知 OpenAI 撤销；通知不到时应用会告诉你，你可以到 ChatGPT 的设置里断开 StarBench。
+- 能用哪些模型由账号的套餐决定，应用从 OpenAI 返回的列表里取。
+- 达到用量上限时应用会停下来，给出去 ChatGPT 用量页面的入口，不会自己改用别的付费方式。
+- OpenAI 把这项功能标为预览，能不能用取决于你的账号和 OpenAI 开放的范围。应用按它的要求发请求：不保存会话（`store: false`）、流式返回、工具放在一个命名空间里。
+- **尚未用真实的 ChatGPT 账号测试过。** 整个流程对照文档实现，用本地模拟的登录服务（[`test/fake-chatgpt.ts`](test/fake-chatgpt.ts)）验证。
+- 登录按钮按 OpenAI 的要求使用原文 "Continue with ChatGPT"；它还要求按钮带 ChatGPT 的图标，目前没有加。
+
+其他家的订阅不能这样用：Anthropic 不允许第三方应用提供 Claude.ai 登录或使用订阅额度，xAI 没有公开面向第三方应用的登录方式，所以这两家只能用 API Key。
+
+几点行为说明：
+
+- 对话中途换模型时，之前的文字、工具调用和结果都会带过去；各家模型不公开的思考内容（加密的或带签名的）只交还给写下它的那个服务。
+- Anthropic 的部分模型出于安全原因可能拒绝某个请求。对支持的模型，应用会让服务自动改由另一个模型回答（`fallbacks`，测试版功能），不成功时显示拒绝的提示。
+- 模型给出的工具参数不完整时（例如输出被截断），工具不会执行，错误会交还给模型让它重来。
+- Fast Mode 用的是各家自己的开关，只在官方接口上发送：OpenAI 是 `service_tier: "fast"`（API Key 和 ChatGPT 套餐登录都可以开），Anthropic 是 `speed: "fast"`（目前是 Claude Fable 5.2、Mythos 5.2 和 Opus 5.5）。DeepSeek 和 xAI 没有这个选项。Anthropic 的 Fast Mode 有单独的限流，用完时应用会自动按普通速度重发这一次请求。尚未用真实接口测试；ChatGPT 套餐这条通道是否接受这个开关，OpenAI 的文档没有写，被拒绝时应用会提示把它关掉。
+- 思考档位在服务不说明模型支持哪些时按上面的默认表给出。模型不认识的档位（例如旧模型不认识"最高"）会在发消息时由服务报错。
 
 其他命令：
 
@@ -61,6 +99,14 @@ $env:STARBENCH_USER_DATA = "D:\scratch\starbench"; npm run dev
 ```
 
 同一个数据目录同时只能运行一个 StarBench，再启动一次只会把已经打开的窗口调到前面。所以如果安装版正开着，`npm run dev` 会立刻退出；像上面那样换一个数据目录，两者就能同时运行。
+
+调试 ChatGPT 登录时，可以让应用去找一个本地的替身服务，而不是 OpenAI：
+
+```powershell
+$env:STARBENCH_SIGNIN_TEST_SERVER = "http://127.0.0.1:9555"; npm run dev
+```
+
+这时应用不会自己打开浏览器，登录链接显示在设置窗口里，在 OpenAI 那边登录过的账号也不会被用到。[`test/fake-chatgpt.ts`](test/fake-chatgpt.ts) 里的 `startFakeChatGpt(9555)` 就是这样一个替身，测试用的也是它。
 
 ## 打包成独立应用
 
@@ -88,7 +134,7 @@ npm run dist
 
 - **执行命令不受工作文件夹限制。** 路径检查只约束文件工具；一旦你允许了某条命令，它就能做你的账户能做的任何事。请在允许之前读一下命令内容。
 - "始终允许"按工具类型生效：允许了"执行命令"之后，本次会话里的所有命令都不再询问。
-- **插件拥有完整权限。** 插件和应用运行在同一个进程里，能读写任意文件、执行命令，也能访问你的 API Key。只启用你信任的插件；新插件默认是停用的。
+- **插件拥有完整权限。** 插件和应用运行在同一个进程里，能读写任意文件、执行命令，也能访问你的 API Key 和 ChatGPT 登录。只启用你信任的插件；新插件默认是停用的。
 - Skill 的正文是给模型的指令，MCP 服务器是在你电脑上运行的程序（或你把数据发给的远程服务）。安装来源不明的 Skill 或 MCP 服务器之前请先看清它做什么。
 - 你的代码和对话内容会被发送到你配置的模型服务。
 
@@ -99,7 +145,10 @@ src/
   main/          Electron 主进程
     agent.ts     agent 循环：请求模型 → 执行工具 → 回传结果
     tools.ts     工具注册表与内置工具
-    models.ts    向模型服务查询模型的名称和思考档位
+    providers/   各种接口格式的适配：chat.ts、responses.ts、anthropic.ts
+    chatgpt/     用 ChatGPT 登录：oauth.ts 是协议本身，login.ts 是一次登录的全过程
+    models.ts    向 OpenAI 兼容的服务查询模型列表、名称和思考档位
+    settings-model.ts  设置文件的结构，以及旧版设置的转换
     workspaces.ts  用过的工作文件夹列表
     kernel.ts    插件内核（Cordis）以及暴露给插件的服务
     plugins.ts   插件的发现、启用与停用
@@ -121,6 +170,7 @@ electron-builder.yml   打包配置
 ## 尚未实现
 
 - 长对话的上下文压缩
+- 同时登录多个 ChatGPT 账号（现在是一个，可以换）；登录按钮上的 ChatGPT 图标
 - 多个会话同时运行
 - 编辑前的 diff 预览
 - 插件给界面添加内容（目前插件只能添加工具和 Skill）

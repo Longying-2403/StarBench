@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
-import type { McpServerStatus, PluginInfo, Settings, SkillInfo } from '../../shared/types.ts'
+import { CHATGPT_HELP_URL, PROVIDER_KINDS, PROVIDER_PRESETS } from '../../shared/types.ts'
+import type { McpServerStatus, ModelChoice, PluginInfo, ProviderInfo, ProviderKind, Settings, SkillInfo } from '../../shared/types.ts'
+import { ChatGptButton, ChatGptPane } from './ChatGptPane.tsx'
 import { errorText } from './util.ts'
 
 const api = window.harness
@@ -13,61 +15,140 @@ const TABS = [
 ] as const
 type TabId = (typeof TABS)[number]['id']
 
-function ModelTab({
-  settings,
-  onClose,
-  onSaved
+const KIND_LABELS: Record<ProviderKind, string> = {
+  'openai-chat': 'OpenAI 兼容（Chat Completions）',
+  'openai-responses': 'OpenAI（Responses API）',
+  anthropic: 'Anthropic（Messages API）'
+}
+const KIND_HINTS: Record<ProviderKind, string> = {
+  'openai-chat': 'DeepSeek、xAI 和大多数兼容 OpenAI 格式的服务都用这种。',
+  'openai-responses': 'OpenAI 自己的新接口，能返回思考摘要。',
+  anthropic: 'Claude 的接口。'
+}
+
+const hostOf = (url: string): string => {
+  try {
+    return new URL(url).host
+  } catch {
+    return url
+  }
+}
+
+/** What the form is filled with: an existing provider, or a starting point for a new one. */
+interface Draft {
+  /** Absent for a provider that is being added. */
+  id?: string
+  name: string
+  kind: ProviderKind
+  baseURL: string
+  model: string
+  hasApiKey: boolean
+  keyHint: string
+}
+
+function ProviderForm({
+  draft,
+  removable,
+  planOffered,
+  onBack,
+  onChanged
 }: {
-  settings: Settings
-  onClose: () => void
-  onSaved: (s: Settings) => void
+  draft: Draft
+  /** The last provider stays. */
+  removable: boolean
+  /** Signing in with ChatGPT is on offer one step back, for a person without a key. */
+  planOffered: boolean
+  onBack: () => void
+  onChanged: (settings: Settings) => void
 }) {
-  const [baseURL, setBaseURL] = useState(settings.baseURL)
-  const [model, setModel] = useState(settings.model)
+  const [name, setName] = useState(draft.name)
+  const [kind, setKind] = useState(draft.kind)
+  const [baseURL, setBaseURL] = useState(draft.baseURL)
+  const [model, setModel] = useState(draft.model)
   const [apiKey, setApiKey] = useState('')
+  const [models, setModels] = useState<ModelChoice[]>([])
   const [error, setError] = useState('')
-  const [saving, setSaving] = useState(false)
+  const [busy, setBusy] = useState(false)
+  /** Removing takes a second press. */
+  const [confirming, setConfirming] = useState(false)
+
+  // The service's own list makes the model field a pick list. It is a convenience: typing still works.
+  useEffect(() => {
+    if (draft.id && draft.hasApiKey) api.listModels(draft.id).then(setModels, () => {})
+  }, [draft.id, draft.hasApiKey])
 
   const submit = async (e: FormEvent): Promise<void> => {
     e.preventDefault()
-    setSaving(true)
+    setBusy(true)
     setError('')
     try {
       // An empty key field means "keep the stored key".
-      onSaved(await api.saveSettings({ baseURL, model, ...(apiKey ? { apiKey } : {}) }))
-      onClose()
+      onChanged(await api.saveProvider({ id: draft.id, name, kind, baseURL, model, ...(apiKey ? { apiKey } : {}) }))
+      onBack()
     } catch (err) {
       setError(errorText(err))
     } finally {
-      setSaving(false)
+      setBusy(false)
+    }
+  }
+
+  const remove = async (): Promise<void> => {
+    if (!draft.id) return
+    if (!confirming) return setConfirming(true)
+    setBusy(true)
+    try {
+      onChanged(await api.removeProvider(draft.id))
+      onBack()
+    } catch (err) {
+      setError(errorText(err))
+      setBusy(false)
     }
   }
 
   return (
     <form className="tab-body" onSubmit={submit}>
       <label>
+        名称
+        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="显示在模型列表里的名字" />
+      </label>
+      <label>
+        接口类型
+        <select value={kind} onChange={(e) => setKind(e.target.value as ProviderKind)}>
+          {PROVIDER_KINDS.map((k) => (
+            <option key={k} value={k}>
+              {KIND_LABELS[k]}
+            </option>
+          ))}
+        </select>
+        <span className="hint">{KIND_HINTS[kind]}</span>
+      </label>
+      <label>
+        接口地址
+        <input value={baseURL} onChange={(e) => setBaseURL(e.target.value)} placeholder="https://…" />
+      </label>
+      <label>
         API Key
         <input
           type="password"
           value={apiKey}
-          autoFocus
+          autoFocus={!draft.hasApiKey}
           onChange={(e) => setApiKey(e.target.value)}
-          placeholder={settings.hasApiKey ? '已保存，留空则不修改' : 'sk-…'}
+          placeholder={draft.hasApiKey ? '已保存，留空则不修改' : draft.keyHint}
         />
-        <span className="hint">使用系统凭据加密后保存在本机，不会写入项目文件。</span>
-      </label>
-      <label>
-        接口地址
-        <input value={baseURL} onChange={(e) => setBaseURL(e.target.value)} />
-        <span className="hint">任何兼容 OpenAI 格式的服务都可以。</span>
+        <span className="hint">
+          使用系统凭据加密后保存在本机，不会写入项目文件。
+          {planOffered && !draft.hasApiKey && '没有 API Key？点"返回"，可以改用 ChatGPT 套餐登录。'}
+        </span>
       </label>
       <label>
         模型
-        <input value={model} onChange={(e) => setModel(e.target.value)} list="models" />
-        <datalist id="models">
-          <option value="deepseek-flash" />
-          <option value="deepseek-v4-pro" />
+        <input value={model} onChange={(e) => setModel(e.target.value)} list="provider-models" placeholder="可以留空" />
+        <datalist id="provider-models">
+          {models.map((m) => (
+            <option key={m.id} value={m.id} label={m.name} />
+          ))}
         </datalist>
+        <span className="hint">可以先留空：保存之后，在输入框右下角点模型名，就能从这个服务的模型列表里选。</span>
       </label>
       {error && (
         <div className="msg-error" role="alert">
@@ -75,14 +156,139 @@ function ModelTab({
         </div>
       )}
       <div className="dialog-actions">
-        <button type="button" className="btn" onClick={onClose}>
-          取消
+        {draft.id && removable && (
+          <button type="button" className="btn btn-danger" disabled={busy} onClick={() => void remove()}>
+            {confirming ? '确认删除？' : '删除'}
+          </button>
+        )}
+        <button type="button" className="btn" onClick={onBack}>
+          返回
         </button>
-        <button type="submit" className="btn btn-primary" disabled={saving}>
+        <button type="submit" className="btn btn-primary" disabled={busy}>
           保存
         </button>
       </div>
     </form>
+  )
+}
+
+/** What the tab shows in place of the list: the form of a provider with a key, or the pane of a ChatGPT sign-in. */
+type Editing = { type: 'key'; draft: Draft } | { type: 'chatgpt'; providerId?: string; autoStart?: boolean } | null
+
+const editingOf = (provider: ProviderInfo): Editing =>
+  provider.auth === 'chatgpt'
+    ? { type: 'chatgpt', providerId: provider.id }
+    : { type: 'key', draft: { ...provider, keyHint: PROVIDER_PRESETS.find((p) => p.id === provider.id)?.keyHint ?? '' } }
+
+/** The words for what a provider still needs before it can be used; empty when it needs nothing. */
+function missing(provider: ProviderInfo): string {
+  if (provider.hasApiKey) return ''
+  if (provider.auth !== 'chatgpt') return '未填 API Key'
+  return provider.account?.signedIn ? '未启用套餐额度' : '未登录'
+}
+
+function ProvidersTab({
+  settings,
+  onChanged,
+  onWelcome
+}: {
+  settings: Settings
+  onChanged: (s: Settings) => void
+  onWelcome: () => void
+}) {
+  // With no usable provider yet, the form for the first one is what the user needs to see.
+  const [editing, setEditing] = useState<Editing>(() => {
+    if (settings.hasApiKey) return null
+    return editingOf(settings.providers.find((p) => p.id === settings.activeProviderId) ?? settings.providers[0])
+  })
+  const hasPlan = settings.providers.some((p) => p.auth === 'chatgpt')
+
+  if (editing?.type === 'chatgpt') {
+    return (
+      <ChatGptPane
+        key={editing.providerId ?? 'new'}
+        settings={settings}
+        providerId={editing.providerId}
+        autoStart={editing.autoStart}
+        onBack={() => setEditing(null)}
+        onChanged={onChanged}
+        onWelcome={onWelcome}
+      />
+    )
+  }
+  if (editing) {
+    return (
+      <ProviderForm
+        // A fresh form for each provider, so nothing typed for one shows up in another.
+        key={editing.draft.id ?? `new-${editing.draft.name}`}
+        draft={editing.draft}
+        removable={settings.providers.length > 1}
+        planOffered={!hasPlan}
+        onBack={() => setEditing(null)}
+        onChanged={onChanged}
+      />
+    )
+  }
+
+  const taken = new Set(settings.providers.map((p) => p.id))
+  return (
+    <div className="tab-body">
+      <p className="hint">
+        可以添加多个模型服务，各用各的 API Key，也可以用 ChatGPT 套餐登录。用哪个模型，在输入框右下角点模型名切换。
+      </p>
+      <ul className="rows">
+        {settings.providers.map((provider) => (
+          <li key={provider.id} className="row">
+            <div className="row-main">
+              <div className="row-title">
+                {provider.name}
+                {provider.id === settings.activeProviderId && <span className="badge badge-active">使用中</span>}
+                {missing(provider) && <span className="badge">{missing(provider)}</span>}
+              </div>
+              <div className="row-meta">
+                {provider.model || '尚未选择模型'} ·{' '}
+                {provider.auth === 'chatgpt' ? (provider.account?.email ?? 'ChatGPT 套餐') : hostOf(provider.baseURL)}
+              </div>
+            </div>
+            <button className="btn btn-small" onClick={() => setEditing(editingOf(provider))} aria-label={`编辑 ${provider.name}`}>
+              {provider.auth === 'chatgpt' ? '管理' : '编辑'}
+            </button>
+          </li>
+        ))}
+      </ul>
+      <div className="toolbar toolbar-wrap">
+        <span className="hint">添加：</span>
+        {PROVIDER_PRESETS.filter((preset) => !taken.has(preset.id)).map((preset) => (
+          <button
+            key={preset.id}
+            className="btn btn-small"
+            onClick={() => setEditing({ type: 'key', draft: { ...preset, id: undefined, hasApiKey: false } })}
+          >
+            {preset.name}
+          </button>
+        ))}
+        <button
+          className="btn btn-small"
+          onClick={() => setEditing({ type: 'key', draft: { name: '', kind: 'openai-chat', baseURL: '', model: '', hasApiKey: false, keyHint: '' } })}
+        >
+          其他服务
+        </button>
+      </div>
+      {!hasPlan && (
+        <div className="plan-card">
+          <div className="plan-title">使用你的 ChatGPT 套餐</div>
+          <p className="plan-text">
+            用 ChatGPT 账号登录后，在这里使用 OpenAI 的模型会计入你 ChatGPT 套餐里的额度，不需要 API Key。
+            <a className="plan-link" href={CHATGPT_HELP_URL} target="_blank" rel="noreferrer">
+              了解更多
+            </a>
+          </p>
+          <div className="toolbar">
+            <ChatGptButton onClick={() => setEditing({ type: 'chatgpt', autoStart: true })} />
+          </div>
+        </div>
+      )}
+    </div>
   )
 }
 
@@ -120,7 +326,7 @@ function PluginsTab() {
   return (
     <div className="tab-body">
       <p className="notice">
-        插件在应用内以完整权限运行：可以读写文件、执行命令，也能访问你的 API Key。只启用你信任的插件。
+        插件在应用内以完整权限运行：可以读写文件、执行命令，也能访问你的 API Key 和 ChatGPT 登录。只启用你信任的插件。
       </p>
       <div className="toolbar">
         <button className="btn" onClick={() => api.openPluginsFolder().catch((err) => setError(errorText(err)))}>
@@ -333,11 +539,14 @@ function McpTab() {
 export function SettingsDialog({
   settings,
   onClose,
-  onSaved
+  onSaved,
+  onWelcome
 }: {
   settings: Settings
   onClose: () => void
   onSaved: (s: Settings) => void
+  /** The first ChatGPT sign-in with plan usage has just succeeded. */
+  onWelcome: () => void
 }) {
   const [tab, setTab] = useState<TabId>('model')
 
@@ -371,7 +580,7 @@ export function SettingsDialog({
             </button>
           ))}
         </div>
-        {tab === 'model' && <ModelTab settings={settings} onClose={onClose} onSaved={onSaved} />}
+        {tab === 'model' && <ProvidersTab settings={settings} onChanged={onSaved} onWelcome={onWelcome} />}
         {tab === 'plugins' && <PluginsTab />}
         {tab === 'skills' && <SkillsTab />}
         {tab === 'mcp' && <McpTab />}
