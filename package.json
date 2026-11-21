@@ -1,7 +1,14 @@
 {
   "name": "starbench",
+  "productName": "StarBench",
   "version": "0.1.0",
   "description": "A desktop GUI agent harness for DeepSeek and other OpenAI-compatible models",
+  "author": "龍櫻Longying",
+  "homepage": "https://github.com/Longying-2403/StarBench",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Longying-2403/StarBench.git"
+  },
   "type": "module",
   "main": "./out/main/index.js",
   "license": "MIT",
@@ -15,7 +22,8 @@
     "build": "electron-vite build",
     "start": "electron-vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
-    "test": "node --test \"test/*.test.ts\""
+    "test": "node --test \"test/*.test.ts\"",
+    "dist": "electron-vite build && electron-builder --publish never"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",
@@ -28,6 +36,7 @@
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^6.3.0",
     "electron": "^45.4.1",
+    "electron-builder": "^26.18.0",
     "electron-vite": "^6.0.0",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",

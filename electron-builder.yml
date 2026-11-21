@@ -1,0 +1,32 @@
+# Packaging configuration. Run with `npm run dist`; the results land in dist/.
+appId: io.github.longying-2403.starbench
+copyright: Copyright © 2026 龍櫻Longying
+
+directories:
+  output: dist
+
+# Only the built code ships. package.json and the production dependencies are added automatically.
+files:
+  - out/**/*
+  # TypeScript sources, type declarations and source maps of dependencies are never loaded at run time.
+  - "!**/node_modules/**/*.{ts,mts,cts,map}"
+
+# No dependency contains native code, so there is nothing to rebuild for Electron.
+npmRebuild: false
+
+win:
+  # The name of the zip; the installer overrides it below.
+  artifactName: ${productName}-${version}-win-${arch}.${ext}
+  target:
+    - nsis
+    - zip
+
+nsis:
+  artifactName: ${productName}-${version}-win-${arch}-setup.${ext}
+  # A normal wizard instead of a silent install, so people can choose where it goes.
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  # Installs for the current user only: no administrator prompt.
+  perMachine: false
+  # Sessions, settings, plugins and skills survive an uninstall or an upgrade.
+  deleteAppDataOnUninstall: false

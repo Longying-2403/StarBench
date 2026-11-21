@@ -25,7 +25,7 @@
 
 [`examples/`](examples) 里各有一个可以直接复制使用的示例插件和示例 Skill。
 
-## 运行
+## 从源码运行
 
 需要 Node.js 22.18 或更高版本（测试直接运行 TypeScript 文件，这是 Node 从 22.18 起默认支持的）。
 
@@ -57,6 +57,30 @@ STARBENCH_USER_DATA=/path/to/a/scratch/folder npm run dev
 $env:STARBENCH_USER_DATA = "D:\scratch\starbench"; npm run dev
 ```
 
+同一个数据目录同时只能运行一个 StarBench，再启动一次只会把已经打开的窗口调到前面。所以如果安装版正开着，`npm run dev` 会立刻退出；像上面那样换一个数据目录，两者就能同时运行。
+
+## 打包成独立应用
+
+```sh
+npm run dist
+```
+
+会在 `dist/` 里生成（以 Windows 为例）：
+
+| 文件 | 说明 |
+|---|---|
+| `StarBench-<版本>-win-x64-setup.exe` | 安装包。只为当前用户安装，不需要管理员权限，可以选择安装位置 |
+| `StarBench-<版本>-win-x64.zip` | 免安装版。解压后运行里面的 `StarBench.exe` |
+
+打包好的应用不需要 Node.js 就能运行。第一次打包时 electron-builder 会联网下载打包工具。
+
+几点说明：
+
+- **安装包没有代码签名。** 从网上下载后第一次运行，Windows 会提示"Windows 已保护你的电脑"，需要点"更多信息 → 仍要运行"。
+- 安装版、免安装版和从源码运行的版本共用同一个数据目录（Windows 上是 `%APPDATA%\StarBench`），会话、设置、插件和 Skill 是互通的。卸载不会删除这个目录。
+- 用 `npx`、`uvx` 启动的本地 MCP 服务器仍然需要电脑上装有 Node.js 或 Python，应用不会自带。
+- 目前只在 Windows 上打包并验证过。macOS 和 Linux 需要在各自的系统上运行同一条命令，尚未测试。
+
 ## 安全须知
 
 - **执行命令不受工作文件夹限制。** 路径检查只约束文件工具；一旦你允许了某条命令，它就能做你的账户能做的任何事。请在允许之前读一下命令内容。
@@ -84,6 +108,7 @@ src/
 test/            测试（node:test）
 docs/            插件、Skill、MCP 的说明
 examples/        示例插件与示例 Skill
+electron-builder.yml   打包配置
 ```
 
 `src/main` 里除了 `index.ts` 和 `store.ts`，其余模块都不依赖 Electron，可以单独在 Node 里运行和测试。
@@ -96,7 +121,7 @@ examples/        示例插件与示例 Skill
 - 插件给界面添加内容（目前插件只能添加工具和 Skill）
 - 插件配置的图形界面、修改代码后的热重载
 - MCP 的 OAuth 登录、resources 和 prompts
-- 安装包（目前只能从源码运行）
+- macOS 和 Linux 的安装包、代码签名、自动更新、应用图标
 
 ## 许可证
 

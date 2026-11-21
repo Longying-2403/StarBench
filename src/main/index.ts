@@ -17,6 +17,10 @@ if (process.env.STARBENCH_USER_DATA) {
   app.setPath('userData', path.resolve(process.env.STARBENCH_USER_DATA))
 }
 
+// Two copies sharing one data folder would overwrite each other's sessions and settings.
+// The lock belongs to the data folder, so a copy started with another STARBENCH_USER_DATA still runs.
+const isPrimaryInstance = app.requestSingleInstanceLock()
+
 // Plugin code runs in this process; a promise it forgot to handle must not take the app down.
 process.on('unhandledRejection', (reason) => {
   console.error('[main] unhandled rejection:', reason)
@@ -242,23 +246,37 @@ function registerIpc(): void {
   })
 }
 
-void app.whenReady().then(() => {
-  registerIpc()
-  createWindow()
-  // Plugins load in the background so a slow or stuck one cannot delay the window.
-  pluginsReady = startPlugins()
-  pluginsReady.catch((err) => console.error('[plugins] failed to start:', err))
-  // Only an unreadable mcp.json rejects here; the settings page shows the same error when it is saved.
-  mcp.init().catch((err) => console.error('[mcp] could not load mcp.json:', err))
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow()
+if (!isPrimaryInstance) {
+  console.error('StarBench is already running with this data folder; switching to that window.')
+  app.quit()
+} else {
+  // Starting the app again brings the running window forward instead.
+  app.on('second-instance', () => {
+    if (!mainWindow) return
+    if (mainWindow.isMinimized()) mainWindow.restore()
+    mainWindow.show()
+    mainWindow.focus()
   })
-})
+
+  void app.whenReady().then(() => {
+    registerIpc()
+    createWindow()
+    // Plugins load in the background so a slow or stuck one cannot delay the window.
+    pluginsReady = startPlugins()
+    pluginsReady.catch((err) => console.error('[plugins] failed to start:', err))
+    // Only an unreadable mcp.json rejects here; the settings page shows the same error when it is saved.
+    mcp.init().catch((err) => console.error('[mcp] could not load mcp.json:', err))
+    app.on('activate', () => {
+      if (BrowserWindow.getAllWindows().length === 0) createWindow()
+    })
+  })
+}
 
 // Give plugins a chance to release what they hold (child processes, files) before exiting.
 let shuttingDown = false
 app.on('before-quit', (event) => {
-  if (shuttingDown) return
+  // A copy that never started has nothing to release.
+  if (shuttingDown || !isPrimaryInstance) return
   shuttingDown = true
   event.preventDefault()
   const giveUp = new Promise((resolve) => setTimeout(resolve, 3000))
