@@ -6,6 +6,9 @@
   "main": "./out/main/index.js",
   "license": "MIT",
   "private": true,
+  "engines": {
+    "node": ">=22.18.0"
+  },
   "scripts": {
     "postinstall": "node node_modules/electron/install.js",
     "dev": "electron-vite dev",
@@ -15,6 +18,7 @@
     "test": "node --test \"test/*.test.ts\""
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "cordis": "4.0.0-rc.13",
     "openai": "^7.62.0"
   },

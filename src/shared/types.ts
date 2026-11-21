@@ -66,6 +66,15 @@ export interface PluginInfo {
   skills: string[]
 }
 
+export interface McpServerStatus {
+  name: string
+  transport: 'stdio' | 'http'
+  state: 'disabled' | 'connecting' | 'connected' | 'error'
+  error?: string
+  /** Names of its tools as the model sees them (`mcp__server__tool`). */
+  tools: string[]
+}
+
 export interface SkillInfo {
   name: string
   description: string
@@ -100,6 +109,12 @@ export interface HarnessApi {
   openPluginsFolder(): Promise<void>
   listSkills(): Promise<SkillInfo[]>
   openSkillsFolder(): Promise<void>
+  /** The text of mcp.json and the state of each server in it. `error` is set when the file could not be loaded. */
+  getMcp(): Promise<{ config: string; servers: McpServerStatus[]; error?: string }>
+  /** Validates and saves the text, then reconnects. Rejects with a readable message when it is invalid. */
+  saveMcp(config: string): Promise<McpServerStatus[]>
+  reconnectMcp(): Promise<McpServerStatus[]>
+  mcpStatus(): Promise<McpServerStatus[]>
   pickWorkspace(): Promise<string | null>
   listSessions(): Promise<SessionSummary[]>
   loadSession(id: string): Promise<Session | null>

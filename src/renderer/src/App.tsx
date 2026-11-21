@@ -61,9 +61,17 @@ function ToolDetails({ call }: { call: ToolCall }) {
   )
 }
 
+/** How a tool call ended, judged from the result text the agent loop recorded for it. */
+function toolStatus(output: string | undefined): { label: string; failed: boolean } {
+  if (output === undefined) return { label: '运行中…', failed: false }
+  if (output === 'The user denied this tool call.') return { label: '已拒绝', failed: true }
+  if (output === 'Cancelled by user') return { label: '已取消', failed: true }
+  if (output.startsWith('Error:')) return { label: '失败', failed: true }
+  return { label: '完成', failed: false }
+}
+
 function ToolCard({ item }: { item: Extract<Item, { kind: 'tool' }> }) {
-  const failed = item.output?.startsWith('Error:') || item.output === 'The user denied this tool call.'
-  const status = item.output === undefined ? '运行中…' : failed ? '失败' : '完成'
+  const { label: status, failed } = toolStatus(item.output)
   return (
     <details className={`tool ${failed ? 'tool-failed' : ''}`}>
       <summary>
@@ -136,7 +144,9 @@ function PermissionBar({
 }) {
   return (
     <div className="permission" role="alertdialog" aria-label="权限确认">
-      <div className="permission-title">允许{TOOL_LABELS[call.name] ?? call.name}？</div>
+      <div className="permission-title">
+        {TOOL_LABELS[call.name] ? `允许${TOOL_LABELS[call.name]}？` : `允许调用工具 ${call.name}？`}
+      </div>
       <div className="permission-body">
         <ToolDetails call={call} />
       </div>

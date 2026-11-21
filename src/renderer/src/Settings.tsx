@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
-import type { PluginInfo, Settings, SkillInfo } from '../../shared/types.ts'
+import type { McpServerStatus, PluginInfo, Settings, SkillInfo } from '../../shared/types.ts'
 import { errorText } from './util.ts'
 
 const api = window.harness
@@ -8,7 +8,8 @@ const api = window.harness
 const TABS = [
   { id: 'model', label: '模型' },
   { id: 'plugins', label: '插件' },
-  { id: 'skills', label: 'Skills' }
+  { id: 'skills', label: 'Skills' },
+  { id: 'mcp', label: 'MCP' }
 ] as const
 type TabId = (typeof TABS)[number]['id']
 
@@ -214,6 +215,121 @@ function SkillsTab() {
   )
 }
 
+const MCP_STATE: Record<McpServerStatus['state'], string> = {
+  disabled: '已停用',
+  connecting: '连接中',
+  connected: '已连接',
+  error: '出错'
+}
+/** Badge colours are shared with the plugin states. */
+const MCP_BADGE: Record<McpServerStatus['state'], string> = {
+  disabled: 'disabled',
+  connecting: 'waiting',
+  connected: 'active',
+  error: 'error'
+}
+const MCP_EXAMPLE = `{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "D:/some/folder"]
+    }
+  }
+}`
+
+function McpTab() {
+  const [config, setConfig] = useState<string | null>(null)
+  const [servers, setServers] = useState<McpServerStatus[]>([])
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  useEffect(() => {
+    api.getMcp().then(
+      (mcp) => {
+        setConfig(mcp.config)
+        setServers(mcp.servers)
+        // A hand-edited file that no longer parses would otherwise just look like "nothing changed".
+        if (mcp.error) setError(`mcp.json 无法加载，文件里的内容没有生效：${mcp.error}`)
+      },
+      (err) => setError(errorText(err))
+    )
+  }, [])
+
+  // Connecting happens in the background; keep asking until every server has settled.
+  const connecting = servers.some((s) => s.state === 'connecting')
+  useEffect(() => {
+    if (!connecting) return
+    const timer = setInterval(() => void api.mcpStatus().then(setServers, () => {}), 1000)
+    return () => clearInterval(timer)
+  }, [connecting])
+
+  const apply = async (action: () => Promise<McpServerStatus[]>): Promise<void> => {
+    setBusy(true)
+    setError('')
+    try {
+      setServers(await action())
+    } catch (err) {
+      setError(errorText(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="tab-body">
+      <p className="hint">
+        MCP 服务器给模型提供现成的工具。配置使用通用的 mcpServers 格式，可以直接粘贴其他应用里的配置。每次调用 MCP
+        工具前都会征求你的同意。环境变量和请求头里的密钥会以明文保存在本机的 mcp.json 里。
+      </p>
+      {/* The server list comes first: it is what people check, and it must not hide below the editor. */}
+      <ul className="rows">
+        {servers.map((server) => (
+          <li key={server.name} className="row">
+            <div className="row-main">
+              <div className="row-title">
+                {server.name}
+                <span className="row-meta">{server.transport === 'stdio' ? '本地进程' : '远程服务'}</span>
+                <span className={`badge badge-${MCP_BADGE[server.state]}`}>{MCP_STATE[server.state]}</span>
+              </div>
+              {server.tools.length > 0 && (
+                <div className="row-meta">
+                  {server.tools.length} 个工具：{server.tools.map((t) => t.split('__').slice(2).join('__')).join('、')}
+                </div>
+              )}
+              {server.error && <div className="row-error">{server.error}</div>}
+            </div>
+          </li>
+        ))}
+      </ul>
+      <label>
+        mcp.json
+        <textarea
+          className="code-input"
+          value={config ?? ''}
+          disabled={config === null}
+          onChange={(e) => setConfig(e.target.value)}
+          placeholder={MCP_EXAMPLE}
+          rows={8}
+          spellCheck={false}
+        />
+      </label>
+      {error && (
+        <div className="msg-error" role="alert">
+          {error}
+        </div>
+      )}
+      <div className="toolbar">
+        <button className="btn btn-primary" disabled={busy || config === null} onClick={() => void apply(() => api.saveMcp(config ?? ''))}>
+          保存并连接
+        </button>
+        <button className="btn" disabled={busy} onClick={() => void apply(() => api.reconnectMcp())}>
+          重新连接
+        </button>
+      </div>
+    </div>
+  )
+}
+
 export function SettingsDialog({
   settings,
   onClose,
@@ -258,6 +374,7 @@ export function SettingsDialog({
         {tab === 'model' && <ModelTab settings={settings} onClose={onClose} onSaved={onSaved} />}
         {tab === 'plugins' && <PluginsTab />}
         {tab === 'skills' && <SkillsTab />}
+        {tab === 'mcp' && <McpTab />}
       </div>
     </div>
   )

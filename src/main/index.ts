@@ -6,6 +6,7 @@ import type { PermissionDecision, Session, SessionEvent, SettingsInput } from '.
 import { runTurn } from './agent.ts'
 import { createKernel } from './kernel.ts'
 import type { Kernel } from './kernel.ts'
+import { McpManager } from './mcp.ts'
 import { PluginManager } from './plugins.ts'
 import { SkillStore, loadSkillTool, selectedSkillPrompt, skillsPrompt } from './skills.ts'
 import * as store from './store.ts'
@@ -27,6 +28,11 @@ const tools = new ToolRegistry()
 registerBuiltinTools(tools)
 const skills = new SkillStore(path.join(app.getPath('userData'), 'skills'))
 tools.register(loadSkillTool(skills), 'builtin')
+const mcp = new McpManager({
+  configFile: path.join(app.getPath('userData'), 'mcp.json'),
+  tools,
+  clientInfo: { name: 'starbench', version: app.getVersion() }
+})
 let kernel: Kernel | null = null
 let plugins: PluginManager | null = null
 /** Resolves once enabled plugins have been started; plugin IPC waits for it. */
@@ -47,7 +53,8 @@ async function startPlugins(): Promise<PluginManager> {
 }
 
 async function shutdown(): Promise<void> {
-  await plugins?.dispose()
+  // MCP servers are child processes; closing the connections is what stops them.
+  await Promise.allSettled([mcp.dispose(), plugins?.dispose()])
   await kernel?.dispose()
 }
 
@@ -130,6 +137,21 @@ function registerIpc(): void {
     const error = await shell.openPath((await pluginManager()).dir)
     if (error) throw new Error(error)
   })
+
+  ipcMain.handle('mcp:get', async () => ({
+    config: await mcp.readConfigText(),
+    servers: mcp.status(),
+    ...(mcp.loadError ? { error: mcp.loadError } : {})
+  }))
+  ipcMain.handle('mcp:save', async (_e, config: string) => {
+    await mcp.saveConfigText(config)
+    return mcp.status()
+  })
+  ipcMain.handle('mcp:reconnect', async () => {
+    await mcp.reconnect()
+    return mcp.status()
+  })
+  ipcMain.handle('mcp:status', () => mcp.status())
 
   ipcMain.handle('skills:list', () => skills.list())
   ipcMain.handle('skills:openFolder', async () => {
@@ -226,6 +248,8 @@ void app.whenReady().then(() => {
   // Plugins load in the background so a slow or stuck one cannot delay the window.
   pluginsReady = startPlugins()
   pluginsReady.catch((err) => console.error('[plugins] failed to start:', err))
+  // Only an unreadable mcp.json rejects here; the settings page shows the same error when it is saved.
+  mcp.init().catch((err) => console.error('[mcp] could not load mcp.json:', err))
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })
