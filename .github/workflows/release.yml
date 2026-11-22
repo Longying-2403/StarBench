@@ -1,20 +1,27 @@
 # Packages StarBench for Windows on GitHub instead of on your computer.
 #
-# Push a tag such as v0.1.0 or v0.1.0-preview: the installer and the zip are
-# built from that commit and attached to a draft release, which you check and
-# publish on GitHub. A tag with a dash becomes a pre-release. The tag has to
-# start with the version in package.json, which also names the files.
-# RELEASE_NOTES_<tag>.md, if the commit has one, is the text of the release;
-# otherwise GitHub lists the commits.
+# Push a tag such as v0.1.0 or v0.1.0-r8: the installer and the zip are built
+# from that commit and attached to a draft release, which you check and publish
+# on GitHub. The tag has to start with the version in package.json. What comes
+# after the version (r8) is the label: it goes into the file names after the
+# version, as in StarBench-0.1.0-r8-win-x64.zip, and a tag with a label makes a
+# pre-release. RELEASE_NOTES_<tag>.md, if the commit has one, is the text of
+# the release; otherwise GitHub lists the commits.
 #
-# Run by hand from the Actions tab on a branch, it builds the same two files
-# and leaves them on the run's page instead of making a release.
+# Run by hand from the Actions tab on a branch, it builds the same two files and
+# leaves them on the run's page instead of making a release. A label typed there
+# goes into the file names the same way.
 name: Release
 
 on:
   push:
     tags: ['v*']
   workflow_dispatch:
+    inputs:
+      label:
+        description: 'Label for the file names, such as r9 (optional)'
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -37,15 +44,26 @@ jobs:
           # No npm cache: a release is built from the commit and nothing else.
           package-manager-cache: false
 
-      - name: Check the tag against package.json
-        if: github.ref_type == 'tag'
+      - name: Read the version and the label
         shell: bash
+        env:
+          TYPED_LABEL: ${{ inputs.label }}
         run: |
           version=$(node -p "require('./package.json').version")
-          case "$GITHUB_REF_NAME" in
-            "v$version" | "v$version"-*) echo "Tag $GITHUB_REF_NAME, version $version" ;;
-            *) echo "::error::Tag $GITHUB_REF_NAME does not start with v$version, the version in package.json."; exit 1 ;;
-          esac
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            case "$GITHUB_REF_NAME" in
+              "v$version") label= ;;
+              "v$version"-?*) label=${GITHUB_REF_NAME#"v$version-"} ;;
+              *) echo "::error::Tag $GITHUB_REF_NAME does not start with v$version, the version in package.json."; exit 1 ;;
+            esac
+          else
+            label=$TYPED_LABEL
+          fi
+          if [ -n "$label" ] && ! [[ "$label" =~ ^[0-9A-Za-z][0-9A-Za-z._-]*$ ]]; then
+            echo "::error::The label \"$label\" may only hold letters, digits, dots, dashes and underscores."; exit 1
+          fi
+          echo "Version $version, label ${label:-(none)}"
+          { echo "VERSION=$version"; echo "LABEL=$label"; } >> "$GITHUB_ENV"
 
       # Skips install scripts. Ours only downloads the Electron binary for running
       # the app; electron-builder fetches its own copy to package.
@@ -60,6 +78,19 @@ jobs:
 
       - name: Package
         run: npm run dist
+
+      # StarBench-0.1.0-win-x64-setup.exe becomes StarBench-0.1.0-r8-win-x64-setup.exe.
+      - name: Put the label in the file names
+        if: env.LABEL != ''
+        shell: bash
+        run: |
+          for file in dist/*-setup.exe dist/*.zip; do
+            name=${file#dist/}
+            labelled=${name/"-$VERSION-"/"-$VERSION-$LABEL-"}
+            if [ "$labelled" = "$name" ]; then echo "::error::$name has no -$VERSION- to put the label after."; exit 1; fi
+            mv "$file" "dist/$labelled"
+            echo "$name -> $labelled"
+          done
 
       - name: Attach the files to a draft release
         if: github.ref_type == 'tag'
@@ -76,7 +107,7 @@ jobs:
           else
             args=(--draft --verify-tag --title "StarBench $tag")
             if [ -f "RELEASE_NOTES_$tag.md" ]; then args+=(--notes-file "RELEASE_NOTES_$tag.md"); else args+=(--generate-notes); fi
-            case "$tag" in *-*) args+=(--prerelease) ;; esac
+            if [ -n "$LABEL" ]; then args+=(--prerelease); fi
             gh release create "$tag" "${files[@]}" "${args[@]}"
           fi
 
