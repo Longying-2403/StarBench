@@ -159,8 +159,10 @@ const told = (usage: StepUsage): StepUsage | undefined => {
 /**
  * What a service said a request cost, in the app's terms. The three kinds of API count
  * differently: chat completions and the Responses API give the whole input and, in a detail,
- * how much of it was read from the cache; the Messages API gives the three parts of the input
- * side by side. DeepSeek names its cache hits and misses outright. Undefined when nothing usable was said.
+ * how much of it was read from the cache and, where the service counts that apart, how much was
+ * written to it (OpenAI, from GPT-5.6 on, which charges more for those); the Messages API gives
+ * the three parts of the input side by side. DeepSeek names its cache hits and misses outright.
+ * Undefined when nothing usable was said.
  */
 export function normalizeUsage(kind: ProviderKind, raw: unknown): StepUsage | undefined {
   if (typeof raw !== 'object' || raw === null) return undefined
@@ -169,12 +171,16 @@ export function normalizeUsage(kind: ProviderKind, raw: unknown): StepUsage | un
       input: count(field(raw, 'input_tokens')),
       cacheRead: count(field(raw, 'cache_read_input_tokens')),
       cacheWrite: count(field(raw, 'cache_creation_input_tokens')),
-      output: count(field(raw, 'output_tokens'))
+      output: count(field(raw, 'output_tokens')),
+      // Of the reply, what was thinking: as the model thought it, not as the summary that is shown.
+      reasoning: count(field(field(raw, 'output_tokens_details'), 'thinking_tokens'))
     })
   }
   const responses = kind === 'openai-responses'
   const whole = count(field(raw, responses ? 'input_tokens' : 'prompt_tokens'))
-  const cached = count(field(raw, 'prompt_cache_hit_tokens')) ?? count(field(field(raw, responses ? 'input_tokens_details' : 'prompt_tokens_details'), 'cached_tokens'))
+  const detail = field(raw, responses ? 'input_tokens_details' : 'prompt_tokens_details')
+  const cached = count(field(raw, 'prompt_cache_hit_tokens')) ?? count(field(detail, 'cached_tokens'))
+  const written = count(field(detail, 'cache_write_tokens'))
   const missed = count(field(raw, 'prompt_cache_miss_tokens'))
   const reply = count(field(raw, responses ? 'output_tokens' : 'completion_tokens'))
   // Most services count the thinking among the tokens of the reply. One (xAI) counts it apart, and
@@ -182,8 +188,9 @@ export function normalizeUsage(kind: ProviderKind, raw: unknown): StepUsage | un
   const total = count(field(raw, 'total_tokens'))
   const beyond = whole !== undefined && total !== undefined ? total - whole : undefined
   return told({
-    input: missed ?? (whole === undefined ? undefined : Math.max(0, whole - (cached ?? 0))),
+    input: missed ?? (whole === undefined ? undefined : Math.max(0, whole - (cached ?? 0) - (written ?? 0))),
     cacheRead: cached,
+    cacheWrite: written,
     output: beyond !== undefined && beyond > (reply ?? 0) ? beyond : reply,
     reasoning: count(field(field(raw, responses ? 'output_tokens_details' : 'completion_tokens_details'), 'reasoning_tokens'))
   })
@@ -446,36 +453,56 @@ export interface ContextView {
   /** Tokens of room left. Absent while the room is not known. */
   free?: number
   /**
-   * The parts that weigh something, in the order of `CONTEXT_PARTS`, each with its tokens and its
+   * The parts that weigh something, in the order of `SHOWN_PARTS`, each with its tokens and its
    * share: of the model's room where that is known, of what is in the context otherwise.
    */
-  parts: { part: ContextPart; tokens: number; share: number }[]
+  parts: { part: ShownPart; tokens: number; share: number }[]
 }
+
+/**
+ * A part of the context as it is shown: one of those that are kept, or the thinking that replies
+ * carry along. The thinking is kept as no part of its own, since no text of the request stands
+ * for it: it is what a count holds beyond the text (`weighed`).
+ */
+export type ShownPart = ContextPart | 'thinking'
+/** The order the parts are shown in: the thinking right after the messages it came with. */
+export const SHOWN_PARTS: readonly ShownPart[] = CONTEXT_PARTS.flatMap((part): ShownPart[] => (part === 'messages' ? [part, 'thinking'] : [part]))
 
 /**
  * What the parts of a counted context are taken to weigh before they are brought to the count.
  * As a rule, their guesses: the count is then shared out in proportion. But where it is known
  * what the instructions and tools weigh (`Fit.pinned`), they are given that, the text of the
- * conversation what its kind of text weighs, and what the count holds beyond all of it goes to
- * the messages: it is the thinking a service keeps with the replies. Shared out in proportion,
- * such a context would show the tools at many times their weight and the replies at next to nothing.
+ * conversation what its kind of text weighs, and what the count holds beyond all of it is the
+ * reply to the last request, which is no part of that request yet, and the thinking a service
+ * keeps with the replies. Shared out in proportion, such a context would show the tools at many
+ * times their weight and the replies at next to nothing.
+ *
+ * The two are told apart where they can be (`thinks`: the service has said that the model thought
+ * at all, and what the last reply weighs as text is known): the reply goes to the messages at
+ * what its text weighs, and what is left is the thinking. Otherwise all of it is with the messages.
  */
-function weighed(context: ContextUse): ContextParts {
+function weighed(context: ContextUse, thinks: boolean): Partial<Record<ShownPart, number>> {
   const { fit, tokens } = context
   if (tokens === undefined || fit?.pinned === undefined || !sameBase(fit.pinned, halves(context.parts).base)) return context.parts
   const known = fitParts(context.parts, fit)
   const over = tokens - partsTotal(known)
-  return over > 0 ? { ...known, messages: (known.messages ?? 0) + over } : known
+  if (over <= 0) return known
+  const last = fit.last
+  // Only the request the count is of says what its reply weighs.
+  const reply = thinks && last && last.tokens === tokens ? Math.min(over, Math.round(fit.said * last.reply)) : over
+  return { ...known, messages: (known.messages ?? 0) + reply, ...(over > reply ? { thinking: over - reply } : {}) }
 }
 
 /**
  * The context as it is shown: how many tokens are in it, what share of the model's room that
  * is, and what its parts weigh. The parts are guesses; where the service told the true size
  * they are brought to add up to it exactly, and without it their sum stands for the size.
+ * `thinks` says that the service has counted thinking in this conversation: only then is thinking
+ * shown as a part of its own.
  */
-export function contextView(context: ContextUse, window?: number): ContextView {
-  const parts = weighed(context)
-  const guesses = CONTEXT_PARTS.map((part) => ({ part, guess: Math.max(0, parts[part] ?? 0) })).filter(({ guess }) => guess > 0)
+export function contextView(context: ContextUse, window?: number, thinks = false): ContextView {
+  const parts = weighed(context, thinks)
+  const guesses = SHOWN_PARTS.map((part) => ({ part, guess: Math.max(0, parts[part] ?? 0) })).filter(({ guess }) => guess > 0)
   const guessed = guesses.reduce((sum, { guess }) => sum + guess, 0)
   const tokens = context.tokens ?? guessed
   // Brought to the true size: each part its share of it in whole tokens, and the tokens that

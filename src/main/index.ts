@@ -80,7 +80,14 @@ channel.carryWith((plugin, event, payload) => {
     console.error(`[plugins] ${plugin} could not tell its interface of "${event}":`, err instanceof Error ? err.message : err)
   }
 })
-const skills = new SkillStore(path.join(app.getPath('userData'), 'skills'))
+/**
+ * The skills that come with the app: beside the app's own files once it is packaged, in the
+ * repository's `skills/` folder until then. STARBENCH_BUILTIN_SKILLS names another folder.
+ */
+const BUILTIN_SKILLS_DIR = process.env.STARBENCH_BUILTIN_SKILLS
+  ? path.resolve(process.env.STARBENCH_BUILTIN_SKILLS)
+  : path.join(app.isPackaged ? process.resourcesPath : app.getAppPath(), 'skills')
+const skills = new SkillStore(path.join(app.getPath('userData'), 'skills'), BUILTIN_SKILLS_DIR)
 tools.register(loadSkillTool(skills), 'builtin')
 const mcp = new McpManager({
   configFile: path.join(app.getPath('userData'), 'mcp.json'),

@@ -52,11 +52,20 @@ Skill 文件夹里的其他文件不会自动发给模型。读取正文时，�
 
 ## 重名
 
-你自己的 Skills 文件夹优先于插件自带的 Skill。同名时只有先找到的那个生效。
+同名的 Skill 只有一个生效：你自己的 Skills 文件夹优先，其次是插件带的，最后是应用自带的。
 
 ## 随插件分发
 
 插件可以在自己的文件夹里放一个 `skills/` 目录，里面的每个子文件夹都是一个 Skill，插件启用时生效、停用时消失。只有 Skill 没有代码的插件也可以：这时不需要 `index.js`，只要 `package.json` 和 `skills/`。
+
+## 随应用安装的 Skill
+
+StarBench 自带两个 Skill（[`skills/`](../skills)），不用安装，一直可用，在"设置 → Skills"里带着"内置"标记：
+
+- `create-skill`：帮你写 Skill。
+- `create-plugin`：帮你写 StarBench 插件。
+
+它们知道 StarBench 读取的格式，会把写好的文件夹放在工作文件夹里，再告诉你放进哪里。想换一种做法，就在你自己的 Skills 文件夹里放一个同名的 Skill，用的会是你那一份。应用自带的那份在安装目录的 `resources\skills` 里，可以复制出来改。
 
 ## 安全须知
 

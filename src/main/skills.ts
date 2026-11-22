@@ -64,13 +64,22 @@ interface LocatedSkill extends SkillInfo {
   dir: string
 }
 
-/** Finds skills in the user's skills folder and in folders contributed by plugins. */
+/** The source of the skills that come with the app, as the app's own tools are told from plugins' by it. */
+export const BUILTIN_SKILLS = 'builtin'
+
+/** Finds skills in the user's skills folder, in folders contributed by plugins, and among those that come with the app. */
 export class SkillStore {
   private roots: Root[]
+  /** Looked through last: a skill of the same name the user or a plugin brings takes the place of the app's. */
+  private builtin?: Root
 
-  /** @param userDir - the user's own skills folder; its skills win over plugin skills of the same name. */
-  constructor(userDir: string) {
+  /**
+   * @param userDir - the user's own skills folder; its skills win over plugin skills of the same name.
+   * @param builtinDir - the skills that come with the app, which every other skill of the same name wins over.
+   */
+  constructor(userDir: string, builtinDir?: string) {
     this.roots = [{ dir: userDir, source: 'user' }]
+    if (builtinDir) this.builtin = { dir: builtinDir, source: BUILTIN_SKILLS }
   }
 
   get userDir(): string {
@@ -138,7 +147,7 @@ export class SkillStore {
 
   private async locate(): Promise<LocatedSkill[]> {
     const found = new Map<string, LocatedSkill>()
-    for (const root of this.roots) {
+    for (const root of this.builtin ? [...this.roots, this.builtin] : this.roots) {
       const entries = await fs.readdir(root.dir, { withFileTypes: true }).catch(() => [])
       for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
         if (!entry.isDirectory()) continue

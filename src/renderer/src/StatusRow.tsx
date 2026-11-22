@@ -22,7 +22,7 @@ import {
   readWindow,
   totalTokens
 } from '../../shared/stats.ts'
-import type { ContextPart, SessionStats } from '../../shared/stats.ts'
+import type { SessionStats, ShownPart } from '../../shared/stats.ts'
 import type { ModelInfo } from '../../shared/types.ts'
 import { ClockIcon, StackIcon } from './icons.tsx'
 import { errorText, useOutsidePress } from './util.ts'
@@ -103,8 +103,9 @@ const SOURCE: Record<NonNullable<ModelInfo['contextSource']>, string> = {
 }
 
 /** What each part of the context is called. */
-const PART_NAMES: Record<ContextPart, string> = {
+const PART_NAMES: Record<ShownPart, string> = {
   messages: '对话消息',
+  thinking: '思考',
   summary: '压缩摘要',
   toolResults: '工具调用和结果',
   tools: '内置工具',
@@ -150,7 +151,9 @@ function ContextCard({
   /** How many tokens the context of the model holds, where that is known. */
   const room = info?.contextWindow
   const context = stats.context
-  const view = context ? contextView(context, room) : null
+  // Thinking is a part of its own only where the service has counted any in this conversation.
+  const view = context ? contextView(context, room, Boolean(stats.usage.reasoning)) : null
+  const thinking = view?.parts.some(({ part }) => part === 'thinking')
 
   const save = (value: number | null): void => {
     setProblem('')
@@ -207,6 +210,7 @@ function ContextCard({
           </div>
           <p className="status-note">
             {view.exact ? '各部分按文字长度估算，合计与模型服务报告的用量一致。' : '模型服务没有报告用量，全部按文字长度估算。'}
+            {thinking && ' "思考"是报告的用量里超出文字的部分：随回复一起带回去的思考。'}
             {view.share === undefined && ' 百分比是各部分占已用的比例。'}
           </p>
         </>

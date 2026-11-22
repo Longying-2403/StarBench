@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { KeyboardEvent } from 'react'
-import { REASONING_EFFORTS, isLocalAddress, offersFastMode, usualEfforts } from '../../shared/types.ts'
+import { startingEffort } from '../../shared/effort-defaults.ts'
+import { REASONING_EFFORTS, effortName, isLocalAddress, offersFastMode, usualEfforts } from '../../shared/types.ts'
 import type { EffortLevel, ModelChoice, ModelInfo, ProviderInfo, ReasoningEffort, Settings } from '../../shared/types.ts'
 import { BoltIcon, CheckIcon, ChevronDownIcon, ChevronLeftIcon, ChevronRightIcon, ResetIcon, SettingsIcon } from './icons.tsx'
 import { Slider } from './Slider.tsx'
@@ -8,15 +9,11 @@ import { errorText, roomStyle, useOutsidePress, usePopupPlace } from './util.ts'
 
 const api = window.harness
 
-const LABELS: Record<EffortLevel, string> = {
-  none: '关闭',
-  minimal: '极低',
-  low: '低',
-  medium: '中',
-  high: '高',
-  xhigh: '超高',
-  max: '最高'
-}
+/**
+ * What a stop of the slider is called. A level of thinking goes by the name its service gives
+ * it (`effortName`); only "no thinking at all" is the app's own word.
+ */
+const levelName = (level: EffortLevel, baseURL: string | undefined): string => (level === 'none' ? '关闭' : effortName(level, baseURL))
 
 /** The list gets a search field above this many models. */
 const SEARCH_THRESHOLD = 8
@@ -90,19 +87,24 @@ export function ModelControl({
 
   const effort = settings.reasoningEffort
   const levels = levelsFor(settings, modelInfo)
-  const recommended = modelInfo?.defaultEffort
+  const active = settings.providers.find((p) => p.id === settings.activeProviderId)
+  // Where the slider goes back to. A well-known model starts at a level of its own, which is in
+  // use until another is chosen: for such a model `effort` is never "nothing chosen". For any
+  // other model nothing is sent then and the service decides, at a level it may have told.
+  const recommended = (active && startingEffort({ model: settings.model, baseURL: active.baseURL, kind: active.kind })) ?? modelInfo?.defaultEffort
   const chosen = effort === 'default' ? undefined : effort
   /** With nothing chosen the service decides; the slider shows its level when that is known. */
   const shown = chosen ?? recommended
   const index = shown ? levels.indexOf(shown) : -1
   const displayedAt = preview ?? index
   const displayed = levels[displayedAt]
-  const levelText = displayed ? LABELS[displayed] : '默认'
+  /** The levels are named as the service in use names them. */
+  const named = (level: EffortLevel): string => levelName(level, active?.baseURL)
+  const levelText = displayed ? named(displayed) : '默认'
   // The top of the scale gets its own look, and the step below it a little of it.
   const fromTop = displayed && displayed !== 'none' && levels.length >= 3 ? levels.length - 1 - displayedAt : -1
 
   const name = settings.model ? (modelInfo?.name ?? settings.model) : '选择模型'
-  const active = settings.providers.find((p) => p.id === settings.activeProviderId)
   /** Faster answers for a higher price: a switch of the service's, there for some models only. */
   const fastOffered = active ? offersFastMode(active) : false
   const fastOn = fastOffered && settings.fastMode
@@ -116,10 +118,10 @@ export function ModelControl({
   // only the top of the scale has particles, and those twinkle where they are.
   const sparks = displayedAt < 0 ? 'none' : fastOn ? 'stream' : fromTop === 0 ? 'still' : 'none'
   const canReset = chosen !== undefined && chosen !== recommended
-  // "Recommended" only when the service named a level; otherwise it is simply whatever the service does.
+  // "Recommended" where there is a level to go back to; otherwise it is simply whatever the service does.
   const resetText = recommended
     ? canReset
-      ? `重设为推荐值（${LABELS[recommended]}）`
+      ? `重设为推荐值（${named(recommended)}）`
       : '已经是推荐值'
     : canReset
       ? '重设为默认值'
@@ -229,7 +231,7 @@ export function ModelControl({
         </button>
       </div>
       <Slider
-        stops={levels.map((id) => LABELS[id])}
+        stops={levels.map(named)}
         index={index}
         label="思考强度"
         emptyText="默认"

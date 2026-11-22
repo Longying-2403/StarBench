@@ -243,6 +243,27 @@ export function usualEfforts(baseURL: string, kind: ProviderKind = 'openai-chat'
   return EFFORTS_BY_HOST[serviceHost(baseURL)] ?? COMMON_EFFORTS
 }
 
+/** A level of thinking, as opposed to none at all. */
+export type ThinkingLevel = Exclude<EffortLevel, 'none'>
+/** The levels as the services write them. */
+const EFFORT_NAMES: Record<ThinkingLevel, string> = { minimal: 'Minimal', low: 'Low', medium: 'Medium', high: 'High', xhigh: 'xHigh', max: 'Max' }
+/** Where a service has a name of its own for a level: OpenAI's products call `xhigh` "Extra High". */
+const EFFORT_NAMES_BY_HOST: Record<string, Partial<Record<ThinkingLevel, string>>> = {
+  'api.openai.com': { xhigh: 'Extra High' }
+}
+
+/**
+ * What a level is called: the name its service gives it, as the service writes it, and not a
+ * word of the app's own. Put into Chinese, the step above "high" read like the "Ultra" some
+ * products have above their highest level (OpenAI's Codex, which does not offer it over the API),
+ * and the highest like the end of every scale, which it is not for a service whose scale ends a
+ * step earlier. The service is told by the address it is reached at; with an API key or with a
+ * ChatGPT sign-in, OpenAI's is the same.
+ */
+export function effortName(level: ThinkingLevel, baseURL = ''): string {
+  return EFFORT_NAMES_BY_HOST[serviceHost(baseURL)]?.[level] ?? EFFORT_NAMES[level]
+}
+
 /**
  * Whether a service wants to be told which conversation a request belongs to. xAI keeps what it
  * has read of a conversation on the server that read it, and only there is the next request
@@ -463,7 +484,7 @@ export interface McpServerStatus {
 export interface SkillInfo {
   name: string
   description: string
-  /** "user" for the user's own skills folder, otherwise the id of the plugin that ships it. */
+  /** "user" for the user's own skills folder, "builtin" for those that come with the app, otherwise the id of the plugin that ships it. */
   source: string
 }
 

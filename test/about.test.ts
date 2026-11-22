@@ -22,4 +22,6 @@ test('what the About page says of the project is what the project says of itself
   // The page shows the version of the running app; the package has one to show.
   assert.match(manifest.version, /^\d+\.\d+\.\d+/)
   assert.equal(ABOUT.stage, 'Beta')
+  // Beside the version stands the revision: a whole number, counted from one.
+  assert.ok(Number.isInteger(ABOUT.revision) && ABOUT.revision >= 1, String(ABOUT.revision))
 })

@@ -1241,6 +1241,10 @@ textarea.plugin-input {
 .status-part-messages {
   background: var(--accent);
 }
+/* The thinking that came with the messages: their colour, paler. */
+.status-part-thinking {
+  background: color-mix(in srgb, var(--accent) 45%, var(--panel));
+}
 .status-part-summary {
   background: #e0679a;
 }
@@ -2529,6 +2533,9 @@ a.btn {
 }
 /* The sign-in button in the look OpenAI asks for: one plain colour, the label as given. */
 .signin-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
   padding: 7px 18px;
   border: 1px solid var(--text);
   border-radius: 999px;
@@ -2538,6 +2545,15 @@ a.btn {
   font-weight: 600;
   cursor: pointer;
   white-space: nowrap;
+}
+/* The logo before the label. `picture` is only there to choose between its two colours. */
+.signin-btn picture {
+  display: flex;
+}
+.signin-logo {
+  display: block;
+  width: 18px;
+  height: 18px;
 }
 .signin-btn:hover:not(:disabled) {
   opacity: 0.88;

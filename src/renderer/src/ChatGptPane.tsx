@@ -3,17 +3,28 @@ import type { FormEvent } from 'react'
 import { CHATGPT_HELP_URL, CHATGPT_USAGE_URL } from '../../shared/types.ts'
 import type { ModelChoice, Settings, SignInOptions, SignInResult } from '../../shared/types.ts'
 import { Notice } from './Notice.tsx'
+import logoBlack from './assets/chatgpt-logo-black.svg?inline'
+import logoWhite from './assets/chatgpt-logo-white.svg?inline'
 import { errorText } from './util.ts'
 
 const api = window.harness
 
 /**
- * The button that starts signing in with ChatGPT. The label is the one OpenAI asks for and is
- * left as it is; the attribute is how OpenAI wants such buttons marked.
+ * The button that starts signing in with ChatGPT. The label is one of those OpenAI recommends
+ * and is left as it is; the attribute is how OpenAI wants such buttons marked. The logo is
+ * OpenAI's own file for such buttons, in its two colours, taken unchanged on 2026-11-23 from
+ * https://developers.openai.com/assets/siwc/sign-in-buttons/ (the page that shows them is
+ * https://developers.openai.com/siwc/website). The button is light where the app is dark and
+ * dark where it is light, so the black logo is the one for the dark look.
  */
 export function ChatGptButton({ onClick, disabled }: { onClick: () => void; disabled?: boolean }) {
   return (
     <button type="button" className="signin-btn" data-oai-siwc-button="" onClick={onClick} disabled={disabled}>
+      <picture>
+        <source media="(prefers-color-scheme: light)" srcSet={logoWhite} />
+        {/* Said by the label already. */}
+        <img className="signin-logo" src={logoBlack} alt="" width="18" height="18" />
+      </picture>
       Continue with ChatGPT
     </button>
   )

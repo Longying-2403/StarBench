@@ -42,6 +42,26 @@ test('what a service says a request cost is put into one shape, whichever way it
   // The Messages API gives the three parts of the input side by side: `input_tokens` is only what was not cached.
   assert.deepEqual(normalizeUsage('anthropic', { input_tokens: 5, cache_read_input_tokens: 900, cache_creation_input_tokens: 40, output_tokens: 9 }), { input: 5, cacheRead: 900, cacheWrite: 40, output: 9 })
   assert.deepEqual(normalizeUsage('anthropic', { input_tokens: 5, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 9 }), { input: 5, cacheRead: 0, cacheWrite: 0, output: 9 }, 'a cache that was asked and had nothing is nought, not unknown')
+  // It tells the thinking in a detail of the output: what the model thought, not the summary that is shown.
+  assert.deepEqual(
+    normalizeUsage('anthropic', { input_tokens: 5, cache_read_input_tokens: 900, cache_creation_input_tokens: 40, output_tokens: 90, output_tokens_details: { thinking_tokens: 60 } }),
+    { input: 5, cacheRead: 900, cacheWrite: 40, output: 90, reasoning: 60 }
+  )
+  // OpenAI's newer models tell what they wrote to the cache as well, which is charged more: a third part of the
+  // input, beside what was read from the cache and what was neither (gpt-6.2-sol, as it answered on 2026-11-23).
+  assert.deepEqual(
+    normalizeUsage('openai-responses', {
+      input_tokens: 4259,
+      input_tokens_details: { cached_tokens: 2294, cache_write_tokens: 1670, cache_write_tokens_details: { ttl_30m_tokens: 1670, ttl_12h_tokens: 0 } },
+      output_tokens: 21,
+      output_tokens_details: { reasoning_tokens: 0 },
+      total_tokens: 4280
+    }),
+    { input: 295, cacheRead: 2294, cacheWrite: 1670, output: 21, reasoning: 0 }
+  )
+  // Nothing written is nought, as with what was read: with a ChatGPT sign-in the service says so of every request.
+  assert.deepEqual(normalizeUsage('openai-responses', { input_tokens: 848, input_tokens_details: { cached_tokens: 0, cache_write_tokens: 0 }, output_tokens: 22 }), { input: 848, cacheRead: 0, cacheWrite: 0, output: 22 })
+  assert.deepEqual(normalizeUsage('openai-chat', { prompt_tokens: 3000, completion_tokens: 10, prompt_tokens_details: { cached_tokens: 2000, cache_write_tokens: 600 } }), { input: 400, cacheRead: 2000, cacheWrite: 600, output: 10 })
   // One service (xAI) counts the thinking apart from the reply: its total gives that away, and the reply is counted with it.
   assert.deepEqual(
     normalizeUsage('openai-chat', { prompt_tokens: 5705, completion_tokens: 282, total_tokens: 7069, prompt_tokens_details: { cached_tokens: 5376 }, completion_tokens_details: { reasoning_tokens: 1082 } }),

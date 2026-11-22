@@ -3,6 +3,7 @@
 
 import { COMPACTION_DEFAULTS, CAP_MAX, CAP_MIN, isCap, readShare } from '../shared/compaction.ts'
 import type { CompactionSettings } from '../shared/compaction.ts'
+import { startingEffort } from '../shared/effort-defaults.ts'
 import { sendsKeySafely } from '../shared/key-address.ts'
 import { CUSTOM_PROMPT_LIMIT, PROVIDER_KINDS, PROVIDER_PRESETS, isLocalAddress, isReasoningEffort } from '../shared/types.ts'
 import type { ChatGptAccount, CustomPrompt, ProviderInfo, ProviderInput, ProviderKind, ReasoningEffort, Settings } from '../shared/types.ts'
@@ -238,8 +239,14 @@ export function activeProvider(settings: StoredSettings): StoredProvider {
   return settings.providers.find((p) => p.id === settings.activeProviderId) ?? settings.providers[0]
 }
 
+/**
+ * The level of thinking in use with the provider's current model: the one chosen for it, or,
+ * with none chosen, the one a well-known model starts at (`startingEffort`). That one is shown
+ * and sent like a chosen one. For any other model it is `default`: nothing is sent, and the
+ * service decides.
+ */
 export function effortOf(provider: StoredProvider): ReasoningEffort {
-  return provider.efforts?.[provider.model] ?? 'default'
+  return provider.efforts?.[provider.model] ?? startingEffort(provider) ?? 'default'
 }
 
 /** Whether faster answers were asked for with the provider's current model. */

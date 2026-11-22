@@ -572,6 +572,25 @@ test('a context that is mostly thinking is shown as that, and not as heavy tools
   assert.deepEqual(contextView({ ...counted, fit: { base: 2, pinned: 3000, said: 1 } }, 500_000), blind)
   const under = contextView({ ...counted, tokens: 1209, fit: { base: 2, pinned: 1009, said: 1 } })
   assert.deepEqual(under.parts.map((p) => [p.part, p.tokens]), [['messages', 200], ['tools', 685], ['system', 324]])
+
+  // What is over holds two things: the reply to the last request, which is no part of that request
+  // yet, and the thinking. Where the service has counted thinking, and the count is of the request
+  // whose reply is known by its text (300 guessed tokens here), they are shown apart: the reply
+  // with the messages, the rest as thinking, right after them.
+  const last = { sent: 2718, tokens: 13_586, base: 1009, said: 400, reply: 300 }
+  const apart = contextView({ ...counted, fit: { base: 2, pinned: 1009, said: 1, last } }, 500_000, true)
+  assert.deepEqual(apart.parts.map((p) => [p.part, p.tokens]), [['messages', 400 + 300], ['thinking', 13_586 - 1370 - 648 - 700], ['tools', 1370], ['system', 648]])
+  assert.equal(apart.parts.reduce((sum, p) => sum + p.tokens, 0), 13_586)
+  // The reply is weighed like the other text of the conversation.
+  const heavier = contextView({ ...counted, fit: { base: 2, pinned: 1009, said: 1.5, last } }, 500_000, true)
+  assert.deepEqual(heavier.parts.slice(0, 2).map((p) => [p.part, p.tokens]), [['messages', 600 + 450], ['thinking', 13_586 - 1370 - 648 - 1050]])
+  // Not where the service has counted no thinking: what is over may then be anything, and stays with the messages.
+  assert.deepEqual(contextView({ ...counted, fit: { base: 2, pinned: 1009, said: 1, last } }, 500_000), view)
+  // Nor where the count is of another request than the one whose reply is known.
+  assert.deepEqual(contextView({ ...counted, fit: { base: 2, pinned: 1009, said: 1, last: { ...last, tokens: 9000 } } }, 500_000, true), view)
+  // A reply that weighs all that is over leaves no thinking to show.
+  const plain = contextView({ ...counted, tokens: 2718, fit: { base: 2, pinned: 1009, said: 1, last: { ...last, tokens: 2718 } } }, 500_000, true)
+  assert.deepEqual(plain.parts.map((p) => [p.part, p.tokens]), [['messages', 700], ['tools', 1370], ['system', 648]])
 })
 
 test('the summary is weighed apart from what the person wrote after it', () => {

@@ -11,11 +11,13 @@ files:
   # TypeScript sources, type declarations and source maps of dependencies are never loaded at run time.
   - "!**/node_modules/**/*.{ts,mts,cts,map}"
 
-# The plugins that come with the app (plugins/). They go beside the app, not into its archive:
-# the app reads them as plain files, the same way it reads the ones people add themselves.
+# The plugins and skills that come with the app (plugins/, skills/). They go beside the app, not
+# into its archive: the app reads them as plain files, the same way it reads the ones people add themselves.
 extraResources:
   - from: plugins
     to: plugins
+  - from: skills
+    to: skills
 
 # No dependency contains native code, so there is nothing to rebuild for Electron.
 npmRebuild: false

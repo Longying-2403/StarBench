@@ -396,7 +396,13 @@ function SkillsTab() {
             <div className="row-main">
               <div className="row-title">
                 {skill.name}
-                <span className="row-meta">{skill.source === 'user' ? '我的 Skill' : `来自插件 ${skill.source}`}</span>
+                {skill.source === 'builtin' ? (
+                  <span className="badge" title="随应用一起安装的 Skill">
+                    内置
+                  </span>
+                ) : (
+                  <span className="row-meta">{skill.source === 'user' ? '我的 Skill' : `来自插件 ${skill.source}`}</span>
+                )}
               </div>
               <div className="row-desc">{skill.description || '（没有填写说明，模型无法判断何时使用它）'}</div>
             </div>
@@ -703,7 +709,8 @@ function AboutTab() {
       <p className="about-summary">{ABOUT.summary}</p>
       <dl className="about-list">
         <dt>软件版本</dt>
-        <dd>{version ? `${version}（${ABOUT.stage}）` : '…'}</dd>
+        {/* The version with its revision, as the author names a build: "0.1.0-r9". */}
+        <dd>{version ? `${version}-r${ABOUT.revision}（${ABOUT.stage}）` : '…'}</dd>
         <dt>GitHub 仓库</dt>
         <dd>{link(ABOUT.repo)}</dd>
         <dt>问题提交</dt>

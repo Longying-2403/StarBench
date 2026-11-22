@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import * as model from '../src/main/settings-model.ts'
-import { CUSTOM_PROMPT_LIMIT, isLocalAddress, offersFastMode, usualEfforts } from '../src/shared/types.ts'
+import { presetEffort, startingEffort } from '../src/shared/effort-defaults.ts'
+import { CUSTOM_PROMPT_LIMIT, effortName, isLocalAddress, offersFastMode, usualEfforts } from '../src/shared/types.ts'
 
 test('settings from before there were providers keep their key, model and effort', () => {
   const old = {
@@ -105,21 +106,32 @@ test('the model and the effort are remembered for each provider and model', () =
   settings = model.setEffort(settings, 'max')
   assert.equal(model.toPublic(settings).reasoningEffort, 'max')
   settings = model.selectModel(settings, 'deepseek', 'deepseek-v4-pro')
-  assert.equal(model.toPublic(settings).reasoningEffort, 'default', 'another model starts from the default')
+  // A well-known model has a level of its own to start at, which is in use like a chosen one.
+  assert.equal(model.toPublic(settings).reasoningEffort, 'high', 'another model starts at its own level, not at the choice made for the first')
+  assert.equal(settings.providers[0].efforts?.['deepseek-v4-pro'], undefined, 'and nothing is written down for it until a level is chosen')
   settings = model.setEffort(settings, 'low')
   settings = model.selectModel(settings, 'deepseek', 'deepseek-flash')
   assert.equal(model.toPublic(settings).reasoningEffort, 'max', 'coming back finds the earlier choice')
 
-  // Choosing a model of another provider switches to that provider.
+  // Choosing a model of another provider switches to that provider. A model the app does not
+  // know has no level to start at: nothing is chosen, nothing will be sent, and the service decides.
   settings = model.selectModel(settings, 'openai', 'gpt-test')
   const shown = model.toPublic(settings)
   assert.deepEqual([shown.activeProviderId, shown.kind, shown.model, shown.reasoningEffort], ['openai', 'openai-responses', 'gpt-test', 'default'])
   assert.deepEqual(settings.providers[0].efforts, { 'deepseek-flash': 'max', 'deepseek-v4-pro': 'low' })
+  // One it knows starts at its level with this provider too, and keeps a choice apart from it.
+  settings = model.selectModel(settings, 'openai', 'gpt-6.2-sol')
+  assert.equal(model.toPublic(settings).reasoningEffort, 'medium')
+  settings = model.setEffort(settings, 'xhigh')
+  assert.equal(model.toPublic(settings).reasoningEffort, 'xhigh')
+  settings = model.setEffort(settings, 'default')
+  assert.equal(model.toPublic(settings).reasoningEffort, 'medium', 'taking the choice back leads to the level the model starts at')
 
   // Back to "nothing chosen" removes the entry rather than storing the word.
   settings = model.selectModel(settings, 'deepseek', 'deepseek-flash')
   settings = model.setEffort(settings, 'default')
   assert.deepEqual(settings.providers[0].efforts, { 'deepseek-v4-pro': 'low' })
+  assert.equal(model.toPublic(settings).reasoningEffort, 'high')
 
   assert.throws(() => model.selectModel(settings, 'ghost', 'm'), /no longer exists/)
   assert.throws(() => model.selectModel(settings, 'deepseek', '  '), /No model/)
@@ -141,6 +153,57 @@ test('the thinking levels on offer follow the service', () => {
   assert.deepEqual(usualEfforts('http://localhost:11434/v1'), ['none', 'low', 'medium', 'high'])
   assert.deepEqual(usualEfforts('http://192.168.1.20:1234/v1', 'openai-chat'), ['none', 'low', 'medium', 'high'])
   assert.deepEqual(usualEfforts('http://localhost:11434', 'anthropic'), common, 'the other formats have their own names')
+})
+
+test('a thinking level is called what its service calls it', () => {
+  // The names as the services write them, in whatever language the rest of the app speaks.
+  const levels = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const
+  assert.deepEqual(levels.map((level) => effortName(level, 'https://api.anthropic.com')), ['Minimal', 'Low', 'Medium', 'High', 'xHigh', 'Max'])
+  assert.equal(effortName('xhigh', 'https://api.x.ai/v1'), 'xHigh')
+  assert.equal(effortName('xhigh', 'https://us.api.x.ai/v1'), 'xHigh')
+  assert.equal(effortName('max', 'https://api.deepseek.com'), 'Max')
+  // OpenAI's own products call the step above high "Extra High". Paid for with an API key or with a ChatGPT plan, the address is the same.
+  assert.equal(effortName('xhigh', 'https://api.openai.com/v1'), 'Extra High')
+  assert.equal(effortName('xhigh', 'https://API.OpenAI.com/v1/'), 'Extra High')
+  assert.deepEqual(levels.filter((level) => level !== 'xhigh').map((level) => effortName(level, 'https://api.openai.com/v1')), ['Minimal', 'Low', 'Medium', 'High', 'Max'])
+  // A service nothing is known about, an address that only has OpenAI's name in it, and no address at all.
+  assert.equal(effortName('xhigh', 'https://llm.example.com/v1'), 'xHigh')
+  assert.equal(effortName('xhigh', 'https://api.openai.com.example.com/v1'), 'xHigh')
+  assert.equal(effortName('xhigh', 'not an address'), 'xHigh')
+  assert.equal(effortName('xhigh'), 'xHigh')
+  // No two levels of a service go by one name: the slider tells its stops apart by them.
+  for (const address of ['https://api.openai.com/v1', 'https://api.anthropic.com', 'http://localhost:11434/v1']) {
+    assert.equal(new Set(levels.map((level) => effortName(level, address))).size, levels.length, address)
+  }
+})
+
+test('a well-known model has a level of thinking it starts at, and any other has none', () => {
+  const of = (...models: string[]): (string | undefined)[] => models.map(presetEffort)
+  // The defaults the services name. Most of Claude's models think at "high"; two of the family at "medium".
+  assert.deepEqual(of('claude-fable-5-2', 'claude-mythos-5-1', 'claude-sonnet-5-5', 'claude-sonnet-5', 'claude-opus-5', 'claude-opus-4-8', 'claude-opus-4-6', 'claude-sonnet-4-6'), Array(8).fill('high'))
+  assert.deepEqual(of('claude-opus-5-5', 'claude-haiku-5-5'), ['medium', 'medium'])
+  assert.deepEqual(of('gpt-6.1-sol', 'gpt-6-sol', 'gpt-6-luna', 'gpt-5.6', 'gpt-5.6-terra', 'gpt-5.5', 'gpt-5.5-2026-04-23'), Array(7).fill('medium'))
+  assert.deepEqual(of('grok-4.7', 'grok-4.6', 'grok-4.5', 'deepseek-flash', 'deepseek-v4-pro'), Array(5).fill('high'))
+  // The rest of the GPT-6 family, whose default is not named: the app's own choice, the same as the others'.
+  assert.deepEqual(of('gpt-6.2-sol', 'gpt-6.2-astra', 'gpt-6.1-terra'), ['medium', 'medium', 'medium'])
+  // As services and gateways write an id: in any case, with spaces around it, with the gateway's own name before it.
+  assert.deepEqual(of(' Claude-Opus-5-5 ', 'anthropic/claude-opus-5-5', 'openai/gpt-6-luna'), ['medium', 'medium', 'medium'])
+  // Nothing is made up for a model that takes no level, for one that only looks like a known one, or for one nobody has heard of.
+  assert.deepEqual(of('gpt-5.5-pro', 'gpt-5', 'gpt-6', 'gpt-6.2', 'grok-4.3', 'grok-4.20-0309-reasoning'), Array(6).fill(undefined))
+  assert.deepEqual(of('claude-haiku-4-5', 'claude-mythos-preview', 'claude-opus-55', 'qwen3.5:9b', 'my-claude-opus-5-5', ''), Array(6).fill(undefined))
+
+  // With the service it is reached through: the level has to be one that service offers.
+  assert.equal(startingEffort({ model: 'gpt-6.2-sol', baseURL: 'https://api.openai.com/v1', kind: 'openai-responses' }), 'medium')
+  assert.equal(startingEffort({ model: 'claude-opus-5-5', baseURL: 'https://api.anthropic.com', kind: 'anthropic' }), 'medium')
+  assert.equal(startingEffort({ model: 'grok-4.7', baseURL: 'https://api.x.ai/v1', kind: 'openai-chat' }), 'high')
+  assert.equal(startingEffort({ model: 'deepseek-flash', baseURL: 'https://api.deepseek.com' }), 'high')
+  assert.equal(startingEffort({ model: 'openai/gpt-6.2-sol', baseURL: 'https://gateway.example/v1' }), 'medium', 'through a gateway too')
+  assert.equal(startingEffort({ model: 'gpt-6.2-sol', baseURL: 'https://api.deepseek.com' }), undefined, 'DeepSeek has no "medium"')
+  // A server on one's own machine decides for itself, whatever its model is called. So does any service for a model that is not known.
+  assert.equal(startingEffort({ model: 'deepseek-flash', baseURL: 'http://localhost:11434/v1' }), undefined)
+  assert.equal(startingEffort({ model: 'gpt-6.2-sol', baseURL: 'http://192.168.1.20:8000/v1', kind: 'openai-responses' }), undefined)
+  assert.equal(startingEffort({ model: 'qwen3.5:9b', baseURL: 'https://llm.example.com/v1' }), undefined)
+  assert.equal(startingEffort({ model: '', baseURL: 'https://api.openai.com/v1' }), undefined)
 })
 
 test('an address on this computer or the local network is told from one on the internet', () => {
