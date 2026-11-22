@@ -1,0 +1,52 @@
+# Checks every push to main and every pull request: type check, tests and build.
+# It works on a clean checkout, so it also notices a file that exists on your
+# computer but was never committed.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Node ${{ matrix.node }}
+    # The app is only packaged for Windows, and some tests only mean something
+    # there (MCP servers started through a .cmd script, command output in the
+    # console code page).
+    runs-on: windows-latest
+    timeout-minutes: 15
+    strategy:
+      # Finish both versions even when one fails, to see whether it is about the version.
+      fail-fast: false
+      matrix:
+        # The oldest version the README asks for, and the one StarBench is developed with.
+        node: ['22.18.0', '26']
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Nothing here pushes, so the token is not left in the checkout.
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      # Skips install scripts, as npm 12 already does for dependencies. Ours only
+      # downloads the Electron binary, and nothing below starts Electron.
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
