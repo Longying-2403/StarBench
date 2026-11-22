@@ -1,0 +1,99 @@
+# Packages StarBench for Windows on GitHub instead of on your computer.
+#
+# Push a tag such as v0.1.0 or v0.1.0-preview: the installer and the zip are
+# built from that commit and attached to a draft release, which you check and
+# publish on GitHub. A tag with a dash becomes a pre-release. The tag has to
+# start with the version in package.json, which also names the files.
+# RELEASE_NOTES_<tag>.md, if the commit has one, is the text of the release;
+# otherwise GitHub lists the commits.
+#
+# Run by hand from the Actions tab on a branch, it builds the same two files
+# and leaves them on the run's page instead of making a release.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    permissions:
+      # To create the release and attach the files to it.
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '26'
+          # No npm cache: a release is built from the commit and nothing else.
+          package-manager-cache: false
+
+      - name: Check the tag against package.json
+        if: github.ref_type == 'tag'
+        shell: bash
+        run: |
+          version=$(node -p "require('./package.json').version")
+          case "$GITHUB_REF_NAME" in
+            "v$version" | "v$version"-*) echo "Tag $GITHUB_REF_NAME, version $version" ;;
+            *) echo "::error::Tag $GITHUB_REF_NAME does not start with v$version, the version in package.json."; exit 1 ;;
+          esac
+
+      # Skips install scripts. Ours only downloads the Electron binary for running
+      # the app; electron-builder fetches its own copy to package.
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      - name: Package
+        run: npm run dist
+
+      - name: Attach the files to a draft release
+        if: github.ref_type == 'tag'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="$GITHUB_REF_NAME"
+          files=(dist/*-setup.exe dist/*.zip)
+          if draft=$(gh release view "$tag" --json isDraft --jq .isDraft 2>/dev/null); then
+            # A rerun replaces the files of the draft, but never touches a published release.
+            if [ "$draft" != true ]; then echo "::error::Release $tag is already published."; exit 1; fi
+            gh release upload "$tag" "${files[@]}" --clobber
+          else
+            args=(--draft --verify-tag --title "StarBench $tag")
+            if [ -f "RELEASE_NOTES_$tag.md" ]; then args+=(--notes-file "RELEASE_NOTES_$tag.md"); else args+=(--generate-notes); fi
+            case "$tag" in *-*) args+=(--prerelease) ;; esac
+            gh release create "$tag" "${files[@]}" "${args[@]}"
+          fi
+
+      - name: Keep the installer on the run's page
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@v7
+        with:
+          path: dist/*-setup.exe
+          archive: false
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Keep the zip on the run's page
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@v7
+        with:
+          path: dist/*.zip
+          archive: false
+          if-no-files-found: error
+          retention-days: 14
