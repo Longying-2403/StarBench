@@ -122,6 +122,48 @@ export function TrashIcon() {
   )
 }
 
+/** A magnifying glass: look for something. */
+export function SearchIcon() {
+  return (
+    <svg {...line}>
+      <circle cx="11" cy="11" r="6.5" />
+      <path d="m20 20-4.3-4.3" />
+    </svg>
+  )
+}
+
+/** A clock: how long something took. */
+export function ClockIcon() {
+  return (
+    <svg {...line}>
+      <circle cx="12" cy="12" r="8.5" />
+      <path d="M12 7.5V12l3 2" />
+    </svg>
+  )
+}
+
+/** A stack of discs: how much of something was used. */
+export function StackIcon() {
+  return (
+    <svg {...line}>
+      <ellipse cx="12" cy="6" rx="7.5" ry="3" />
+      <path d="M4.5 6v6c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3V6" />
+      <path d="M4.5 12v6c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3v-6" />
+    </svg>
+  )
+}
+
+/** A plug: what is added to the app from outside. */
+export function PluginIcon() {
+  return (
+    <svg {...line}>
+      <path d="M9 3v5M15 3v5" />
+      <path d="M6 8h12v3a6 6 0 0 1-12 0z" />
+      <path d="M12 17v4" />
+    </svg>
+  )
+}
+
 /** A triangle with an exclamation mark: read this before going on. */
 export function WarningIcon() {
   return (

@@ -1,5 +1,8 @@
 // Types shared between the main process, the preload bridge and the renderer.
 
+import type { CompactionChange, CompactionSettings } from './compaction.ts'
+import type { SessionStats } from './stats.ts'
+
 export interface ToolCall {
   id: string
   name: string
@@ -37,9 +40,73 @@ export type ChatMessage =
        * reads it, anyone else builds the message from the fields above. Absent on messages written
        * before the app knew more than one provider.
        */
-      origin?: { provider: string; kind: ProviderKind; model: string; replay?: unknown }
+      origin?: {
+        provider: string
+        kind: ProviderKind
+        model: string
+        replay?: unknown
+        /**
+         * What the service counted for writing this reply, thinking among it, where it said. A
+         * service may keep the thinking with the reply and count it again every time the reply
+         * is sent back: this is then what the message takes of the model's context, which can
+         * be many times what its text suggests (main/compaction.ts goes by it).
+         */
+        tokens?: number
+      }
     }
-  | { role: 'tool'; tool_call_id: string; content: string }
+  | {
+      role: 'tool'
+      tool_call_id: string
+      content: string
+      /**
+       * Set once the result was cleared from what the model is sent, to make room in its context
+       * (main/compaction.ts): the line that is sent in its place, kept so that it is the same line
+       * every time. `content` stays as it was, for the person to read.
+       */
+      cleared?: string
+    }
+
+/**
+ * A place where a conversation was compacted to fit the model's context: old tool results were
+ * cleared from what is sent, or everything before the mark was replaced by a summary. It stands
+ * among the messages where that was done, is shown there as a line, and is never sent itself.
+ */
+export interface CompactionMark {
+  role: 'compaction'
+  /** When it was done, in milliseconds since 1970. */
+  at: number
+  /** Tokens in the context before and after, as near as could be told, and the room the model had where that was known. */
+  before: number
+  after: number
+  window?: number
+  /**
+   * Set while `after` is the app's own guess. The next request, where one follows at once, is the
+   * compacted conversation and nothing else: what the service counts of it then takes the place
+   * of the guess, and this goes.
+   */
+  rough?: boolean
+  /** How many tool results were cleared at this point. */
+  cleared?: number
+  /** Present when everything before the mark is no longer sent, and this is sent in its place. */
+  summary?: {
+    /** What the model wrote of the conversation up to here. Shown to the person. */
+    text: string
+    /**
+     * What is sent in place of the earlier messages: the summary, with what the app adds to it
+     * without asking a model (what the person wrote, and the files that were touched). Kept as
+     * it was first sent, since a text that changed would count as a changed conversation.
+     */
+    sent: string
+    /** How many messages of the person and of the model it stands for. */
+    covers: number
+    /** How many of the person's messages are quoted in it, and how many files are listed. */
+    said: number
+    files: number
+  }
+}
+
+/** A conversation as it is kept: its messages, and the marks of where it was compacted. */
+export type StoredMessage = ChatMessage | CompactionMark
 
 /**
  * The marks a session can be given in the list, to tell it from the others at a glance. These
@@ -76,10 +143,22 @@ export interface Session {
   archived?: boolean
   /** The mark shown before the name in the list. */
   icon?: SessionIcon
-  messages: ChatMessage[]
+  messages: StoredMessage[]
+  /** What was measured of the conversation since the app began to keep count (shared/stats.ts). */
+  stats?: SessionStats
 }
 
 export type SessionSummary = Pick<Session, 'id' | 'title' | 'workspace' | 'updatedAt' | 'archived' | 'icon'>
+
+/** A conversation that a search found. */
+export interface SessionHit {
+  id: string
+  /**
+   * A piece of the message the words were found in, when not all of them stand in the name.
+   * `marks` are the places of the words in that piece: where each starts, and where it ends.
+   */
+  snippet?: { text: string; marks: [number, number][] }
+}
 
 /**
  * How hard the model thinks before it answers, lowest first. `default` sends nothing and leaves
@@ -99,6 +178,16 @@ const hostOf = (url: string): string => {
   } catch {
     return ''
   }
+}
+
+/**
+ * The host the rules for a service go by. xAI also serves its API from an address of its own
+ * for one region (`us.api.x.ai`): the same service, so the same rules. An address that only has
+ * the name somewhere in it (`api.x.ai.example.com`) is another service.
+ */
+const serviceHost = (url: string): string => {
+  const host = hostOf(url)
+  return host.endsWith('.api.x.ai') ? 'api.x.ai' : host
 }
 
 /**
@@ -151,7 +240,19 @@ const LOCAL_EFFORTS: readonly EffortLevel[] = ['none', 'low', 'medium', 'high']
  */
 export function usualEfforts(baseURL: string, kind: ProviderKind = 'openai-chat'): readonly EffortLevel[] {
   if (kind === 'openai-chat' && isLocalAddress(baseURL)) return LOCAL_EFFORTS
-  return EFFORTS_BY_HOST[hostOf(baseURL)] ?? COMMON_EFFORTS
+  return EFFORTS_BY_HOST[serviceHost(baseURL)] ?? COMMON_EFFORTS
+}
+
+/**
+ * Whether a service wants to be told which conversation a request belongs to. xAI keeps what it
+ * has read of a conversation on the server that read it, and only there is the next request
+ * charged the lower price for what is the same as before. A request that says nothing lands on
+ * any server: measured on 2026-11-23, of 8,300 tokens that had all been sent before, 1,150 came
+ * back as read from the cache. Told the conversation, it tries to send the request where the
+ * others went, and mostly does.
+ */
+export function routesByConversation(baseURL: string): boolean {
+  return serviceHost(baseURL) === 'api.x.ai'
 }
 
 /** What the model service reports about the configured model. Services differ, so everything is optional. */
@@ -162,6 +263,12 @@ export interface ModelInfo {
   efforts?: EffortLevel[]
   /** The level the service uses when none is sent. */
   defaultEffort?: EffortLevel
+  /**
+   * How many tokens the model's context holds, and who says so: the person, who typed it in; the
+   * service, in its list of models; or the list of well-known models that comes with the app.
+   */
+  contextWindow?: number
+  contextSource?: 'manual' | 'service' | 'known'
 }
 
 /** A model a provider offers, for the list the user picks from. */
@@ -181,6 +288,18 @@ export interface ChatGptAccount {
   planUsage: boolean
 }
 
+/**
+ * Instructions of the person's own for the models of one provider: a preference they hold, or
+ * the system prompt a model of theirs was trained with.
+ */
+export interface CustomPrompt {
+  text: string
+  /** Stands in place of the app's own instructions, instead of following them. */
+  replace: boolean
+}
+/** The longest custom prompt that is kept, in characters. */
+export const CUSTOM_PROMPT_LIMIT = 20000
+
 /** A configured model service, as the page sees it: everything but the key. */
 export interface ProviderInfo {
   id: string
@@ -197,6 +316,8 @@ export interface ProviderInfo {
   ready: boolean
   /** Whether a key is stored. The key itself, like the tokens of a sign-in, never leaves the main process. */
   hasApiKey: boolean
+  /** What the person added to, or put in place of, the app's instructions for this provider's models. */
+  prompt?: CustomPrompt
   /** Set when requests use a person's ChatGPT plan after signing in, instead of an API key. */
   auth?: 'chatgpt'
   /** Present exactly when `auth` is. */
@@ -227,6 +348,10 @@ export interface Settings {
   fastMode: boolean
   /** Whether requests can be made with it; see `ProviderInfo.ready`. */
   ready: boolean
+  /** Whether the app keeps count of what conversations cost: requests, time, tokens, and how full the context is. */
+  stats: boolean
+  /** Whether, and from where on, a conversation is compacted as it fills the model's context. */
+  compaction: CompactionSettings
 }
 
 /** The Claude models that answer faster on request, with nothing to apply for first. */
@@ -305,14 +430,25 @@ export interface PluginInfo {
   name: string
   version: string
   description: string
+  /** It came with the app and was not put into the plugins folder by the person. */
+  builtin: boolean
   enabled: boolean
-  /** `waiting`: enabled, but a service it injects is not available yet. */
-  status: 'disabled' | 'active' | 'waiting' | 'error'
+  /**
+   * `waiting`: enabled, but a service it injects is not available yet. `held`: enabled, and not
+   * started because the app was started with every plugin left out.
+   */
+  status: 'disabled' | 'active' | 'waiting' | 'error' | 'held'
   error?: string
   /** Names of the tools it currently provides. */
   tools: string[]
   /** Names of the skills it currently provides. */
   skills: string[]
+  /** It is running and has an interface for the page to load: a `ui/index.js` in its folder. */
+  ui: boolean
+  /** That interface comes with a style sheet, a `ui/index.css`, for the page to put in force for it. */
+  uiStyle: boolean
+  /** Which start of a plugin this is, counted since the app started; 0 while it is not running. Another number means it was started again, and its interface is to be loaded again. */
+  run: number
 }
 
 export interface McpServerStatus {
@@ -336,26 +472,63 @@ export type PermissionDecision = 'allow' | 'always' | 'deny'
 export type AgentEvent =
   | { type: 'reasoning_delta'; text: string }
   | { type: 'text_delta'; text: string }
+  /**
+   * What came of the message being written so far reads differently now: text that was taken for
+   * the answer was the model's thinking (or the other way round), or held a tool call that was
+   * taken out of it. `text` and `reasoning` are all of the message as it stands, in place of
+   * what the deltas added up to; more deltas may follow.
+   */
+  | { type: 'assistant_rewrite'; text: string; reasoning: string }
   /** The model finished one assistant message (text and/or tool calls). */
   | { type: 'assistant_done' }
   | { type: 'tool_start'; call: ToolCall }
   | { type: 'tool_result'; id: string; output: string }
   | { type: 'permission_request'; id: string; call: ToolCall }
   | { type: 'turn_end' }
+  /** The numbers of the conversation, after a request or a tool call changed them. */
+  | { type: 'stats'; stats: SessionStats }
+  /** A summary of the conversation is being asked of the model, which takes a while, or that has ended. */
+  | { type: 'compacting'; on: boolean }
+  /** The conversation was compacted. `messages` is all of it as it is kept now, with the mark of that in its place. */
+  | { type: 'compacted'; messages: StoredMessage[] }
+  /** The service has counted the conversation as the compaction made at `at` left it: `after` tokens, in place of the guess. */
+  | { type: 'compaction_counted'; at: number; after: number }
   | { type: 'error'; message: string; hint?: ErrorHint }
   /**
    * Something the person should know that did not stop the turn. `code` is what the page words it
    * by; `detail` is what the service itself said, when that helps to look the matter up.
    */
-  | { type: 'notice'; code: 'fast-mode-refused' | 'tools-refused' | 'stream-refused'; message: string; detail?: string }
+  | { type: 'notice'; code: 'fast-mode-refused' | 'tools-as-text' | 'stream-refused' | 'compaction-failed'; message: string; detail?: string }
 
 export interface SessionEvent {
   sessionId: string
   event: AgentEvent
 }
 
+/** What became of an attempt to compact a conversation. */
+export interface CompactionReport {
+  /** Whether anything was done: results cleared, or a summary put in place. */
+  done: boolean
+  /** Why no summary was made although one was called for, in the words of whoever refused it. */
+  problem?: string
+}
+
+/** Why a file that an answer points to cannot be shown or opened: it is not there, or it is not in the folder of the conversation. */
+export type FileProblem = 'missing' | 'outside'
+
+/** A picture an answer shows, as an address the page can draw, or why there is none. */
+export type ImagePreview = { ok: true; url: string } | { ok: false; reason: FileProblem | 'not-image' | 'too-large' }
+
+/**
+ * What became of a press on a link to a file. `revealed`: the file was pointed out in its folder
+ * and not opened, as is done with every kind of file that opening might run.
+ */
+export type OpenOutcome = { ok: true; how: 'opened' | 'revealed' } | { ok: false; reason: FileProblem | 'failed'; detail?: string }
+
 export interface HarnessApi {
   getSettings(): Promise<Settings>
+  /** What the running app is: its version, as it was built. */
+  appInfo(): Promise<{ version: string }>
   /** Adds a provider or changes one. Resolves with the updated settings. */
   saveProvider(input: ProviderInput): Promise<Settings>
   /** The last provider cannot be removed. */
@@ -383,9 +556,32 @@ export interface HarnessApi {
   setFastMode(on: boolean): Promise<Settings>
   /** Asks the model service about the current model. Null when it has nothing to say or cannot be reached. */
   getModelInfo(): Promise<ModelInfo | null>
+  /** Says how many tokens the context of a model holds, for a model the app cannot find it out for. Null takes the number back. */
+  setContextWindow(providerId: string, model: string, tokens: number | null): Promise<Settings>
+  /** Switches the counting of what conversations cost on or off. */
+  setStats(on: boolean): Promise<Settings>
+  /** Changes whether, and from where on, conversations are compacted by themselves. What is left out stays as it is. */
+  setCompaction(change: CompactionChange): Promise<Settings>
+  /** The instructions the app itself gives every model, for showing them next to the person's own. */
+  builtinPrompt(): Promise<string>
+  /**
+   * Gives a provider's models instructions of the person's own; null, or a prompt without text,
+   * takes them away. Counts from the next message. Resolves with the updated settings.
+   */
+  setPrompt(providerId: string, prompt: CustomPrompt | null): Promise<Settings>
   listPlugins(): Promise<PluginInfo[]>
+  /** Whether the app was started with every plugin left out (`--no-plugins`), the way out when a plugin keeps it from being usable. */
+  pluginsHeld(): Promise<boolean>
   /** Resolves with the refreshed list. */
   setPluginEnabled(id: string, enabled: boolean): Promise<PluginInfo[]>
+  /** Stops a running plugin and starts it again, to take up changes in its folder. Resolves with the refreshed list. */
+  reloadPlugin(id: string): Promise<PluginInfo[]>
+  /** Tells when a plugin was switched on or off, so that the page loads or drops its interface. Returns the function that stops the telling. */
+  onPluginsChanged(listener: () => void): () => void
+  /** Asks the main-process half of a plugin a question on behalf of its interface. Rejects when the plugin is off or has no answer to it. */
+  callPlugin(plugin: string, name: string, payload?: unknown): Promise<unknown>
+  /** What the main-process halves of plugins tell their interfaces. Returns the function that stops the telling. */
+  onPluginEvent(listener: (told: { plugin: string; event: string; payload: unknown }) => void): () => void
   openPluginsFolder(): Promise<void>
   listSkills(): Promise<SkillInfo[]>
   openSkillsFolder(): Promise<void>
@@ -399,7 +595,13 @@ export interface HarnessApi {
   pickWorkspace(): Promise<string | null>
   /** Folders used before that still exist, most recent first. */
   listWorkspaces(): Promise<string[]>
+  /** A picture in the workspace that an answer shows. `address` is what the answer wrote: a path, or a file: address. */
+  readImage(workspace: string, address: string): Promise<ImagePreview>
+  /** Opens a file or folder in the workspace that an answer points to, with the program the system has for it. */
+  openFile(workspace: string, address: string): Promise<OpenOutcome>
   listSessions(): Promise<SessionSummary[]>
+  /** The conversations in which every word of `query` is found, in the name or in what was said. */
+  searchSessions(query: string): Promise<SessionHit[]>
   loadSession(id: string): Promise<Session | null>
   deleteSession(id: string): Promise<void>
   renameSession(id: string, title: string): Promise<void>
@@ -412,6 +614,12 @@ export interface HarnessApi {
    * `skill` names a skill the user picked for this message.
    */
   send(sessionId: string | null, workspace: string, text: string, skill?: string): Promise<string>
+  /**
+   * Compacts a conversation now, with the model in use, whatever its context still holds. What
+   * was done is told through `onEvent`, as in a turn. `done` is false when there was nothing
+   * worth compacting; `problem` says why no summary could be had.
+   */
+  compactSession(sessionId: string): Promise<CompactionReport>
   stop(sessionId: string): Promise<void>
   respondPermission(id: string, decision: PermissionDecision): Promise<void>
   onEvent(listener: (e: SessionEvent) => void): () => void

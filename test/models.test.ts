@@ -17,12 +17,19 @@ const deepseek = [
   { id: 'deepseek-v4-pro', object: 'model', name: 'DeepSeek-V4-Pro', effort: { supported_levels: ['low', 'high', 'max'], default_level: 'high' } }
 ]
 
-test('parseModelInfo keeps the name and the thinking levels it knows', () => {
+test('parseModelInfo keeps the name, the thinking levels it knows, and the size of the context', () => {
   assert.deepEqual(parseModelInfo(deepseek[0]), {
     name: 'DeepSeek-V4.1-Flash',
     efforts: ['low', 'high', 'max'],
-    defaultEffort: 'high'
+    defaultEffort: 'high',
+    contextWindow: 1048576
   })
+  assert.deepEqual(parseModelInfo(deepseek[1]), { name: 'DeepSeek-V4-Pro', efforts: ['low', 'high', 'max'], defaultEffort: 'high' }, 'an entry that does not say it has none')
+  // Each service has its own name for the size of the context; a size that is no size is not kept.
+  assert.deepEqual(parseModelInfo({ id: 'x', context_length: 131072 }), { contextWindow: 131072 })
+  assert.deepEqual(parseModelInfo({ id: 'x', max_model_len: 32768, name: 'Qwen' }), { name: 'Qwen', contextWindow: 32768 })
+  assert.deepEqual(parseModelInfo({ id: 'x', max_context_length: 8192 }), { contextWindow: 8192 })
+  for (const odd of ['128000', 0, -1, 12.5, 1e12, null]) assert.equal(parseModelInfo({ id: 'x', context_window: odd }), null, String(odd))
   assert.deepEqual(parseModelInfo({ id: 'x', display_name: '  Some Model  ' }), { name: 'Some Model' })
   // Levels the app does not know are dropped; "default" is the app's own word, not a level.
   assert.deepEqual(parseModelInfo({ id: 'x', effort: { supported_levels: ['turbo', 'low', 'default', 7, 'xhigh'], default_level: 'ultra' } }), {

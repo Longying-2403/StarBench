@@ -2,14 +2,15 @@ import { useEffect, useRef, useState } from 'react'
 import type { KeyboardEvent } from 'react'
 import type { ModelInfo, ReasoningEffort, Settings, SkillInfo } from '../../shared/types.ts'
 import { ModelControl } from './ModelControl.tsx'
+import { PluginRow } from './PluginUi.tsx'
 import { EnterIcon, StopIcon } from './icons.tsx'
 import { roomStyle, usePopupPlace } from './util.ts'
 
 const api = window.harness
 
 /**
- * The message box: the text, a menu for picking a skill by button or by typing "/",
- * the model with its thinking effort, and the send button.
+ * The message box: the text, a menu for picking a skill by button or by typing "/", the button
+ * for the person's own prompt, the model with its thinking effort, and the send button.
  */
 export function Composer({
   blocked,
@@ -20,6 +21,7 @@ export function Composer({
   onFastChange,
   onSelectModel,
   onOpenSettings,
+  onOpenPrompt,
   onSend,
   onStop
 }: {
@@ -34,6 +36,8 @@ export function Composer({
   onFastChange: (on: boolean) => void
   onSelectModel: (providerId: string, model: string) => void
   onOpenSettings: () => void
+  /** Opens the person's own instructions for the provider in use. */
+  onOpenPrompt: () => void
   onSend: (text: string, skill?: string) => void
   onStop: () => void
 }) {
@@ -59,6 +63,14 @@ export function Composer({
   // Below the box while it sits in the middle of a new chat and the whole menu fits there, above
   // it once it is at the bottom. `.skill-menu` is 300px at its tallest and sits 6px from the box.
   const menuPlace = usePopupPlace(visible, areaRef, 300, 6)
+
+  /** What the person wrote for the models of the provider in use, if anything. */
+  const prompt = settings?.providers.find((p) => p.id === settings.activeProviderId)?.prompt
+  const promptText = !prompt
+    ? '提示词：给当前模型服务写一段固定的要求'
+    : prompt.replace
+      ? '提示词：已设置，替换了内置提示'
+      : '提示词：已设置，加在内置提示后面'
 
   // Read the list each time the menu opens: skills can be added while the app is running.
   useEffect(() => {
@@ -192,6 +204,20 @@ export function Composer({
         >
           Skills
         </button>
+        {/* Does not wait for a folder or a model: what it sets counts from the next message, whenever that is. */}
+        <button
+          type="button"
+          className="btn btn-small"
+          aria-haspopup="dialog"
+          aria-label={promptText}
+          title={promptText}
+          data-set={prompt ? '' : undefined}
+          disabled={!settings}
+          onClick={onOpenPrompt}
+        >
+          提示词
+        </button>
+        <PluginRow />
         {picked && (
           <span className="chip">
             {picked}

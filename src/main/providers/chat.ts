@@ -2,12 +2,14 @@
 // people run on their own machines among them.
 
 import OpenAI from 'openai'
-import { isLocalAddress } from '../../shared/types.ts'
+import { isLocalAddress, routesByConversation } from '../../shared/types.ts'
 import type { ToolCall } from '../../shared/types.ts'
 import { fetchModelInfo, listModels } from '../models.ts'
 import { newReply, replayOf, userText, withToolResults } from './history.ts'
 import { ThinkTags } from './think-tags.ts'
 import type { Split } from './think-tags.ts'
+import { WrittenCalls, callText, newCallId, resultText, textBeforeCalls, toolsPrompt, trailingCalls } from './tool-text.ts'
+import type { WrittenCall } from './tool-text.ts'
 import { ToolsRefused } from './types.ts'
 import type { AssistantMessage, Connection, ModelReply, ModelRequest, ProviderAdapter } from './types.ts'
 
@@ -68,6 +70,32 @@ export function cannotStream(err: unknown, opened: boolean, connection: Pick<Con
 }
 
 /**
+ * Whether an error is a server turning a request down for a field it does not know,
+ * `stream_options`: the one that asks what a streamed reply cost. Most servers pass over what
+ * they do not know; one with a strict schema names the field in its refusal.
+ */
+export function refusesStreamOptions(err: unknown): boolean {
+  if (!(err instanceof OpenAI.APIError) || err.status === undefined) return false
+  return err.status >= 400 && err.status < 500 && /stream_options|include_usage/i.test(err.message)
+}
+
+/**
+ * The servers that refused that field, by address. It is only ever sent while someone watches
+ * (see `ModelRequest.probe`), and a server that refused it once is not sent it again for as long
+ * as the app runs: the watching must not cost a failed request every time.
+ */
+const takesNoStreamOptions = new Set<string>()
+
+/**
+ * The models whose answers begin inside the thinking, by server and name. Their template writes
+ * the opening tag itself (Qwen 3.5 is one) and the server passes on what the model wrote, so
+ * that only a closing tag shows where the thinking ends. Once an answer showed that, the next
+ * ones are read as thinking from their first word on, instead of being shown as the answer until
+ * the tag comes. Kept for as long as the app runs; an answer without the tag takes the model off again.
+ */
+const thinksUnopened = new Set<string>()
+
+/**
  * Servers built on FastAPI answer an error with `{"detail": "..."}`, and some others with a
  * `message` at the top. The client reads `{"error": {"message": "..."}}` and, finding none, reports
  * nothing but the status. This gives such an answer the shape the client reads, so that what the
@@ -104,12 +132,19 @@ const NO_REPLY = '(No reply: the turn was stopped here.)'
  * `turns` is for a server that takes nothing but strict turns (see `Connection.wholeReplies`):
  * the results of several tool calls go out as one, and a user message that follows tool results
  * directly gets a line in between that stands for the reply that never came.
+ *
+ * For a server that takes no tool definitions (see `Connection.textTools`) everything about tools
+ * is written out: the tools at the end of the instructions, each call in the reply that made it,
+ * and the results as a message of the user's, the way the models' own templates put them. Such a
+ * conversation is strict turns by itself.
  */
 export function chatMessages(
-  request: Pick<ModelRequest, 'messages' | 'connection' | 'system'>,
+  request: Pick<ModelRequest, 'messages' | 'connection' | 'system'> & Partial<Pick<ModelRequest, 'tools'>>,
   turns: boolean = request.connection.wholeReplies ?? false
 ): ApiMessage[] {
-  const out: ApiMessage[] = [{ role: 'system', content: request.system }]
+  const written = Boolean(request.connection.textTools)
+  const system = written && request.tools?.length ? `${request.system}\n\n${toolsPrompt(request.tools)}` : request.system
+  const out: ApiMessage[] = [{ role: 'system', content: system }]
   for (const message of withToolResults(request.messages)) {
     const before = out.at(-1)
     if (message.role === 'user') {
@@ -120,6 +155,12 @@ export function chatMessages(
       if (turns && before?.role === 'tool') out.push({ role: 'assistant', content: NO_REPLY })
       out.push({ role: 'user', content: userText(message) })
     } else if (message.role === 'tool') {
+      if (written) {
+        // The results of one reply's calls stand together, one under the other.
+        if (before?.role === 'user' && typeof before.content === 'string') before.content = `${before.content}\n${resultText(message.content)}`
+        else out.push({ role: 'user', content: resultText(message.content) })
+        continue
+      }
       if (turns && before?.role === 'tool' && typeof before.content === 'string') {
         before.content = `${before.content}\n\n${message.content}`
         continue
@@ -127,18 +168,24 @@ export function chatMessages(
       out.push({ role: 'tool', tool_call_id: message.tool_call_id, content: message.content })
     } else {
       // DeepSeek wants its own reasoning back on every assistant message when tools are in the
-      // request. Reasoning another service wrote is left out: it means nothing here and an
-      // unknown field can be refused. Messages from before origins were recorded are this service's.
+      // request, and counts it as input again. xAI asks for it too, for the sake of its cache;
+      // what it counts of a reply's thinking in every later request it puts there itself, sent
+      // back or not (tried with one conversation through two connections, 2026-11-23). So leaving
+      // it out saves nothing there, and with DeepSeek only by going against what it asks for.
+      // Reasoning another service wrote is left out: it means nothing here and an unknown field
+      // can be refused. Messages from before origins were recorded are this service's.
       const own = !message.origin || message.origin.provider === request.connection.provider
       const field = thinkingField(message, request.connection)
+      const calls = message.tool_calls ?? []
       out.push({
         role: 'assistant',
-        content: message.content,
+        // Written out, a call follows what the model said before it, as the model would write it.
+        content: written && calls.length ? [message.content, calls.map(callText).join('\n')].filter(Boolean).join('\n\n') : message.content,
         // Neither name is in the SDK's message type.
         ...(own && message.reasoning_content && field ? { [field]: message.reasoning_content } : {}),
-        ...(message.tool_calls?.length
+        ...(calls.length && !written
           ? {
-              tool_calls: message.tool_calls.map((c) => ({
+              tool_calls: calls.map((c) => ({
                 id: c.id,
                 type: 'function' as const,
                 function: { name: c.name, arguments: c.arguments }
@@ -153,36 +200,85 @@ export function chatMessages(
 
 export const chatAdapter: ProviderAdapter = {
   async complete(request: ModelRequest): Promise<ModelReply> {
-    const { connection, signal } = request
+    const { connection, signal, probe } = request
     const client = new OpenAI({ apiKey: connection.apiKey, baseURL: connection.baseURL, fetch: readableErrors })
     const message = newReply(connection)
     const calls: ToolCall[] = []
     const effort = connection.reasoningEffort
+    // Which conversation this is, for a service that sends a conversation's requests to one
+    // server by it. In this format xAI reads it from a header.
+    const named = request.conversation && routesByConversation(connection.baseURL) ? { 'x-grok-conv-id': request.conversation } : undefined
+    const routed = named ? { headers: named } : {}
     let cutShort = false
     /** How the thinking came, when not under its usual name. */
     let thinking: Thinking | undefined
-    const tags = new ThinkTags()
-    const take = ({ reasoning, text }: Split): void => {
+    /** What this model goes by among those whose answers begin inside the thinking. */
+    const thinker = `${connection.baseURL}\n${connection.model}`
+    // Thinking without its opening tag is looked for where a server passes on what the model
+    // wrote: on a server of one's own. A service on the internet keeps the thinking apart, and a
+    // line of its answer that happens to begin with the closing tag is part of the answer.
+    const tags = new ThinkTags(thinksUnopened.has(thinker) ? 'expect' : isLocalAddress(connection.baseURL) ? 'watch' : 'no')
+    /** What `tags` handed on as thinking on the strength of earlier answers alone. */
+    let assumed = ''
+    const offered = request.tools.length > 0
+    /** The tools are described in the instructions and not handed over, so every call comes as text (`Connection.textTools`). */
+    const described = offered && Boolean(connection.textTools)
+    /** The tools go out in the request, the way the API has them. */
+    const wired = offered && !described
+    // A server of one's own may also leave a call in the answer although it took the tools: it
+    // has no parser for the model's format, or the model wrote the call a little differently. So
+    // the answer is watched for calls there too. Not with a service on the internet: those hand
+    // their calls over, and a model that merely quotes a text with such a call in it (a file it
+    // was asked to show) must not have made one by that.
+    const watched = described || (offered && isLocalAddress(connection.baseURL))
+    const written = watched ? new WrittenCalls(request.tools, described) : undefined
+    const show = (text: string): void => {
+      if (!text) return
+      message.content += text
+      request.onText(text)
+    }
+    /** Tells whoever shows the reply that what it was handed so far reads differently now. */
+    const rewrite = (): void => request.onRewrite?.({ text: message.content, reasoning: message.reasoning_content ?? '' })
+    const take = ({ reasoning, text, wasThinking }: Split): void => {
+      if (wasThinking) {
+        // The answer had begun inside the thinking. What was handed on as its text so far is
+        // thinking, and so is what was held back of it as a possible tool call: a call the model
+        // only thought about is none.
+        const thought = message.content + (written?.drain() ?? '')
+        message.content = ''
+        if (thought.trim()) message.reasoning_content = (message.reasoning_content ?? '') + thought.trimStart()
+        if (thought) rewrite()
+        if (!message.reasoning_content) reasoning = reasoning.trimStart()
+      }
       if (reasoning) {
         message.reasoning_content = (message.reasoning_content ?? '') + reasoning
         request.onReasoning(reasoning)
       }
-      if (text) {
-        message.content += text
-        request.onText(text)
-      }
+      show(written ? written.push(text) : text)
+    }
+    /** Takes in what `tags` made of a piece of the answer. */
+    const said = (split: Split): void => {
+      if (tags.assumed) assumed += split.reasoning
+      take(split)
+    }
+    /** The service hands the thinking over by itself: none of it is to be looked for in the answer. */
+    const apart = (): void => {
+      tags.settle()
+      thinksUnopened.delete(thinker)
     }
     /** Takes in one piece of the reply: a chunk of a stream, or the whole message of a reply that came in one piece. */
     const absorb = (piece: Piece): void => {
       // The thinking has two names: DeepSeek's, which most services took over, and a shorter one.
       if (typeof piece.reasoning_content === 'string' && piece.reasoning_content) {
+        apart()
         take({ reasoning: piece.reasoning_content, text: '' })
       } else if (typeof piece.reasoning === 'string' && piece.reasoning) {
         thinking = 'reasoning'
+        apart()
         take({ reasoning: piece.reasoning, text: '' })
       }
-      // Or none, and comes at the start of the answer between tags.
-      if (typeof piece.content === 'string' && piece.content) take(tags.push(piece.content))
+      // Or none, and comes inside the answer: between tags at its start, or up to a closing tag.
+      if (typeof piece.content === 'string' && piece.content) said(tags.push(piece.content))
       for (const [position, part] of (piece.tool_calls ?? []).entries()) {
         // A stream numbers its calls; in a whole message their order is their number.
         const call = (calls[part.index ?? position] ??= { id: '', name: '', arguments: '' })
@@ -193,10 +289,12 @@ export const chatAdapter: ProviderAdapter = {
     }
     /** The request, but for how the reply is to come. `turns` is for a server that takes strict turns only. */
     const body = (turns: boolean) => ({
+      // What plugins add. It comes first, so that nothing in it replaces a field below.
+      ...(request.sampling as object | undefined),
       model: connection.model,
       messages: chatMessages(request, turns),
-      // The API rejects an empty tools array.
-      ...(request.tools.length ? { tools: request.tools.map((t) => ({ type: 'function' as const, function: { ...t } })) } : {}),
+      // The API rejects an empty tools array. A server that takes none finds them in the instructions.
+      ...(wired ? { tools: request.tools.map((t) => ({ type: 'function' as const, function: { ...t } })) } : {}),
       // Left out unless the user chose a level: not every compatible service knows the parameter.
       // The cast is for levels the SDK's list does not have but some services do.
       ...(effort !== 'default' ? { reasoning_effort: effort as OpenAI.ReasoningEffort } : {})
@@ -204,8 +302,8 @@ export const chatAdapter: ProviderAdapter = {
     /** An error from before anything of the reply arrived, turned into what it means where that is known. */
     const explained = (err: unknown): unknown => {
       if (signal.aborted) return err
-      // The caller can send the message again without tools.
-      if (request.tools.length && refusesTools(err)) return new ToolsRefused((err as Error).message)
+      // The caller can send the message again with the tools described in the instructions.
+      if (wired && refusesTools(err)) return new ToolsRefused((err as Error).message)
       // A model server on one's own machine that does not answer is, as a rule, one that was not started.
       if (err instanceof OpenAI.APIConnectionError && isLocalAddress(connection.baseURL)) {
         return new Error(`Could not reach the model server at ${connection.baseURL}. Is it running?`)
@@ -213,57 +311,147 @@ export const chatAdapter: ProviderAdapter = {
       return err
     }
 
+    /**
+     * What is kept of a reply that was stopped: the text and the thinking that arrived. A tool
+     * call that was still coming is dropped, whether the service was handing it over or the model
+     * was writing it into the answer: its arguments are cut off, and kept with the message they
+     * would be sent back as they are with every later request.
+     */
+    const halted = (): ModelReply => {
+      said(tags.end())
+      // The beginning of a tag that never came is text; a call that had begun is not.
+      const tail = written?.end()
+      if (tail && !tail.begun) show(tail.text)
+      // Thinking still going on is thinking, also where it was only taken for it: nothing has
+      // shown that it was the answer. It goes back to the server the way it came, or not at all.
+      if (tags.found || (tags.assumed && tags.open)) thinking = 'inline'
+      if (thinking && message.reasoning_content && message.origin) message.origin.replay = { thinking }
+      if (tags.bare) thinksUnopened.add(thinker)
+      return { message }
+    }
+
     /** The reply is asked for in one piece: the server is known not to stream it, or turns out not to. */
-    let whole = Boolean(connection.wholeReplies) && request.tools.length > 0
+    let whole = Boolean(connection.wholeReplies) && wired
     try {
       if (!whole) {
         let opened = false
         let pieces = 0
-        try {
-          const stream = await client.chat.completions.create({ ...body(false), stream: true }, { signal })
-          opened = true
-          for await (const chunk of stream) {
-            pieces++
-            const choice = chunk.choices[0]
-            if (choice?.finish_reason === 'length') cutShort = true
-            if (choice?.delta) absorb(choice.delta)
+        // What a streamed reply cost is told only when asked for, in a last piece of its own. It
+        // is asked for while the app keeps count or a plugin watches, and not otherwise: a server
+        // may not know the field.
+        let askCost = Boolean(probe) && !takesNoStreamOptions.has(connection.baseURL)
+        for (;;) {
+          try {
+            const wire = { ...body(false), stream: true as const, ...(askCost ? { stream_options: { include_usage: true } } : {}) }
+            probe?.sent(wire, named)
+            const stream = await client.chat.completions.create(wire, { signal, ...routed })
+            opened = true
+            for await (const chunk of stream) {
+              pieces++
+              const choice = chunk.choices[0]
+              if (chunk.usage) probe?.usage(chunk.usage)
+              if (choice?.finish_reason) probe?.finished(choice.finish_reason)
+              if (choice?.finish_reason === 'length') cutShort = true
+              if (choice?.delta) {
+                probe?.arrived()
+                absorb(choice.delta)
+              }
+            }
+            // A stream that ends without a single piece is the same failure, taken more quietly.
+            if (pieces === 0 && !signal.aborted && wired && isLocalAddress(connection.baseURL)) whole = true
+          } catch (err) {
+            if (pieces > 0) throw err
+            // Watching must not be what breaks the conversation: a server that turns the field
+            // down is asked again without it, and the record goes without the cost.
+            if (askCost && !signal.aborted && refusesStreamOptions(err)) {
+              takesNoStreamOptions.add(connection.baseURL)
+              askCost = false
+              continue
+            }
+            if (signal.aborted || !wired || !cannotStream(err, opened, connection)) throw explained(err)
+            whole = true
           }
-          // A stream that ends without a single piece is the same failure, taken more quietly.
-          if (pieces === 0 && !signal.aborted && request.tools.length && isLocalAddress(connection.baseURL)) whole = true
-        } catch (err) {
-          if (pieces > 0) throw err
-          if (signal.aborted || !request.tools.length || !cannotStream(err, opened, connection)) throw explained(err)
-          whole = true
+          break
         }
       }
       if (whole) {
-        const completion = await client.chat.completions.create({ ...body(true), stream: false }, { signal }).catch((err: unknown) => {
+        const wire = { ...body(true), stream: false as const }
+        probe?.sent(wire, named)
+        const completion = await client.chat.completions.create(wire, { signal, ...routed }).catch((err: unknown) => {
           throw explained(err)
         })
         // Found out with this very request: said before the reply, which now appears all at once.
         if (!connection.wholeReplies) request.onStreamRefused?.()
         const choice = completion.choices?.[0]
+        if (completion.usage) probe?.usage(completion.usage)
+        if (choice?.finish_reason) probe?.finished(choice.finish_reason)
         if (choice?.finish_reason === 'length') cutShort = true
         if (choice?.message) absorb(choice.message)
       }
     } catch (err) {
-      // A stop request keeps whatever text arrived; half-received tool calls are dropped.
+      // A stop before the reply began, or while it was awaited in one piece.
       if (!signal.aborted) throw err
-      take(tags.end())
-      return { message }
+      return halted()
     }
-    take(tags.end())
-    if (tags.found) thinking = 'inline'
+    // A stop in the middle of a streamed reply throws nothing: the client ends the stream
+    // quietly, and the pieces just stop coming. What arrived is no finished reply either.
+    if (signal.aborted) return halted()
+    said(tags.end())
+    if (tags.bare) thinksUnopened.add(thinker)
+    if (tags.assumed && tags.open && !cutShort && !request.unattended) {
+      // Taken for thinking, and the end of the thinking never came: the model did not think this
+      // time, and what it wrote was the answer. It goes where an answer goes, with any tool call
+      // in it; the next answer is not taken for thinking unasked. (An answer that ran out of
+      // output space is left as it is: that it ran out while thinking is the likelier case. And
+      // nothing is guessed about a reply nobody reads as it comes: taken for the answer wrongly,
+      // the thinking would be put to use as it stands.)
+      thinksUnopened.delete(thinker)
+      if (assumed) {
+        const thought = message.reasoning_content ?? ''
+        const before = thought.slice(0, thought.length - assumed.length)
+        if (before) message.reasoning_content = before
+        else delete message.reasoning_content
+        rewrite()
+        take({ reasoning: '', text: assumed })
+      }
+    }
+    const tail = written?.end()
+    // Thinking that was only taken for it and is left as it is came inside the answer as well.
+    if (tags.found || (tags.assumed && tags.open)) thinking = 'inline'
     if (thinking && message.reasoning_content && message.origin) message.origin.replay = { thinking }
     let complete = calls.filter((c) => c && c.id && c.name)
+    const called = (found: readonly WrittenCall[]): ToolCall[] => found.map((call) => ({ id: newCallId(), ...call }))
+    if (tail && !complete.length && tail.calls.length) {
+      // The server left the calls in the answer, where they were held back from the page. What
+      // stood before them is the text of the message.
+      complete = called(tail.calls)
+      const before = textBeforeCalls(message.content)
+      // The opening of a code block that the model put its call in was shown as it came.
+      const shown = before !== message.content.trimEnd()
+      message.content = before
+      if (shown) rewrite()
+    } else if (tail && !(cutShort && tail.unfinished)) {
+      // Held back for nothing: text like any other. (Half a call that the output was cut short in is not text to show.)
+      show(tail.text)
+      // Or the call stands at the end of the answer with no tags around it, and was shown as it came.
+      const bare = !complete.length && !cutShort ? trailingCalls(message.content, request.tools) : undefined
+      if (bare) {
+        complete = called(bare.calls)
+        message.content = bare.text
+        rewrite()
+      }
+    }
     // Strict turns have room for one result. The model makes its other calls once it has seen this one.
     if (whole && complete.length > 1) complete = complete.slice(0, 1)
     if (complete.length) message.tool_calls = complete
     // Cut off in the middle of a tool call, its arguments are incomplete: running it would act on half an input.
-    if (cutShort && complete.length) {
+    if (cutShort && (complete.length || tail?.unfinished)) {
       delete message.tool_calls
       return { message, stopped: 'The model ran out of output space in the middle of a tool call, so the call was not run.' }
     }
+    // A reply the app puts to use as it stands is no use cut short: it is half of what was asked
+    // for, or the thinking before it. The words are the ones the other formats say this in.
+    if (cutShort && request.unattended) return { message, stopped: 'The model ran out of output space before it finished.' }
     return { message }
   },
 

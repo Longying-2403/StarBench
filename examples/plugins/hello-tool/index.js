@@ -1,4 +1,4 @@
-// 示例插件：注册一个工具。把整个文件夹复制到 StarBench 的插件目录，然后在设置里启用。
+// 示例插件：注册一个工具。把整个文件夹复制到 StarBench 的插件目录，然后在侧边栏的"插件"页里启用。
 
 /** 这个插件需要的服务。`tools` 由 StarBench 提供。 */
 export const inject = ['tools']

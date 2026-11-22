@@ -22,6 +22,20 @@ const nameOf = (raw: Record<string, unknown>): string | undefined => {
 }
 
 /**
+ * How many tokens the model's context holds, where a list of models says so. Each service has
+ * its own name for it: `context_length` (OpenRouter, Together), `context_window` (Groq),
+ * `max_model_len` (vLLM), `max_context_length` (LM Studio).
+ */
+const WINDOW_FIELDS = ['context_length', 'context_window', 'max_model_len', 'max_context_length'] as const
+const windowOf = (raw: Record<string, unknown>): number | undefined => {
+  for (const name of WINDOW_FIELDS) {
+    const tokens = raw[name]
+    if (typeof tokens === 'number' && Number.isInteger(tokens) && tokens >= 256 && tokens <= 100_000_000) return tokens
+  }
+  return undefined
+}
+
+/**
  * Picks what the app can use out of one entry of a model list. Services return different
  * shapes, so every field is checked and anything unknown is dropped. Resolves to null when
  * nothing usable is left.
@@ -46,7 +60,10 @@ export function parseModelInfo(entry: unknown): ModelInfo | null {
     if (isLevel(fallback)) info.defaultEffort = fallback
   }
 
-  return info.name || info.efforts || info.defaultEffort ? info : null
+  const window = windowOf(raw)
+  if (window) info.contextWindow = window
+
+  return info.name || info.efforts || info.defaultEffort || info.contextWindow ? info : null
 }
 
 async function entries(service: Service): Promise<Record<string, unknown>[]> {

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import * as model from '../src/main/settings-model.ts'
-import { isLocalAddress, offersFastMode, usualEfforts } from '../src/shared/types.ts'
+import { CUSTOM_PROMPT_LIMIT, isLocalAddress, offersFastMode, usualEfforts } from '../src/shared/types.ts'
 
 test('settings from before there were providers keep their key, model and effort', () => {
   const old = {
@@ -177,6 +177,44 @@ test('an address on this computer or the local network is told from one on the i
   assert.deepEqual(elsewhere.filter(isLocalAddress), [])
 })
 
+test("a provider keeps a prompt of the person's own", () => {
+  const local = { name: 'Local', kind: 'openai-chat' as const, baseURL: 'http://localhost:8000/v1', model: 'm' }
+  let settings = model.saveProvider(model.readSettings(null), local, 'KEY')
+  const before = settings.providers[1]
+  settings = model.setPrompt(settings, 'local', { text: '  You are Mei.  ', replace: true })
+  // Nothing else about the provider changes, and no other provider is touched.
+  assert.deepEqual(settings.providers[1], { ...before, prompt: { text: 'You are Mei.', replace: true } })
+  assert.deepEqual(model.toPublic(settings).providers[1].prompt, { text: 'You are Mei.', replace: true })
+  assert.equal(model.toPublic(settings).providers[0].prompt, undefined)
+
+  // Saving the provider's other settings leaves it alone.
+  settings = model.saveProvider(settings, { ...local, id: 'local', model: 'other' })
+  assert.deepEqual(settings.providers[1].prompt, { text: 'You are Mei.', replace: true })
+  // Emptied, or given as nothing, it is taken away.
+  settings = model.setPrompt(settings, 'local', { text: '   ', replace: true })
+  assert.equal('prompt' in settings.providers[1], false)
+  settings = model.setPrompt(settings, 'local', { text: 'Short answers.', replace: false })
+  assert.deepEqual(settings.providers[1].prompt, { text: 'Short answers.', replace: false })
+  settings = model.setPrompt(settings, 'local', null)
+  assert.equal('prompt' in settings.providers[1], false)
+  assert.throws(() => model.setPrompt(settings, 'ghost', { text: 'x', replace: false }), /no longer exists/)
+
+  // A provider that is signed in to has one like any other.
+  let signedIn = model.readSettings({ providers: [{ id: 'chatgpt', name: 'ChatGPT', kind: 'openai-responses', baseURL: 'https://api.openai.com/v1', auth: 'chatgpt' }] })
+  signedIn = model.setPrompt(signedIn, 'chatgpt', { text: 'Be brief.', replace: false })
+  assert.deepEqual([signedIn.providers[0].auth, signedIn.providers[0].prompt], ['chatgpt', { text: 'Be brief.', replace: false }])
+
+  // What a file holds is cut to length and cleaned of what is no prompt.
+  const read = model.readSettings({
+    providers: [
+      { id: 'a', name: 'A', kind: 'openai-chat', baseURL: 'https://a.example', prompt: { text: 'x'.repeat(CUSTOM_PROMPT_LIMIT + 5), replace: 'yes' } },
+      { id: 'b', name: 'B', kind: 'openai-chat', baseURL: 'https://b.example', prompt: 'just text' }
+    ]
+  })
+  assert.deepEqual([read.providers[0].prompt?.text.length, read.providers[0].prompt?.replace], [CUSTOM_PROMPT_LIMIT, false])
+  assert.equal(read.providers[1].prompt, undefined)
+})
+
 test('a model server on this computer can be used without a key', () => {
   let settings = model.readSettings(null)
   settings = model.saveProvider(settings, { name: 'Ollama', kind: 'openai-chat', baseURL: 'http://localhost:11434/v1', model: '' })
@@ -242,4 +280,92 @@ test('faster answers are remembered for each model, and offered only where the s
   assert.equal(offersFastMode({ ...claude, baseURL: 'https://gateway.example', model: 'claude-opus-5-5' }), false)
   assert.equal(offersFastMode({ kind: 'openai-chat', baseURL: 'https://api.deepseek.com', model: 'deepseek-flash' }), false)
   assert.equal(offersFastMode({ kind: 'openai-chat', baseURL: 'https://api.x.ai/v1', model: 'grok-4.7' }), false)
+})
+
+test('the size of a context typed in by hand is kept for the model it was typed for', () => {
+  let settings = model.readSettings({
+    providers: [
+      { id: 'local', name: 'Ollama', kind: 'openai-chat', baseURL: 'http://localhost:11434/v1', model: 'qwen3.5:9b' },
+      { id: 'other', name: 'Other', kind: 'openai-chat', baseURL: 'https://api.example.com/v1', model: 'm1', encryptedKey: 'ZW5j' }
+    ],
+    activeProviderId: 'local'
+  })
+  assert.equal(model.windowOf(model.activeProvider(settings)), undefined)
+
+  settings = model.setWindow(settings, 'local', 'qwen3.5:9b', 32_768)
+  settings = model.setWindow(settings, 'local', 'another:7b', 8192)
+  assert.deepEqual(settings.providers[0].windows, { 'qwen3.5:9b': 32_768, 'another:7b': 8192 })
+  assert.equal(model.windowOf(model.activeProvider(settings)), 32_768)
+  assert.equal(settings.providers[1].windows, undefined, 'each provider has its own')
+  // It is for one model: with another model chosen there is none.
+  assert.equal(model.windowOf(model.activeProvider(model.setModel(settings, 'local', 'third:1b'))), undefined)
+  // Kept through a save and a load, and through a change of the provider's other fields.
+  assert.deepEqual(model.readSettings(JSON.parse(JSON.stringify(settings))), settings)
+  assert.deepEqual(model.saveProvider(settings, { id: 'local', name: 'Renamed', kind: 'openai-chat', baseURL: 'http://localhost:11434/v1', model: 'qwen3.5:9b' }).providers[0].windows, {
+    'qwen3.5:9b': 32_768,
+    'another:7b': 8192
+  })
+
+  // Taken back, model by model; with the last one gone nothing is left to store.
+  settings = model.setWindow(settings, 'local', 'qwen3.5:9b', null)
+  assert.deepEqual(settings.providers[0].windows, { 'another:7b': 8192 })
+  settings = model.setWindow(settings, 'local', 'another:7b', null)
+  assert.equal('windows' in settings.providers[0], false)
+
+  // What is not a size is refused, and what a file holds that is not one is dropped.
+  for (const odd of [0, 12, -5, 1.5, Number.NaN, 1e12]) assert.throws(() => model.setWindow(settings, 'local', 'qwen3.5:9b', odd), /not a size/, String(odd))
+  assert.equal(model.setWindow(settings, 'gone', 'm', 1000), settings, 'a provider that is no longer there changes nothing')
+  const read = model.readSettings({ providers: [{ id: 'a', name: 'A', kind: 'openai-chat', baseURL: 'http://localhost:1/v1', model: 'm', windows: { good: 4096, text: '8k', tiny: 3, half: 10.5 } }] })
+  assert.deepEqual(read.providers[0].windows, { good: 4096 })
+})
+
+test('the counting of what conversations cost is on unless it was switched off', () => {
+  const fresh = model.readSettings(undefined)
+  assert.equal('stats' in fresh, false)
+  assert.equal(model.toPublic(fresh).stats, true)
+
+  const off = model.setStats(fresh, false)
+  assert.equal(off.stats, false)
+  assert.equal(model.toPublic(off).stats, false)
+  assert.deepEqual(model.readSettings(JSON.parse(JSON.stringify(off))), off, 'kept through a save and a load')
+
+  const on = model.setStats(off, true)
+  assert.deepEqual(on, fresh, 'on is how the app comes, and is not written down')
+  // Anything but an outright false in the file means on.
+  for (const odd of [true, 'false', 0, null]) assert.equal(model.toPublic(model.readSettings({ stats: odd })).stats, true, String(odd))
+})
+
+test('conversations are compacted by themselves at four fifths of the context unless that was changed', () => {
+  const fresh = model.readSettings(undefined)
+  assert.equal('compaction' in fresh, false)
+  assert.deepEqual(model.toPublic(fresh).compaction, { auto: true, share: 0.8, cap: null })
+
+  // Each of the three is changed by itself, and what is not named stays.
+  let settings = model.setCompaction(fresh, { share: 0.6 })
+  assert.deepEqual(settings.compaction, { share: 0.6 })
+  settings = model.setCompaction(settings, { cap: 200_000 })
+  settings = model.setCompaction(settings, { auto: false })
+  assert.deepEqual(settings.compaction, { auto: false, share: 0.6, cap: 200_000 })
+  assert.deepEqual(model.compactionOf(settings), { auto: false, share: 0.6, cap: 200_000 })
+  assert.deepEqual(model.readSettings(JSON.parse(JSON.stringify(settings))), settings, 'kept through a save and a load')
+
+  // Taken back one by one; with all three as the app comes, nothing is written down.
+  settings = model.setCompaction(settings, { cap: null })
+  assert.deepEqual(settings.compaction, { auto: false, share: 0.6 })
+  settings = model.setCompaction(settings, { auto: true, share: 0.8 })
+  assert.deepEqual(settings, fresh)
+
+  // A share out of range is brought to the nearest that can be set.
+  assert.equal(model.compactionOf(model.setCompaction(fresh, { share: 0.2 })).share, 0.5)
+  assert.equal(model.compactionOf(model.setCompaction(fresh, { share: 0.999 })).share, 0.95)
+  // What is no share at all, and a cap that cannot be one, are refused: a slip must not compact everything at once.
+  for (const odd of ['0.8', Number.NaN, null]) assert.throws(() => model.setCompaction(fresh, { share: odd }), /must be a number/, String(odd))
+  for (const odd of [0, 300, 3999, 1.5e9, 20_000.5, '200K']) assert.throws(() => model.setCompaction(fresh, { cap: odd }), /whole number of tokens from 4000/, String(odd))
+  assert.throws(() => model.setCompaction(fresh, 'auto'), /Nothing to change/)
+  assert.deepEqual(model.setCompaction(fresh, {}), fresh)
+
+  // A file that holds something else is read as far as it makes sense.
+  const read = model.readSettings({ compaction: { auto: 'no', share: 7, cap: 12, more: true } })
+  assert.deepEqual(read.compaction, { share: 0.95 })
+  assert.equal('compaction' in model.readSettings({ compaction: 'on' }), false)
 })

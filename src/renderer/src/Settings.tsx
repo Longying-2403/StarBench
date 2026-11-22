@@ -1,18 +1,25 @@
-import { useCallback, useEffect, useState } from 'react'
+import { Fragment, useCallback, useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
 import { CHATGPT_HELP_URL, LOCAL_SERVERS, PROVIDER_KINDS, PROVIDER_PRESETS, isLocalAddress } from '../../shared/types.ts'
-import type { McpServerStatus, ModelChoice, PluginInfo, ProviderInfo, ProviderKind, Settings, SkillInfo } from '../../shared/types.ts'
+import type { McpServerStatus, ModelChoice, ProviderInfo, ProviderKind, Settings, SkillInfo } from '../../shared/types.ts'
+import { ABOUT } from '../../shared/about.ts'
+import { CAP_MIN, SHARE_MAX, SHARE_MIN, isCap } from '../../shared/compaction.ts'
+import type { CompactionChange } from '../../shared/compaction.ts'
+import { formatTokens, readWindow } from '../../shared/stats.ts'
 import { ChatGptButton, ChatGptPane } from './ChatGptPane.tsx'
-import { Notice } from './Notice.tsx'
 import { errorText } from './util.ts'
 
 const api = window.harness
+/** The shares of the context at which a conversation can be set to be compacted, in percent. */
+const LEAST = Math.round(SHARE_MIN * 100)
+const MOST = Math.round(SHARE_MAX * 100)
 
 const TABS = [
   { id: 'model', label: '模型' },
-  { id: 'plugins', label: '插件' },
   { id: 'skills', label: 'Skills' },
-  { id: 'mcp', label: 'MCP' }
+  { id: 'mcp', label: 'MCP' },
+  { id: 'general', label: '通用' },
+  { id: 'about', label: '关于' }
 ] as const
 type TabId = (typeof TABS)[number]['id']
 
@@ -338,86 +345,6 @@ function ProvidersTab({
   )
 }
 
-const PLUGIN_STATUS: Record<PluginInfo['status'], string> = {
-  disabled: '未启用',
-  active: '运行中',
-  waiting: '等待中',
-  error: '出错'
-}
-
-function PluginsTab() {
-  const [plugins, setPlugins] = useState<PluginInfo[] | null>(null)
-  const [error, setError] = useState('')
-  /** Id of the plugin whose switch is mid-flight, so it cannot be toggled twice. */
-  const [busy, setBusy] = useState<string | null>(null)
-
-  const refresh = useCallback(() => {
-    setError('')
-    api.listPlugins().then(setPlugins, (err) => setError(errorText(err)))
-  }, [])
-  useEffect(refresh, [refresh])
-
-  const toggle = async (plugin: PluginInfo): Promise<void> => {
-    setBusy(plugin.id)
-    setError('')
-    try {
-      setPlugins(await api.setPluginEnabled(plugin.id, !plugin.enabled))
-    } catch (err) {
-      setError(errorText(err))
-    } finally {
-      setBusy(null)
-    }
-  }
-
-  return (
-    <div className="tab-body">
-      <Notice>插件在应用内以完整权限运行：可以读写文件、执行命令，也能访问你的 API Key 和 ChatGPT 登录。只启用你信任的插件。</Notice>
-      <div className="toolbar">
-        <button className="btn" onClick={() => api.openPluginsFolder().catch((err) => setError(errorText(err)))}>
-          打开插件文件夹
-        </button>
-        <button className="btn" onClick={refresh}>
-          刷新
-        </button>
-      </div>
-      {error && (
-        <div className="msg-error" role="alert">
-          {error}
-        </div>
-      )}
-      {plugins?.length === 0 && (
-        <p className="hint">还没有插件。把插件文件夹放进插件目录，然后点"刷新"。修改插件代码后需要重启应用。</p>
-      )}
-      <ul className="rows">
-        {plugins?.map((plugin) => (
-          <li key={plugin.id} className="row">
-            <div className="row-main">
-              <div className="row-title">
-                {plugin.name}
-                {plugin.version && <span className="row-meta">{plugin.version}</span>}
-                <span className={`badge badge-${plugin.status}`}>{PLUGIN_STATUS[plugin.status]}</span>
-              </div>
-              {plugin.description && <div className="row-desc">{plugin.description}</div>}
-              {plugin.tools.length > 0 && <div className="row-meta">工具：{plugin.tools.join('、')}</div>}
-              {plugin.skills.length > 0 && <div className="row-meta">Skills：{plugin.skills.join('、')}</div>}
-              {plugin.error && <div className="row-error">{plugin.error}</div>}
-            </div>
-            <input
-              type="checkbox"
-              role="switch"
-              className="switch"
-              checked={plugin.enabled}
-              disabled={busy !== null}
-              onChange={() => void toggle(plugin)}
-              aria-label={`启用插件 ${plugin.name}`}
-            />
-          </li>
-        ))}
-      </ul>
-    </div>
-  )
-}
-
 function SkillsTab() {
   const [skills, setSkills] = useState<SkillInfo[] | null>(null)
   const [error, setError] = useState('')
@@ -580,6 +507,210 @@ function McpTab() {
   )
 }
 
+/**
+ * A box for a number that is saved when the person is done with it: on Enter, and on leaving the
+ * box. `read` turns what was typed into the number, or into the reason it cannot be one.
+ */
+function NumberBox({
+  shown,
+  label,
+  placeholder,
+  disabled,
+  read,
+  onSave
+}: {
+  /** The number as it is saved, the way it is written out. */
+  shown: string
+  label: string
+  placeholder?: string
+  disabled?: boolean
+  read: (typed: string) => { value: number | null } | { problem: string }
+  onSave: (value: number | null) => Promise<void>
+}) {
+  /** What is being typed; null while the box shows what is saved. */
+  const [draft, setDraft] = useState<string | null>(null)
+  const [problem, setProblem] = useState('')
+  const commit = (): void => {
+    if (draft === null || draft.trim() === shown) return setDraft(null)
+    const typed = read(draft)
+    if ('problem' in typed) return setProblem(typed.problem)
+    setProblem('')
+    onSave(typed.value).then(
+      () => setDraft(null),
+      (err) => setProblem(errorText(err))
+    )
+  }
+  return (
+    <span className="setting-box">
+      <input
+        value={draft ?? shown}
+        aria-label={label}
+        aria-invalid={problem ? true : undefined}
+        placeholder={placeholder}
+        disabled={disabled}
+        spellCheck={false}
+        onChange={(e) => {
+          setProblem('')
+          setDraft(e.target.value)
+        }}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') commit()
+          // Escape gives up the typing, and not the dialog with it.
+          if (e.key !== 'Escape' || draft === null) return
+          e.stopPropagation()
+          setProblem('')
+          setDraft(null)
+        }}
+      />
+      {problem && (
+        <span className="setting-problem" role="alert">
+          {problem}
+        </span>
+      )}
+    </span>
+  )
+}
+
+/** What holds for the whole app, whichever model is in use. */
+function GeneralTab({ settings, onChanged }: { settings: Settings; onChanged: (s: Settings) => void }) {
+  const [error, setError] = useState('')
+  const count = (on: boolean): void => {
+    setError('')
+    api.setStats(on).then(onChanged, (err) => setError(errorText(err)))
+  }
+  const { compaction } = settings
+  const compact = (change: CompactionChange): Promise<void> => {
+    setError('')
+    return api.setCompaction(change).then(onChanged)
+  }
+  return (
+    <div className="tab-body">
+      <label className="setting-row">
+        <span className="setting-words">
+          <span className="setting-name">统计用量和上下文</span>
+          <span className="hint">
+            在输入框下面显示当前对话的请求次数、用时、token 用量和上下文占用，数字随对话保存。为此每次请求都会向模型服务要一份用量统计：发给 OpenAI
+            兼容服务的流式请求里会多一个 stream_options 字段，服务拒绝它时自动去掉重发。关掉后不再统计，也不再多发这个字段。
+          </span>
+        </span>
+        <input type="checkbox" role="switch" className="switch" checked={settings.stats} onChange={(e) => count(e.target.checked)} />
+      </label>
+      <label className="setting-row">
+        <span className="setting-words">
+          <span className="setting-name">自动压缩上下文</span>
+          <span className="hint">
+            对话快要占满模型的上下文时，先把较早的工具结果从发给模型的内容里清掉；还不够，再让当前模型把较早的对话写成摘要，只把最近的部分原样保留。屏幕上的对话记录不会少。关掉后，只在你点上下文小工具里的"立即压缩"，或者模型服务报告对话太长时才压缩。
+          </span>
+        </span>
+        <input
+          type="checkbox"
+          role="switch"
+          className="switch"
+          checked={compaction.auto}
+          onChange={(e) => void compact({ auto: e.target.checked }).catch((err) => setError(errorText(err)))}
+        />
+      </label>
+      <div className="setting-row setting-sub">
+        <span className="setting-words">
+          <span className="setting-name">压缩时机</span>
+          <span className="hint">
+            占用达到模型上下文长度的百分之几时压缩，可以填 {LEAST} 到 {MOST}。
+          </span>
+        </span>
+        <span className="setting-field">
+          <NumberBox
+            shown={String(Math.round(compaction.share * 100))}
+            label="占用达到上下文长度的百分之几时压缩"
+            disabled={!compaction.auto}
+            read={(typed) => {
+              const percent = Number(typed.replace(/[%％\s]/g, ''))
+              return Number.isFinite(percent) && percent >= LEAST && percent <= MOST
+                ? { value: Math.round(percent) / 100 }
+                : { problem: `填 ${LEAST} 到 ${MOST} 之间的数字。` }
+            }}
+            onSave={(share) => compact({ share: share ?? undefined })}
+          />
+          %
+        </span>
+      </div>
+      <div className="setting-row setting-sub">
+        <span className="setting-words">
+          <span className="setting-name">token 上限</span>
+          <span className="hint">
+            可选。占用超过这个数就压缩，不管模型的上下文有多长，比如 200K。上下文很长的模型每次请求都带着全部内容，设一个上限可以少花钱；留空表示不设。
+          </span>
+        </span>
+        <span className="setting-field">
+          <NumberBox
+            shown={compaction.cap === null ? '' : formatTokens(compaction.cap)}
+            label="占用超过多少 token 就压缩"
+            placeholder="不设"
+            disabled={!compaction.auto}
+            read={(typed) => {
+              if (!typed.trim()) return { value: null }
+              const tokens = readWindow(typed)
+              return tokens !== null && isCap(tokens) ? { value: tokens } : { problem: `写成 200K、1M 这样的数字，最少 ${formatTokens(CAP_MIN)}。` }
+            }}
+            onSave={(cap) => compact({ cap })}
+          />
+        </span>
+      </div>
+      {error && (
+        <div className="msg-error" role="alert">
+          {error}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** What the app is, which version is running, where its code is, where to report a problem, and who makes it. */
+function AboutTab() {
+  const [version, setVersion] = useState('')
+  useEffect(() => {
+    api.appInfo().then(
+      (info) => setVersion(info.version),
+      () => {}
+    )
+  }, [])
+  const link = (to: { label: string; url: string }) => (
+    <a className="about-link" href={to.url} target="_blank" rel="noreferrer">
+      {to.label}
+    </a>
+  )
+  return (
+    <div className="tab-body">
+      <div className="about-head">
+        <span className="about-name">StarBench</span>
+        <span className="badge">{ABOUT.stage}</span>
+      </div>
+      <p className="about-summary">{ABOUT.summary}</p>
+      <dl className="about-list">
+        <dt>软件版本</dt>
+        <dd>{version ? `${version}（${ABOUT.stage}）` : '…'}</dd>
+        <dt>GitHub 仓库</dt>
+        <dd>{link(ABOUT.repo)}</dd>
+        <dt>问题提交</dt>
+        <dd>
+          {link(ABOUT.issues)}
+          <span className="hint">遇到问题或者有建议，可以在这里提出。</span>
+        </dd>
+        {ABOUT.authors.map((author) => (
+          <Fragment key={author.url}>
+            <dt>{author.role}</dt>
+            <dd>
+              {/* A name that is the same as the one in the address is said once. */}
+              {!author.url.endsWith(`/${author.name}`) && author.name}
+              {link({ label: author.url.replace(/^https:\/\//, ''), url: author.url })}
+            </dd>
+          </Fragment>
+        ))}
+      </dl>
+    </div>
+  )
+}
+
 export function SettingsDialog({
   settings,
   onClose,
@@ -625,9 +756,10 @@ export function SettingsDialog({
           ))}
         </div>
         {tab === 'model' && <ProvidersTab settings={settings} onChanged={onSaved} onWelcome={onWelcome} />}
-        {tab === 'plugins' && <PluginsTab />}
         {tab === 'skills' && <SkillsTab />}
         {tab === 'mcp' && <McpTab />}
+        {tab === 'general' && <GeneralTab settings={settings} onChanged={onSaved} />}
+        {tab === 'about' && <AboutTab />}
       </div>
     </div>
   )

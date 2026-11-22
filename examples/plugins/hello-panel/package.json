@@ -1,0 +1,8 @@
+{
+  "name": "hello-panel",
+  "version": "0.1.0",
+  "description": "示例插件：在对话右侧加一个面板，面板和插件的后台部分互相传话",
+  "type": "module",
+  "main": "index.js",
+  "license": "MIT"
+}

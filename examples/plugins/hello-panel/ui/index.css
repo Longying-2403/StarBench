@@ -1,0 +1,16 @@
+/* 这份样式只对这个插件自己画出来的东西生效，写 button 这样的选择器也不会影响到应用。
+   类名仍然建议加上自己的前缀，免得和应用内部的类名重名而被它的样式影响。 */
+
+.hello-panel {
+  display: flex;
+  flex-direction: column;
+}
+
+/* 颜色用应用提供的变量，深色和浅色主题下都合适。 */
+.hello-answer {
+  margin: 12px 0 4px;
+  padding: 8px 10px;
+  border-left: 3px solid var(--accent);
+  border-radius: 4px;
+  background: var(--raised);
+}

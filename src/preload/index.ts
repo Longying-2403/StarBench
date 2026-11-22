@@ -3,6 +3,7 @@ import type { HarnessApi, SessionEvent } from '../shared/types.ts'
 
 const api: HarnessApi = {
   getSettings: () => ipcRenderer.invoke('settings:get'),
+  appInfo: () => ipcRenderer.invoke('app:info'),
   saveProvider: (input) => ipcRenderer.invoke('providers:save', input),
   removeProvider: (id) => ipcRenderer.invoke('providers:remove', id),
   startSignIn: (options) => ipcRenderer.invoke('signin:start', options),
@@ -13,9 +14,27 @@ const api: HarnessApi = {
   listModels: (providerId) => ipcRenderer.invoke('models:list', providerId),
   setReasoningEffort: (effort) => ipcRenderer.invoke('settings:setEffort', effort),
   setFastMode: (on) => ipcRenderer.invoke('settings:setFast', on),
+  setContextWindow: (providerId, model, tokens) => ipcRenderer.invoke('settings:setWindow', providerId, model, tokens),
+  setStats: (on) => ipcRenderer.invoke('settings:setStats', on),
+  setCompaction: (change) => ipcRenderer.invoke('settings:setCompaction', change),
   getModelInfo: () => ipcRenderer.invoke('models:info'),
+  builtinPrompt: () => ipcRenderer.invoke('prompt:builtin'),
+  setPrompt: (providerId, prompt) => ipcRenderer.invoke('prompt:set', providerId, prompt),
   listPlugins: () => ipcRenderer.invoke('plugins:list'),
+  pluginsHeld: () => ipcRenderer.invoke('plugins:held'),
   setPluginEnabled: (id, enabled) => ipcRenderer.invoke('plugins:setEnabled', id, enabled),
+  reloadPlugin: (id) => ipcRenderer.invoke('plugins:reload', id),
+  onPluginsChanged: (listener) => {
+    const handler = (): void => listener()
+    ipcRenderer.on('plugins:changed', handler)
+    return () => ipcRenderer.removeListener('plugins:changed', handler)
+  },
+  callPlugin: (plugin, name, payload) => ipcRenderer.invoke('plugins:call', plugin, name, payload),
+  onPluginEvent: (listener) => {
+    const handler = (_: unknown, told: { plugin: string; event: string; payload: unknown }): void => listener(told)
+    ipcRenderer.on('plugins:event', handler)
+    return () => ipcRenderer.removeListener('plugins:event', handler)
+  },
   openPluginsFolder: () => ipcRenderer.invoke('plugins:openFolder'),
   listSkills: () => ipcRenderer.invoke('skills:list'),
   openSkillsFolder: () => ipcRenderer.invoke('skills:openFolder'),
@@ -25,13 +44,17 @@ const api: HarnessApi = {
   mcpStatus: () => ipcRenderer.invoke('mcp:status'),
   pickWorkspace: () => ipcRenderer.invoke('workspace:pick'),
   listWorkspaces: () => ipcRenderer.invoke('workspace:list'),
+  readImage: (workspace, address) => ipcRenderer.invoke('files:image', workspace, address),
+  openFile: (workspace, address) => ipcRenderer.invoke('files:open', workspace, address),
   listSessions: () => ipcRenderer.invoke('sessions:list'),
+  searchSessions: (query) => ipcRenderer.invoke('sessions:search', query),
   loadSession: (id) => ipcRenderer.invoke('sessions:load', id),
   deleteSession: (id) => ipcRenderer.invoke('sessions:delete', id),
   renameSession: (id, title) => ipcRenderer.invoke('sessions:rename', id, title),
   setSessionArchived: (id, archived) => ipcRenderer.invoke('sessions:archive', id, archived),
   setSessionIcon: (id, icon) => ipcRenderer.invoke('sessions:icon', id, icon),
   send: (sessionId, workspace, text, skill) => ipcRenderer.invoke('agent:send', sessionId, workspace, text, skill),
+  compactSession: (sessionId) => ipcRenderer.invoke('sessions:compact', sessionId),
   stop: (sessionId) => ipcRenderer.invoke('agent:stop', sessionId),
   respondPermission: (id, decision) => ipcRenderer.invoke('permission:respond', id, decision),
   onEvent: (listener) => {

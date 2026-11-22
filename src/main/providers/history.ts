@@ -55,6 +55,17 @@ export function replayOf(message: AssistantMessage, connection: Connection, same
   return origin.replay
 }
 
+/**
+ * Whether a reply's thinking goes back to its service when the reply does. Thinking that came
+ * inside the answer does not: no field carries it (`thinkingField` in chat.ts), and the models
+ * that write it there do not expect to see old thinking again. Everything else goes back, in the
+ * form its service gave it, or is kept by the service itself.
+ */
+export function thinkingReturns(message: AssistantMessage): boolean {
+  const replay = message.origin?.replay
+  return !(typeof replay === 'object' && replay !== null && (replay as { thinking?: unknown }).thinking === 'inline')
+}
+
 /** The empty message a reply is collected into. */
 export function newReply(connection: Connection): AssistantMessage {
   return {

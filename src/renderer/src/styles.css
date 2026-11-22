@@ -1,3 +1,7 @@
+/* Plugins draw in this window too, and lean on some of what is here: the custom properties for
+   the colours and the font for code just below, and the classes btn, btn-primary, btn-small,
+   hint and code. Those names are a promise (PLUGIN_STYLE in shared/plugin-ui.ts, held by a test):
+   they stay, and keep their meaning. Every other name here is the app's own to change. */
 :root {
   color-scheme: dark;
   --bg: #16171a;
@@ -10,13 +14,15 @@
   --accent-text: #ffffff;
   /* The highest thinking level gets its own colour. */
   --peak: #b197fc;
-  --danger: #f0736a;
+  /* A red that is red, not leaning to orange, and still light enough to read as small text on the dark panels. */
+  --danger: #f2555a;
   --warn: #e0a93b;
   --ok: #4fb977;
   --mono: 'Cascadia Code', Consolas, 'SF Mono', Menlo, monospace;
   /* The sidebar's width: what was chosen by dragging its edge (Sidebar.tsx sets --sidebar-width),
-     held to what the window has room for, so that the chat beside it keeps at least 420px. */
-  --sidebar: clamp(180px, var(--sidebar-width, 240px), max(180px, 100vw - 420px));
+     held to what the window has room for, so that the chat beside it keeps at least 420px. The
+     room an open plugin panel takes on the other side is given up by the sidebar too. */
+  --sidebar: clamp(180px, var(--sidebar-width, 240px), max(180px, 100vw - 420px - var(--plugin-panel, 0px)));
   font-family: 'Segoe UI', 'Microsoft YaHei', system-ui, sans-serif;
   font-size: 14px;
   line-height: 1.6;
@@ -33,7 +39,7 @@
     --muted: #626a77;
     --accent: #2f6be0;
     --peak: #7048e8;
-    --danger: #c93a30;
+    --danger: #d1242f;
     --warn: #9a6a00;
     --ok: #1f7a43;
   }
@@ -148,6 +154,88 @@ body {
   align-items: center;
   justify-content: center;
   gap: 8px;
+}
+/* Under the button for a new chat: the search box, and the way to the pages of the app. */
+.sidebar-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.sidebar-search,
+.sidebar-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--muted);
+  font-size: 13px;
+}
+.sidebar-search svg,
+.sidebar-item svg {
+  flex-shrink: 0;
+}
+.sidebar-search:hover,
+.sidebar-item:hover {
+  background: var(--raised);
+}
+/* A row like the one below it until the cursor is in it: then it looks like the box it is. */
+.sidebar-search {
+  cursor: text;
+}
+.sidebar-search:focus-within {
+  border-color: var(--accent);
+  background: var(--bg);
+}
+.sidebar-search-input {
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  outline: none;
+}
+.sidebar-search-input::placeholder {
+  color: var(--muted);
+}
+/* The keys that put the cursor into the box. */
+.sidebar-key {
+  flex-shrink: 0;
+  padding: 0 5px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-family: inherit;
+  font-size: 11px;
+  white-space: nowrap;
+}
+.sidebar-search-clear {
+  flex-shrink: 0;
+  padding: 0 4px;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  color: var(--muted);
+  font-size: 16px;
+  line-height: 1.2;
+  cursor: pointer;
+}
+.sidebar-search-clear:hover {
+  color: var(--text);
+}
+.sidebar-item {
+  background: none;
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+/* The page it leads to is the one on show. */
+.sidebar-item[aria-pressed='true'] {
+  background: var(--raised);
+  color: var(--text);
 }
 .sessions {
   flex: 1;
@@ -288,11 +376,30 @@ body {
   text-align: left;
   cursor: pointer;
 }
+/* The name of a session and, under it, where a search found its words. */
+.session-words {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
 .session-title {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.session-snippet {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--muted);
+}
+/* The words that were looked for. */
+.session-snippet mark {
+  background: none;
+  color: var(--text);
+  font-weight: 600;
 }
 /* The mark a session was given, or the room kept for one so that the names of a group stay in line. */
 .session-icon {
@@ -371,12 +478,58 @@ body {
   }
 }
 
-/* Main column */
+/* Main column: the conversation and, lying over it while one is open, a page of the app. */
+.stage {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  display: flex;
+}
 .main {
   flex: 1;
   min-width: 0;
   display: flex;
   flex-direction: column;
+}
+/* A page that takes the place of the conversation for a while (PluginsPage.tsx). The
+   conversation stays underneath as it was. */
+.page {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+}
+.page-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.page-head h1 {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+.page-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding-left: 4px;
+}
+/* As wide as the conversation is, and scrolling by itself. */
+.page-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 20px max(16px, calc((100% - 820px) / 2));
 }
 .header {
   display: flex;
@@ -407,6 +560,24 @@ body {
   text-align: center;
   font-size: 26px;
   font-weight: 600;
+}
+.hero-name {
+  position: relative;
+  display: inline-block;
+}
+/* What stage the app is at, at the upper right of its name. Out of the flow: the name stays in the middle. */
+.hero-badge {
+  position: absolute;
+  top: -2px;
+  left: calc(100% + 6px);
+  padding: 0 7px;
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.6;
+  letter-spacing: 0.3px;
 }
 
 .transcript {
@@ -494,6 +665,235 @@ body {
 .markdown a {
   color: var(--accent);
 }
+/* A link to a file has no address the window could go to, so it gets by hand what a link looks like. */
+.markdown .file-link {
+  text-decoration: underline;
+  cursor: pointer;
+}
+/* A picture in an answer keeps to the width of the text and to a height that leaves the answer in view. */
+.answer-image {
+  max-width: 100%;
+  max-height: 420px;
+  border-radius: 8px;
+  vertical-align: middle;
+}
+.answer-image-open {
+  display: inline-block;
+  max-width: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  cursor: zoom-in;
+}
+.answer-image-open .answer-image {
+  display: block;
+  border: 1px solid var(--border);
+}
+/* A picture from the web, before the person asks for it: what it is, and the address it would be fetched from. */
+.web-image {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  max-width: 100%;
+  padding: 6px 10px;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  vertical-align: middle;
+  cursor: pointer;
+}
+.web-image:hover {
+  border-color: var(--accent);
+}
+/* Whole, however long: what an address carries is in its tail. */
+.web-image-address {
+  max-height: 96px;
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 11.5px;
+}
+/* What plugins have in the row under the message box. It gives way when the row is full: its
+   parts go onto further lines of their own, each staying whole and on one line, and the app's
+   controls beside it keep their place. */
+.plugin-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  min-width: 0;
+  /* Before the name of the model beside it is cut short. */
+  flex-shrink: 100;
+}
+.plugin-row > * {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+/* What one plugin has in the row, kept together. */
+.plugin-part {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+/* A plugin whose component draws nothing just now takes no room in the row, and leaves no gap. */
+.plugin-part:empty {
+  display: none;
+}
+/* The button of a panel carries the panel's title, which a plugin chose: it is held to a width. */
+.plugin-panel-button {
+  max-width: 10em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* A plugin's panel: a column to the right of the conversation, as wide as the sidebar may get.
+   PluginUi.tsx marks the page while one is open, and the width is taken into the sidebar's sum above. */
+:root[data-plugin-panel] {
+  --plugin-panel: min(360px, 34vw);
+}
+.plugin-panel {
+  display: flex;
+  flex-direction: column;
+  width: var(--plugin-panel);
+  flex-shrink: 0;
+  min-height: 0;
+  background: var(--panel);
+  border-left: 1px solid var(--border);
+}
+.plugin-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 8px 8px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.plugin-panel-head h2 {
+  margin: 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+  font-weight: 600;
+}
+/* What the plugin draws. It scrolls by itself, and long words in it break instead of widening the column. */
+.plugin-panel-body {
+  flex: 1;
+  min-height: 0;
+  padding: 12px 16px;
+  overflow: hidden auto;
+  overflow-wrap: anywhere;
+}
+/* In a window too narrow for three columns the panel lies over the conversation, and takes no room from it. */
+@media (max-width: 1000px) {
+  :root[data-plugin-panel] {
+    --plugin-panel: 0px;
+  }
+  .app {
+    position: relative;
+  }
+  .plugin-panel {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 5;
+    width: min(360px, 100vw - 60px);
+    box-shadow: -10px 0 28px rgb(0 0 0 / 0.35);
+  }
+}
+/* The controls the app hands to plugins (PluginControls.tsx): one under the other, the words
+   that name a control above it, or to the left of a switch. */
+.plugin-control {
+  /* Holds a name that is not to be seen (below). */
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0 0 14px;
+  font-size: 13px;
+}
+/* A control's name where the plugin asked for it not to be seen: there for a screen reader, and
+   out of the layout, so that no gap is left for it. */
+.plugin-control-unseen {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.plugin-control-row {
+  flex-direction: row;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  cursor: pointer;
+}
+.plugin-control-words {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.plugin-slider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.plugin-slider input[type='range'] {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.plugin-slider input[type='range']:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.plugin-input {
+  width: 100%;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+}
+textarea.plugin-input {
+  min-height: 60px;
+  resize: vertical;
+}
+.plugin-input:disabled {
+  opacity: 0.5;
+}
+/* The number beside a slider: room for a few digits, which keep their columns while the thumb moves. */
+.plugin-slider-number {
+  flex-shrink: 0;
+  width: 5.2em;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+/* Where a component of a plugin failed: said in its own place, small, with the reason on hover. */
+.plugin-failed {
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+/* Why a picture is not shown, or a file was not opened. */
+.file-note {
+  color: var(--muted);
+  font-size: 12.5px;
+}
 .markdown table {
   border-collapse: collapse;
   display: block;
@@ -545,6 +945,94 @@ body {
 .tool-failed .tool-status {
   color: var(--danger);
 }
+/* On a call whose result is no longer sent to the model, to make room in its context. */
+.tool-cleared {
+  flex-shrink: 0;
+  padding: 0 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.6;
+}
+.tool .arg .hint {
+  margin-top: 4px;
+}
+
+/* A place where the conversation was compacted (MarkLine in App.tsx): a line across the column,
+   with what was done there in the middle of it. */
+.compact {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.compact-line {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.compact-line::before,
+.compact-line::after {
+  content: '';
+  flex: 1;
+  min-width: 16px;
+  border-top: 1px solid var(--border);
+}
+.compact-text {
+  text-align: center;
+}
+/* In a narrow window the line breaks between what was done and what it saved, and nowhere else. */
+.compact-saved,
+.compact-line .status-link {
+  white-space: nowrap;
+}
+.compact-line .status-link {
+  flex-shrink: 0;
+}
+/* The summary the model is sent in the place of what stands above the line. */
+.compact-summary {
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  font-size: 13px;
+}
+/* A model sets the parts of its summary off with headings: here they are labels in a small box, not the titles of an answer. */
+.compact-summary .markdown :is(h1, h2, h3, h4) {
+  margin: 10px 0 2px;
+  font-size: 13px;
+  font-weight: 600;
+}
+.compact-summary .markdown > :first-child {
+  margin-top: 0;
+}
+.compact-summary .markdown :is(p, ul, ol) {
+  margin: 4px 0;
+}
+.compact-summary .hint {
+  margin: 10px 0 0;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+/* What stands above the last summary is no longer sent to the model. It stays, paler, and is
+   as it was again while it is looked at. */
+.transcript > .faded {
+  opacity: 0.5;
+  transition: opacity 120ms ease;
+}
+.transcript > .faded:hover,
+.transcript > .faded:focus-within,
+.transcript > details.faded[open] {
+  opacity: 1;
+}
+@media (prefers-reduced-motion: reduce) {
+  .transcript > .faded {
+    transition: none;
+  }
+}
 .arg-name {
   margin-top: 6px;
   font-size: 11px;
@@ -583,6 +1071,262 @@ body {
 }
 .main-empty .dock {
   padding-top: 0;
+}
+
+/* The row under the message box that says what the conversation has cost (StatusRow.tsx): in
+   the middle, under the box it belongs to. */
+.status-row {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 2px 4px;
+  /* Closer to the box than the gap of the dock puts it. */
+  margin-top: -2px;
+}
+.status-widget {
+  position: relative;
+}
+.status-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12px;
+  /* Numbers that keep their columns while they grow. */
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.status-chip:hover,
+.status-chip[aria-expanded='true'] {
+  background: var(--raised);
+  color: var(--text);
+}
+.status-chip svg {
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+}
+/* The ring of the context: how full it is, and in the colours of a warning as it fills up. */
+.status-ring-filled {
+  stroke: var(--accent);
+}
+.status-near .status-ring-filled {
+  stroke: var(--warn);
+}
+.status-full .status-ring-filled {
+  stroke: var(--danger);
+}
+/* A word of what a widget is, above it while the pointer rests on it or the keyboard is on it. */
+.status-tip {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 50%;
+  z-index: 20;
+  padding: 3px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--raised);
+  color: var(--text);
+  font-size: 12.5px;
+  white-space: nowrap;
+  transform: translateX(-50%);
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 100ms ease;
+}
+.status-widget:hover .status-tip,
+.status-chip:focus-visible + .status-tip {
+  opacity: 1;
+  /* Not for a pointer that is only passing over. */
+  transition-delay: 150ms;
+}
+/* The card of a widget, opened by a press, above its place in the row. StatusRow.tsx moves it
+   left where it would reach out of the column. */
+.status-pop {
+  position: absolute;
+  bottom: 100%;
+  left: 0;
+  z-index: 20;
+  padding-bottom: 6px;
+}
+.status-card {
+  width: 300px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 0.35);
+  font-size: 12.5px;
+}
+.status-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 6px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.status-line {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 2px 0;
+  color: var(--muted);
+}
+.status-value {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+/* The context: how much of it is taken, a bar with a piece for each part, and the parts one by one. */
+.status-used {
+  margin: 2px 0 6px;
+  font-size: 14px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.status-used.status-near {
+  color: var(--warn);
+}
+.status-used.status-full {
+  color: var(--danger);
+}
+.status-bar {
+  display: flex;
+  gap: 1px;
+  height: 5px;
+  margin: 0 0 8px;
+  border-radius: 3px;
+  background: var(--raised);
+  overflow: hidden;
+}
+.status-bar > span {
+  /* A part too small to see is still there. */
+  min-width: 2px;
+  height: 100%;
+}
+.status-parts {
+  display: grid;
+  grid-template-columns: auto 1fr auto auto;
+  gap: 3px 10px;
+  align-items: center;
+}
+.status-part {
+  display: contents;
+}
+.status-swatch {
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+}
+.status-part-name {
+  color: var(--muted);
+}
+.status-share {
+  min-width: 3.4em;
+  color: var(--muted);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+/* The colour of each part, in the bar and beside its name. What was said stands out; the
+   instructions, which are always there, stay quiet. */
+.status-part-messages {
+  background: var(--accent);
+}
+.status-part-summary {
+  background: #e0679a;
+}
+.status-part-toolResults {
+  background: var(--peak);
+}
+.status-part-tools {
+  background: #e0913b;
+}
+.status-part-pluginTools {
+  background: var(--ok);
+}
+.status-part-mcpTools {
+  background: #3bb5c9;
+}
+.status-part-system {
+  background: var(--muted);
+}
+.status-part-custom {
+  background: color-mix(in srgb, var(--muted) 55%, var(--text));
+}
+.status-part-skills {
+  background: color-mix(in srgb, var(--muted) 55%, var(--panel));
+}
+.status-part-free {
+  border: 1px solid var(--border);
+  background: var(--raised);
+}
+.status-note {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+.status-problem {
+  color: var(--danger);
+}
+.status-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  cursor: pointer;
+}
+.status-link:hover {
+  text-decoration: underline;
+}
+/* Typing the size of a model's context. */
+.status-edit {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+.status-edit input {
+  flex: 1;
+  min-width: 0;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+}
+.status-edit input:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+/* The foot of the context's card: when the conversation is compacted by itself, and the button that does it now. */
+.status-compact {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 12px;
+}
+.status-compact .btn {
+  flex-shrink: 0;
+}
+@media (prefers-reduced-motion: reduce) {
+  .status-tip {
+    transition: none;
+  }
 }
 .folder-root {
   position: relative;
@@ -1513,7 +2257,8 @@ body {
   border-color: var(--ok);
   color: var(--ok);
 }
-.badge-waiting {
+.badge-waiting,
+.badge-held {
   border-color: var(--warn);
   color: var(--warn);
 }
@@ -1574,6 +2319,156 @@ body {
   line-height: 1.5;
   tab-size: 2;
 }
+/* The part of a dialog that scrolls when the window is too short for all of it; its title and buttons stay. */
+.dialog-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+  overflow-y: auto;
+  /* Room for focus rings, which the scroll container would otherwise clip. */
+  padding: 2px;
+}
+.dialog-body > p {
+  margin: 0;
+}
+/* The button for the person's own prompt, when there is one: it changes every answer, so it shows. */
+.composer-bar .btn[data-set] {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+/* The person's own instructions for a provider's models, with the app's own to look at underneath. */
+.prompt-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.prompt-input {
+  /* The tab scrolls as a whole; the field itself must not be squeezed by what follows it. */
+  flex-shrink: 0;
+  min-height: 76px;
+  resize: vertical;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.dialog label.check-row {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+/* The About page of the settings: the name of the app, then what there is to know of it, each under its word. */
+.about-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.about-name {
+  font-size: 18px;
+  font-weight: 600;
+}
+.about-summary {
+  margin: 0;
+  font-size: 13px;
+  color: var(--muted);
+}
+.about-list {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 10px 20px;
+  margin: 4px 0 0;
+  font-size: 13px;
+}
+.about-list dt {
+  color: var(--muted);
+  white-space: nowrap;
+}
+.about-list dd {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 10px;
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.about-link {
+  color: var(--accent);
+}
+/* A setting of the whole app: what it is and what it does on the left, its switch on the right. */
+.dialog label.setting-row {
+  flex-direction: row;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  cursor: pointer;
+}
+.setting-words {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.setting-name {
+  font-weight: 600;
+}
+/* A setting that goes with the switch above it: set in from it, with a box for a number on the right. */
+.setting-sub {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-left: 2px;
+  padding-left: 14px;
+  border-left: 2px solid var(--border);
+  font-size: 13px;
+}
+.setting-field {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-shrink: 0;
+  color: var(--muted);
+}
+.setting-box {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 3px;
+}
+.dialog .setting-box input {
+  width: 84px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.dialog .setting-box input:disabled {
+  opacity: 0.5;
+}
+.dialog .setting-box input[aria-invalid='true'] {
+  border-color: var(--danger);
+}
+.setting-problem {
+  max-width: 190px;
+  color: var(--danger);
+  font-size: 12px;
+  text-align: right;
+}
+.prompt-builtin summary {
+  font-size: 12px;
+  color: var(--muted);
+  cursor: pointer;
+}
+.prompt-builtin summary:hover {
+  color: var(--text);
+}
+.prompt-builtin .code {
+  max-height: 220px;
+}
 .dialog select,
 .dialog input:not([type='checkbox']) {
   padding: 6px 8px;
@@ -1627,8 +2522,7 @@ a.btn {
   font-size: 13px;
   overflow-wrap: anywhere;
 }
-.plan-link,
-.plan-note a {
+.plan-link {
   margin-left: 4px;
   color: var(--accent);
   font-size: 12px;
@@ -1663,13 +2557,117 @@ a.btn {
   font-family: var(--mono);
   font-size: 12px;
 }
-.plan-note {
-  text-align: center;
-  font-size: 12px;
+
+/* Notices (Toasts.tsx): in the top right corner of the conversation's column, over whatever is
+   there. An open plugin panel keeps its own column clear of them. */
+.toasts {
+  position: fixed;
+  top: 12px;
+  right: calc(12px + var(--plugin-panel, 0px));
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(320px, calc(100vw - 24px));
+  /* Only the notices themselves take the pointer; what lies between and beside them stays usable. */
+  pointer-events: none;
+}
+.toast {
+  /* The colour of its kind: the band down its side, and its time running out. */
+  --toast: var(--accent);
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 10px 6px 12px 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 0.3);
+  /* Cuts the band and the time to the rounded corners. */
+  overflow: hidden;
+  pointer-events: auto;
+  font-size: 13px;
+  animation: toast-in 160ms ease-out;
+}
+.toast-success {
+  --toast: var(--ok);
+}
+.toast-warning {
+  --toast: var(--warn);
+}
+.toast-error {
+  --toast: var(--danger);
+}
+.toast::before {
+  content: '';
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 4px;
+  background: var(--toast);
+}
+.toast-words {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  overflow-wrap: anywhere;
+}
+.toast-title {
+  font-weight: 600;
+}
+.toast-text {
   color: var(--muted);
 }
-.plan-note a {
-  margin-left: 0;
+.toast-link {
+  align-self: flex-start;
+  color: var(--accent);
+  font-size: 12px;
+}
+.toast-close {
+  flex-shrink: 0;
+  margin-top: -4px;
+}
+/* The time a notice has left, running out along its lower edge. It stands still while the notice is looked at. */
+.toast-bar {
+  position: absolute;
+  left: 4px;
+  right: 0;
+  bottom: 0;
+  height: 2px;
+  background: var(--toast);
+  transform-origin: left;
+  animation: toast-time linear forwards;
+}
+.toast[data-paused] .toast-bar {
+  animation-play-state: paused;
+}
+@keyframes toast-time {
+  to {
+    transform: scaleX(0);
+  }
+}
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+}
+/* In a narrow window a plugin panel lies over the conversation: the notices keep below its head, where the way to close it is. */
+@media (max-width: 1000px) {
+  :root[data-plugin-panel] .toasts {
+    top: 52px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .toast {
+    animation: none;
+  }
+  /* The notice still goes when its time is up; the time is just not drawn. */
+  .toast-bar {
+    display: none;
+  }
 }
 
 /* An error with something to do about it: the same bar and tint as a notice. */

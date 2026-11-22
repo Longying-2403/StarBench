@@ -1,0 +1,141 @@
+/* 调试面板的样式。只对这个插件自己画出来的东西生效；颜色都用应用提供的变量，
+   深色和浅色主题下都合适。类名都带 debug- 前缀，免得和应用内部的类名重名。 */
+
+.debug-panel {
+  display: flex;
+  flex-direction: column;
+}
+
+.debug-section + .debug-section {
+  margin-top: 6px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
+.debug-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0 0 10px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+/* 这些设置对当前模型有没有效：一句话，左边的色条说明是哪一种情况。 */
+.debug-status {
+  margin: 0 0 14px;
+  padding: 6px 10px;
+  border-left: 3px solid var(--border);
+  border-radius: 4px;
+  background: var(--raised);
+  font-size: 12.5px;
+}
+.debug-status-on {
+  border-left-color: var(--accent);
+}
+.debug-status-warn {
+  border-left-color: var(--warn);
+}
+
+/* 一项参数：开关，和打开后出现在它下面的控件。两者靠近一些，和下一项隔开。 */
+.debug-item {
+  margin: 0 0 14px;
+}
+.debug-panel .debug-item > * {
+  margin-bottom: 6px;
+}
+.debug-panel .debug-item > :last-child {
+  margin-bottom: 0;
+}
+
+.debug-problem {
+  margin: 0 0 8px;
+  color: var(--danger);
+  font-size: 12.5px;
+}
+
+.debug-panel .debug-note {
+  margin: 0 0 8px;
+}
+
+/* 输入框下面的读数：前面一个小圆点。 */
+.debug-readout::before {
+  content: '';
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: 5px;
+  border-radius: 50%;
+  background: var(--accent);
+  vertical-align: 1px;
+}
+
+/* 一条记录。 */
+.debug-exchange {
+  margin: 0 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+}
+.debug-exchange-failed {
+  border-color: var(--danger);
+}
+.debug-exchange-head {
+  display: flex;
+  gap: 6px;
+  width: 100%;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+.debug-exchange-head:hover {
+  background: var(--raised);
+}
+/* 那一行里的几小段：放不下就换行，每一段自己不断开；数字等宽，上下两条能对齐。 */
+.debug-exchange-parts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 10px;
+  min-width: 0;
+  font-variant-numeric: tabular-nums;
+}
+.debug-exchange-parts > :first-child {
+  color: var(--muted);
+}
+.debug-exchange-body {
+  padding: 4px 8px 0;
+}
+
+/* 记录里的一段可以复制的文字。 */
+.debug-block {
+  margin: 0 0 8px;
+}
+.debug-block-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0 0 4px;
+  font-size: 12.5px;
+}
+.debug-fold {
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.debug-block .debug-pre {
+  margin: 0;
+  font-size: 12px;
+}

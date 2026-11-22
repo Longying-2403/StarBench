@@ -1,0 +1,8 @@
+{
+  "name": "调试面板",
+  "version": "0.1.0",
+  "description": "调整发给模型的采样参数（温度、Top-p、输出长度等），查看每次请求实际发出的内容和应用读到的回应。主要用来调试自己运行的本地模型。",
+  "type": "module",
+  "main": "index.js",
+  "license": "MIT"
+}

@@ -1,8 +1,10 @@
 // The shape of settings.json, how older shapes are brought up to date, and the changes the
 // settings page can make. Nothing in this file depends on Electron or touches the disk.
 
-import { PROVIDER_KINDS, PROVIDER_PRESETS, isLocalAddress, isReasoningEffort } from '../shared/types.ts'
-import type { ChatGptAccount, ProviderInfo, ProviderInput, ProviderKind, ReasoningEffort, Settings } from '../shared/types.ts'
+import { COMPACTION_DEFAULTS, CAP_MAX, CAP_MIN, isCap, readShare } from '../shared/compaction.ts'
+import type { CompactionSettings } from '../shared/compaction.ts'
+import { CUSTOM_PROMPT_LIMIT, PROVIDER_KINDS, PROVIDER_PRESETS, isLocalAddress, isReasoningEffort } from '../shared/types.ts'
+import type { ChatGptAccount, CustomPrompt, ProviderInfo, ProviderInput, ProviderKind, ReasoningEffort, Settings } from '../shared/types.ts'
 
 export interface StoredProvider {
   id: string
@@ -17,6 +19,10 @@ export interface StoredProvider {
   efforts?: Record<string, ReasoningEffort>
   /** The models of this provider for which faster answers were asked for. */
   fast?: string[]
+  /** The person's own instructions for this provider's models. */
+  prompt?: CustomPrompt
+  /** How many tokens the context of a model holds, for the models the person typed that in for. */
+  windows?: Record<string, number>
   /** Set when the provider is signed in to with a ChatGPT account instead of being given a key. */
   auth?: 'chatgpt'
   /** base64 of that sign-in (the registration, the account, the tokens) as the operating system encrypted it. */
@@ -34,6 +40,10 @@ export interface StoredSettings {
   hostId?: string
   /** The note that explains ChatGPT plan usage has been shown; it is shown once. */
   chatgptWelcomed?: boolean
+  /** Set, to false, when the counting of what conversations cost was switched off. Absent, the app counts. */
+  stats?: false
+  /** What the person changed about compacting conversations. What is not here is as the app comes (`COMPACTION_DEFAULTS`). */
+  compaction?: { auto?: false; share?: number; cap?: number }
 }
 
 /** What a ChatGPT sign-in is added as. */
@@ -54,6 +64,13 @@ const DEEPSEEK = PROVIDER_PRESETS[0]
 const text = (value: unknown): string => (typeof value === 'string' ? value.trim() : '')
 const isObject = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value)
+
+/** A custom prompt as it is kept: trimmed and no longer than allowed. Undefined when there is no text to keep. */
+function readPrompt(raw: unknown): CustomPrompt | undefined {
+  if (!isObject(raw)) return undefined
+  const words = text(raw.text).slice(0, CUSTOM_PROMPT_LIMIT)
+  return words ? { text: words, replace: raw.replace === true } : undefined
+}
 
 function hostOf(url: string): string {
   try {
@@ -86,13 +103,20 @@ function readProvider(raw: unknown, taken: readonly string[]): StoredProvider | 
     }
   }
   const fast = Array.isArray(raw.fast) ? [...new Set(raw.fast.filter((m): m is string => typeof m === 'string' && m !== ''))] : []
+  const prompt = readPrompt(raw.prompt)
+  const windows: Record<string, number> = {}
+  if (isObject(raw.windows)) {
+    for (const [model, tokens] of Object.entries(raw.windows)) if (isWindow(tokens)) windows[model] = tokens
+  }
   const common = {
     id,
     name,
     baseURL,
     model: text(raw.model),
     ...(Object.keys(efforts).length ? { efforts } : {}),
-    ...(fast.length ? { fast } : {})
+    ...(fast.length ? { fast } : {}),
+    ...(prompt ? { prompt } : {}),
+    ...(Object.keys(windows).length ? { windows } : {})
   }
   if (raw.auth === 'chatgpt') {
     // A sign-in has no key, and speaks the one format the plan can be used with.
@@ -148,13 +172,58 @@ export function readSettings(raw: unknown): StoredSettings {
   const recent = Array.isArray(source.recentWorkspaces)
     ? source.recentWorkspaces.filter((dir): dir is string => typeof dir === 'string')
     : []
+  const compaction = keptCompaction(isObject(source.compaction) ? source.compaction : {})
   return {
     providers,
     activeProviderId: active.id,
     ...(recent.length ? { recentWorkspaces: recent } : {}),
     ...(/^urn:uuid:[0-9a-f-]{36}$/i.test(text(source.hostId)) ? { hostId: text(source.hostId) } : {}),
-    ...(source.chatgptWelcomed === true ? { chatgptWelcomed: true } : {})
+    ...(source.chatgptWelcomed === true ? { chatgptWelcomed: true } : {}),
+    ...(source.stats === false ? { stats: false as const } : {}),
+    ...(compaction ? { compaction } : {})
   }
+}
+
+/** What is written down of the settings of compaction: only what differs from how the app comes. Undefined when nothing does. */
+function keptCompaction(raw: Record<string, unknown>): StoredSettings['compaction'] {
+  const share = typeof raw.share === 'number' ? readShare(raw.share) : COMPACTION_DEFAULTS.share
+  const kept: NonNullable<StoredSettings['compaction']> = {
+    ...(raw.auto === false ? { auto: false as const } : {}),
+    ...(share !== COMPACTION_DEFAULTS.share ? { share } : {}),
+    ...(isCap(raw.cap) ? { cap: raw.cap } : {})
+  }
+  return Object.keys(kept).length ? kept : undefined
+}
+
+/** Whether, and from where on, conversations are compacted by themselves. */
+export function compactionOf(settings: StoredSettings): CompactionSettings {
+  const kept = settings.compaction ?? {}
+  return { auto: kept.auto !== false, share: kept.share ?? COMPACTION_DEFAULTS.share, cap: kept.cap ?? null }
+}
+
+/**
+ * Changes the settings of compaction. `change` arrives from the page: of the three settings it
+ * names those that change, and what it does not name stays. A share out of range is brought to
+ * the nearest one that can be set; a cap that cannot be one is refused, so that a slip of the
+ * hand does not compact every conversation at once.
+ */
+export function setCompaction(settings: StoredSettings, change: unknown): StoredSettings {
+  if (!isObject(change)) throw new Error('Nothing to change was named.')
+  const now = compactionOf(settings)
+  const next: Record<string, unknown> = { ...now }
+  if (typeof change.auto === 'boolean') next.auto = change.auto
+  if (change.share !== undefined) {
+    if (typeof change.share !== 'number' || !Number.isFinite(change.share)) throw new Error('The share of the context must be a number.')
+    next.share = readShare(change.share)
+  }
+  if (change.cap === null) next.cap = undefined
+  else if (change.cap !== undefined) {
+    if (!isCap(change.cap)) throw new Error(`The limit must be a whole number of tokens from ${CAP_MIN} to ${CAP_MAX}.`)
+    next.cap = change.cap
+  }
+  const { compaction: _dropped, ...rest } = settings
+  const kept = keptCompaction(next)
+  return kept ? { ...rest, compaction: kept } : rest
 }
 
 export function activeProvider(settings: StoredSettings): StoredProvider {
@@ -176,7 +245,7 @@ export function fastOf(provider: StoredProvider): boolean {
  */
 export function toPublic(settings: StoredSettings, accounts: Readonly<Record<string, ChatGptAccount>> = {}): Settings {
   const describe = (p: StoredProvider): ProviderInfo => {
-    const common = { id: p.id, name: p.name, kind: p.kind, baseURL: p.baseURL, model: p.model }
+    const common = { id: p.id, name: p.name, kind: p.kind, baseURL: p.baseURL, model: p.model, ...(p.prompt ? { prompt: p.prompt } : {}) }
     if (p.auth !== 'chatgpt') return { ...common, ready: usable(p), hasApiKey: Boolean(p.encryptedKey) }
     const account = accounts[p.id] ?? { signedIn: false, planUsage: false }
     return { ...common, ready: account.signedIn && account.planUsage, hasApiKey: false, auth: 'chatgpt', account }
@@ -190,7 +259,9 @@ export function toPublic(settings: StoredSettings, accounts: Readonly<Record<str
     model: active.model,
     reasoningEffort: effortOf(active),
     fastMode: fastOf(active),
-    ready: providers.find((p) => p.id === active.id)?.ready ?? false
+    ready: providers.find((p) => p.id === active.id)?.ready ?? false,
+    stats: settings.stats !== false,
+    compaction: compactionOf(settings)
   }
 }
 
@@ -282,6 +353,19 @@ export function removeProvider(settings: StoredSettings, id: string): StoredSett
   return { ...settings, providers, activeProviderId: stillThere ? settings.activeProviderId : fallback.id }
 }
 
+/**
+ * Gives a provider's models instructions of the person's own, or takes them away: with null, or
+ * with a prompt that has no text. Whatever else is known of the provider stays as it is.
+ */
+export function setPrompt(settings: StoredSettings, providerId: string, prompt: unknown): StoredSettings {
+  const target = settings.providers.find((p) => p.id === providerId)
+  if (!target) throw new Error('This provider no longer exists.')
+  const kept = readPrompt(prompt)
+  const { prompt: _dropped, ...rest } = target
+  const next: StoredProvider = kept ? { ...rest, prompt: kept } : rest
+  return { ...settings, providers: settings.providers.map((p) => (p === target ? next : p)) }
+}
+
 /** Names the model to use with a provider, without making that provider the one in use. */
 export function setModel(settings: StoredSettings, providerId: string, model: string): StoredSettings {
   const chosen = text(model).slice(0, 200)
@@ -324,6 +408,33 @@ export function setFastFor(settings: StoredSettings, providerId: string, model: 
   const { fast: _dropped, ...rest } = provider
   const next: StoredProvider = fast.length ? { ...rest, fast } : rest
   return { ...settings, providers: settings.providers.map((p) => (p === provider ? next : p)) }
+}
+
+/** A number of tokens that can be the size of a model's context. */
+const isWindow = (tokens: unknown): tokens is number => typeof tokens === 'number' && Number.isInteger(tokens) && tokens >= 256 && tokens <= 100_000_000
+
+/** How many tokens the person said the context of the provider's current model holds, if they said. */
+export function windowOf(provider: StoredProvider): number | undefined {
+  return provider.model ? provider.windows?.[provider.model] : undefined
+}
+
+/** Says how many tokens the context of one model of one provider holds, or with null takes that back. */
+export function setWindow(settings: StoredSettings, providerId: string, model: string, tokens: number | null): StoredSettings {
+  const provider = settings.providers.find((p) => p.id === providerId)
+  if (!provider || !model) return settings
+  if (tokens !== null && !isWindow(tokens)) throw new Error('That is not a size a context can have.')
+  const windows = { ...provider.windows }
+  if (tokens === null) delete windows[model]
+  else windows[model] = tokens
+  const { windows: _dropped, ...rest } = provider
+  const next: StoredProvider = Object.keys(windows).length ? { ...rest, windows } : rest
+  return { ...settings, providers: settings.providers.map((p) => (p === provider ? next : p)) }
+}
+
+/** Switches the counting of what conversations cost on or off. On is how the app comes, and is not written down. */
+export function setStats(settings: StoredSettings, on: boolean): StoredSettings {
+  const { stats: _dropped, ...rest } = settings
+  return on ? rest : { ...rest, stats: false }
 }
 
 /** Turns faster answers on or off for the active provider's current model. */

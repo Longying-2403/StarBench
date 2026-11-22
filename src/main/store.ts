@@ -5,13 +5,16 @@
 import { app, safeStorage } from 'electron'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
-import type { ChatGptAccount, ProviderInput, ReasoningEffort, Session, SessionIcon, SessionSummary, Settings } from '../shared/types.ts'
+import type { CompactionSettings } from '../shared/compaction.ts'
+import type { ChatGptAccount, ProviderInput, ReasoningEffort, Session, SessionHit, SessionIcon, SessionSummary, Settings } from '../shared/types.ts'
 import { isReasoningEffort, isSessionIcon, offersFastMode } from '../shared/types.ts'
 import { OPENAI, canUsePlan, clientIsGone, newHostId, readRecord, refreshed, renewalDue, revoke, tokensAreDead } from './chatgpt/oauth.ts'
 import type { AuthService, LoginRecord } from './chatgpt/oauth.ts'
 import { readJson, writeJson } from './json-file.ts'
 import type { Connection } from './providers/index.ts'
 import { ServiceError } from './providers/types.ts'
+import { searchSessions as searchSessionsIn, searchableOf } from './session-search.ts'
+import type { Searchable } from './session-search.ts'
 import * as model from './settings-model.ts'
 import type { StoredProvider, StoredSettings } from './settings-model.ts'
 import { MAX_RECENT_FOLDERS, mergeFolders } from './workspaces.ts'
@@ -122,6 +125,11 @@ export function selectModel(providerId: string, modelId: string): Promise<Settin
   return mutate((settings) => model.selectModel(settings, providerId, modelId))
 }
 
+/** The person's own instructions for a provider's models. `prompt` arrives over IPC; the settings model checks it. */
+export function setPrompt(providerId: string, prompt: unknown): Promise<Settings> {
+  return mutate((settings) => model.setPrompt(settings, providerId, prompt))
+}
+
 /** Names the model to use with a provider, without switching to that provider. */
 export function setProviderModel(providerId: string, modelId: string): Promise<Settings> {
   return mutate((settings) => model.setModel(settings, providerId, modelId))
@@ -136,6 +144,36 @@ export function setReasoningEffort(effort: unknown): Promise<Settings> {
 /** Applies to the active provider's current model. `on` arrives over IPC; anything but `true` turns it off. */
 export function setFastMode(on: unknown): Promise<Settings> {
   return mutate((settings) => model.setFast(settings, on === true))
+}
+
+/** Says how many tokens the context of a model holds, or with null takes that back. The input arrives over IPC. */
+export function setContextWindow(providerId: unknown, modelId: unknown, tokens: unknown): Promise<Settings> {
+  return mutate((settings) => model.setWindow(settings, String(providerId), String(modelId), tokens === null ? null : Number(tokens)))
+}
+
+/** How many tokens the person said the context of the model in use holds, if they said. */
+export async function typedContextWindow(): Promise<number | undefined> {
+  return model.windowOf(model.activeProvider(await loadStored()))
+}
+
+/** Switches the counting of what conversations cost on or off. */
+export function setStats(on: unknown): Promise<Settings> {
+  return mutate((settings) => model.setStats(settings, on === true))
+}
+
+/** Whether the app keeps count of what conversations cost. */
+export async function countsStats(): Promise<boolean> {
+  return (await loadStored()).stats !== false
+}
+
+/** Changes whether, and from where on, conversations are compacted by themselves. The change arrives over IPC; the settings model checks it. */
+export function setCompaction(change: unknown): Promise<Settings> {
+  return mutate((settings) => model.setCompaction(settings, change))
+}
+
+/** Whether, and from where on, conversations are compacted by themselves. */
+export async function compactionSettings(): Promise<CompactionSettings> {
+  return model.compactionOf(await loadStored())
 }
 
 /** Takes the choice back for a model the service turned out not to give faster answers. */
@@ -271,9 +309,11 @@ export async function getConnection(providerId?: string): Promise<Connection | n
   if (!provider) return null
   const common = {
     provider: provider.id,
+    providerName: provider.name,
     kind: provider.kind,
     model: provider.model,
     reasoningEffort: model.effortOf(provider),
+    ...(provider.prompt ? { prompt: provider.prompt } : {}),
     // Asked for only where it exists: a service that does not know the request field would refuse the request.
     ...(model.fastOf(provider) && offersFastMode(provider) ? { fast: true } : {})
   }
@@ -363,6 +403,38 @@ export async function listSessions(): Promise<SessionSummary[]> {
       ...(isSessionIcon(icon) ? { icon } : {})
     }))
     .sort((a, b) => b.updatedAt - a.updatedAt)
+}
+
+/**
+ * What of each saved session is searched, by file, for as long as the file is as it was: a search
+ * is made at every few keys typed, and reading every conversation anew each time would be felt.
+ */
+const searchable = new Map<string, { stamp: string; entry: Searchable }>()
+
+/** The sessions in which every word of `query` is found, in the name or in what was said. */
+export async function searchSessions(query: string): Promise<SessionHit[]> {
+  const names = (await fs.readdir(sessionsDir()).catch(() => [] as string[])).filter((n) => n.endsWith('.json'))
+  const entries = await Promise.all(
+    names.map(async (name) => {
+      const file = path.join(sessionsDir(), name)
+      const stat = await fs.stat(file).catch(() => null)
+      if (!stat) return null
+      const stamp = `${stat.mtimeMs}:${stat.size}`
+      const kept = searchable.get(name)
+      if (kept?.stamp === stamp) return kept.entry
+      const session = await readJson<Session>(file)
+      if (!session || !Array.isArray(session.messages)) return null
+      const entry = searchableOf(session)
+      searchable.set(name, { stamp, entry })
+      return entry
+    })
+  )
+  // What is kept of a session that was deleted goes with it.
+  for (const name of [...searchable.keys()]) if (!names.includes(name)) searchable.delete(name)
+  return searchSessionsIn(
+    entries.filter((entry): entry is Searchable => entry !== null),
+    query
+  )
 }
 
 export function loadSession(id: string): Promise<Session | null> {

@@ -1,21 +1,24 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
-import type { KeyboardEvent, MouseEvent, PointerEvent } from 'react'
+import type { KeyboardEvent, MouseEvent, PointerEvent, ReactNode } from 'react'
 import { groupByWorkspace } from '../../shared/folders.ts'
+import { SHORTCUTS, keysLabel } from '../../shared/shortcuts.ts'
 import { SESSION_ICONS } from '../../shared/types.ts'
-import type { SessionIcon, SessionSummary } from '../../shared/types.ts'
+import type { SessionHit, SessionIcon, SessionSummary } from '../../shared/types.ts'
 import {
   ArchiveIcon,
   ChevronDownIcon,
   ComposeIcon,
   FolderIcon,
   MoreIcon,
+  PluginIcon,
   PlusIcon,
   ResetIcon,
+  SearchIcon,
   SettingsIcon,
   TrashIcon
 } from './icons.tsx'
 import { NoMarkIcon, SessionMark, markLabel } from './SessionIcons.tsx'
-import { errorText, isWindows, useOutsidePress } from './util.ts'
+import { errorText, isMac, isWindows, useOutsidePress, useShortcut } from './util.ts'
 
 const COLLAPSED_KEY = 'collapsedWorkspaces'
 
@@ -153,12 +156,27 @@ const MENU = { width: 188, height: 208 }
 /** How many marks the menu shows in a row; `.icon-grid` has as many columns. */
 const MARK_COLUMNS = 6
 
+/** A piece of a message that a search found, with the words that were looked for set off in it. */
+function Snippet({ text, marks }: NonNullable<SessionHit['snippet']>) {
+  const parts: ReactNode[] = []
+  let at = 0
+  for (const [from, to] of marks) {
+    if (from < at) continue
+    if (from > at) parts.push(text.slice(at, from))
+    parts.push(<mark key={from}>{text.slice(from, to)}</mark>)
+    at = to
+  }
+  if (at < text.length) parts.push(text.slice(at))
+  return <span className="session-snippet">{parts}</span>
+}
+
 /** One session in the list: its mark and its name, and a menu to mark, rename, archive or delete it. */
 function SessionRow({
   session,
   active,
   busy,
   markSlot,
+  snippet,
   onError,
   onOpen,
   onRename,
@@ -172,6 +190,8 @@ function SessionRow({
   busy: boolean
   /** Room for a mark is kept even without one, because a session around this one has a mark: the names stay in line. */
   markSlot: boolean
+  /** Where in the session a search found its words, when that was in a message and not in the name. */
+  snippet?: SessionHit['snippet']
   onError: (message: string) => void
 }) {
   /** Where the menu is shown, in window coordinates; null while it is closed. */
@@ -290,7 +310,10 @@ function SessionRow({
       {draft === null ? (
         <button className="session-open" disabled={busy} onClick={() => onOpen(session.id)} title={session.title}>
           {mark}
-          <span className="session-title">{session.title}</span>
+          <span className="session-words">
+            <span className="session-title">{session.title}</span>
+            {snippet && <Snippet {...snippet} />}
+          </span>
         </button>
       ) : (
         <input
@@ -396,15 +419,21 @@ function SessionRow({
   )
 }
 
+/** How long after the last key a search is made: not for every letter of a word being typed. */
+const SEARCH_DELAY_MS = 150
+
 /**
- * The left column: a button for a new chat, the sessions sorted into their workspaces,
- * the archived ones tucked away below, and the settings.
+ * The left column: a button for a new chat, the search box and the way to the plugins, the
+ * sessions sorted into their workspaces, the archived ones tucked away below, and the settings.
  */
 export function Sidebar({
   sessions,
   activeId,
   busy,
+  page,
   onNewChat,
+  onSearch,
+  onPlugins,
   onSettings,
   ...actions
 }: Actions & {
@@ -412,19 +441,74 @@ export function Sidebar({
   sessions: SessionSummary[]
   activeId: string | null
   busy: boolean
+  /** What the main part of the window shows: the conversation, or the plugins. */
+  page: 'chat' | 'plugins'
   /** With a folder, the new chat starts in that workspace. */
   onNewChat: (workspace?: string) => void
+  /** The sessions in which the words of a search are found, in the name or in what was said. */
+  onSearch: (query: string) => Promise<SessionHit[]>
+  /** Shows the plugins in the main part of the window, or goes back from them to the conversation. */
+  onPlugins: () => void
   onSettings: () => void
 }) {
   const [collapsed, setCollapsed] = useState(readCollapsed)
   const [archivedOpen, setArchivedOpen] = useState(false)
   const [error, setError] = useState('')
+  const [query, setQuery] = useState('')
+  /** What the search found, by session. Null while nothing is searched for, and until the first answer. */
+  const [hits, setHits] = useState<ReadonlyMap<string, SessionHit> | null>(null)
+  const searchRef = useRef<HTMLInputElement>(null)
+  const listRef = useRef<HTMLElement>(null)
+  const searching = query.trim() !== ''
 
+  useShortcut('search', () => {
+    searchRef.current?.focus()
+    searchRef.current?.select()
+  })
+
+  // Asked a moment after the typing pauses, and again when the sessions change under the search.
+  // What was found before stays on show until the answer comes; an answer to an older search is dropped.
+  const search = useRef(onSearch)
+  search.current = onSearch
+  useEffect(() => {
+    if (!searching) return setHits(null)
+    let current = true
+    const timer = setTimeout(() => {
+      search.current(query).then(
+        (found) => current && setHits(new Map(found.map((hit) => [hit.id, hit]))),
+        (err) => current && setError(errorText(err))
+      )
+    }, SEARCH_DELAY_MS)
+    return () => {
+      current = false
+      clearTimeout(timer)
+    }
+  }, [query, searching, sessions])
+
+  /** The list holds what the search found, and no longer everything. */
+  const filtered = searching && hits !== null
+  const shown = filtered ? sessions.filter((s) => hits.has(s.id)) : sessions
   const groups = groupByWorkspace(
-    sessions.filter((s) => !s.archived),
+    shown.filter((s) => !s.archived),
     isWindows
   )
-  const archived = sessions.filter((s) => s.archived)
+  const archived = shown.filter((s) => s.archived)
+
+  const onSearchKey = (e: KeyboardEvent<HTMLInputElement>): void => {
+    // While an IME is composing, these keys are its own.
+    if (e.nativeEvent.isComposing) return
+    if (e.key === 'Escape') {
+      // First the words go, then the cursor.
+      if (query) setQuery('')
+      else e.currentTarget.blur()
+    } else if (e.key === 'Enter') {
+      // The first one found, as the list shows them.
+      if (filtered) listRef.current?.querySelector<HTMLButtonElement>('.session-open:not(:disabled)')?.click()
+    } else if (e.key === 'ArrowDown') {
+      e.preventDefault()
+      listRef.current?.querySelector<HTMLElement>('.session-open')?.focus()
+    }
+  }
 
   const toggle = (key: string): void => {
     const next = collapsed.includes(key) ? collapsed.filter((k) => k !== key) : [...collapsed, key]
@@ -453,6 +537,7 @@ export function Sidebar({
         active={session.id === activeId}
         busy={busy}
         markSlot={markSlot}
+        snippet={filtered ? hits.get(session.id)?.snippet : undefined}
         onError={setError}
         {...actions}
       />
@@ -465,14 +550,58 @@ export function Sidebar({
         <ComposeIcon />
         新对话
       </button>
-      <nav className="sessions" aria-label="会话">
-        {groups.length > 0 && <div className="sidebar-label">工作区</div>}
+      <div className="sidebar-nav">
+        {/* A press anywhere on the row puts the cursor into the box. */}
+        <label className="sidebar-search" title="搜索对话的标题和内容">
+          <SearchIcon />
+          <input
+            ref={searchRef}
+            className="sidebar-search-input"
+            value={query}
+            placeholder="搜索"
+            aria-label={SHORTCUTS.search.label}
+            spellCheck={false}
+            onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={onSearchKey}
+          />
+          {query ? (
+            <button
+              type="button"
+              className="sidebar-search-clear"
+              aria-label="清除搜索"
+              onClick={() => {
+                setQuery('')
+                searchRef.current?.focus()
+              }}
+            >
+              ×
+            </button>
+          ) : (
+            <kbd className="sidebar-key" aria-hidden="true">
+              {keysLabel(SHORTCUTS.search.keys, isMac)}
+            </kbd>
+          )}
+        </label>
+        <button type="button" className="sidebar-item" aria-pressed={page === 'plugins'} onClick={onPlugins}>
+          <PluginIcon />
+          插件
+        </button>
+      </div>
+      <nav className="sessions" aria-label="会话" ref={listRef}>
+        {filtered ? (
+          <div className="sidebar-label" role="status">
+            {shown.length > 0 ? `找到 ${shown.length} 个对话` : `没有找到包含“${query.trim()}”的对话`}
+          </div>
+        ) : (
+          groups.length > 0 && <div className="sidebar-label">工作区</div>
+        )}
         {groups.map((group) => {
-          const open = !collapsed.includes(group.key)
+          // What a search found is shown, also in a folder that was folded away.
+          const open = filtered || !collapsed.includes(group.key)
           return (
             <section key={group.key} className="group">
               <div className="group-head">
-                <button className="group-toggle" aria-expanded={open} onClick={() => toggle(group.key)} title={group.workspace}>
+                <button className="group-toggle" aria-expanded={open} onClick={() => !filtered && toggle(group.key)} title={group.workspace}>
                   <span className="group-chevron">
                     <ChevronDownIcon />
                   </span>
@@ -493,11 +622,11 @@ export function Sidebar({
             </section>
           )
         })}
-        {sessions.length === 0 && <p className="sidebar-empty">还没有对话。选一个工作文件夹，发出第一条消息后会出现在这里。</p>}
+        {sessions.length === 0 && !filtered && <p className="sidebar-empty">还没有对话。选一个工作文件夹，发出第一条消息后会出现在这里。</p>}
         {archived.length > 0 && (
           <section className="group group-archived">
             <div className="group-head">
-              <button className="group-toggle" aria-expanded={archivedOpen} onClick={() => setArchivedOpen((v) => !v)}>
+              <button className="group-toggle" aria-expanded={archivedOpen || filtered} onClick={() => !filtered && setArchivedOpen((v) => !v)}>
                 <span className="group-chevron">
                   <ChevronDownIcon />
                 </span>
@@ -506,7 +635,7 @@ export function Sidebar({
                 <span className="group-count">{archived.length}</span>
               </button>
             </div>
-            {archivedOpen && <div className="group-body">{rows(archived)}</div>}
+            {(archivedOpen || filtered) && <div className="group-body">{rows(archived)}</div>}
           </section>
         )}
       </nav>

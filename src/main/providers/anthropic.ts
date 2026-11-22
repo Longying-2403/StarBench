@@ -45,6 +45,8 @@ function clientFor(connection: Connection, timeout?: number): Anthropic {
 export interface ModelFacts {
   name: string
   maxTokens: number | null
+  /** How many tokens of input the model takes: its context window. */
+  contextWindow: number | null
   /** Whether the model takes `thinking: { type: "adaptive" }`. */
   adaptive: boolean
   /** The effort levels it takes; empty when it has no effort setting. */
@@ -64,6 +66,7 @@ function factsFor(connection: Connection): Promise<ModelFacts> {
         return {
           name: info.display_name,
           maxTokens: info.max_tokens,
+          contextWindow: info.max_input_tokens,
           adaptive: caps ? caps.thinking.types.adaptive.supported : true,
           efforts: caps?.effort.supported ? EFFORTS.filter((level) => caps.effort[level]?.supported) : []
         }
@@ -182,6 +185,8 @@ async function attempt(request: ModelRequest, message: AssistantMessage): Promis
       request.onReasoning('\n\n')
     }
     if (event.type !== 'content_block_delta') continue
+    // Text, thinking, or the input of a tool call being written.
+    request.probe?.arrived()
     if (event.delta.type === 'text_delta') {
       message.content += event.delta.text
       request.onText(event.delta.text)
@@ -191,13 +196,15 @@ async function attempt(request: ModelRequest, message: AssistantMessage): Promis
     }
   }
   const final = await stream.finalMessage()
+  request.probe?.usage(final.usage)
+  if (final.stop_reason) request.probe?.finished(final.stop_reason)
 
   if (final.stop_reason === 'refusal') {
     const category = final.stop_details?.category
     return { message, stopped: `The model declined this request${category ? ` (${category})` : ''}.` }
   }
   if (final.stop_reason === 'model_context_window_exceeded') {
-    return { message, stopped: "The conversation no longer fits in the model's context window." }
+    return { message, stopped: "The conversation no longer fits in the model's context window.", tooLong: true }
   }
   const calls: ToolCall[] = []
   for (const block of final.content) {
@@ -253,6 +260,10 @@ export const anthropicAdapter: ProviderAdapter = {
 
   async modelInfo(connection: Connection): Promise<ModelInfo | null> {
     const facts = await factsFor(connection)
-    return { name: facts.name, ...(facts.efforts.length ? { efforts: facts.efforts } : {}) }
+    return {
+      name: facts.name,
+      ...(facts.efforts.length ? { efforts: facts.efforts } : {}),
+      ...(facts.contextWindow ? { contextWindow: facts.contextWindow } : {})
+    }
   }
 }

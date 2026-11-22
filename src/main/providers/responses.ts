@@ -4,8 +4,15 @@
 // The same API serves requests paid for by a person's ChatGPT plan (`connection.plan`), with a
 // few rules of its own, taken from
 // https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations .
+//
+// Not on that page, found by trying with gpt-6.2-sol on 2026-11-23: a request paid for by plan
+// is neither read from the prompt cache nor written to it, where the very same request paid for
+// by API key is. And the two fields that steer the cache, `prompt_cache_options` and
+// `prompt_cache_breakpoint`, are refused there with "not supported on this model", though an API
+// key may send both. So nothing here asks for caching: by key it comes unasked, by plan not at all.
 
 import OpenAI from 'openai'
+import { routesByConversation } from '../../shared/types.ts'
 import type { ToolCall } from '../../shared/types.ts'
 import { fetchModelInfo, fetchPlanModelInfo, listModels, listPlanModels } from '../models.ts'
 import { newReply, replayOf, userText, withToolResults } from './history.ts'
@@ -145,32 +152,40 @@ async function run(request: ModelRequest, withSummary: boolean): Promise<ModelRe
   let stopped: string | undefined
 
   try {
-    const stream = await client.responses.create(
-      {
-        model: connection.model,
-        instructions: request.system,
-        input: responsesInput(request),
-        ...(tools.length ? { tools } : {}),
-        reasoning: {
-          ...(withSummary ? { summary: 'auto' as const } : {}),
-          ...(effort !== 'default' ? { effort: effort as OpenAI.ReasoningEffort } : {})
-        },
-        // Without stored responses, this is what lets the model pick its reasoning up again after a tool call.
-        include: ['reasoning.encrypted_content'],
-        // "Fast mode": the same model writing faster, at about twice the price. On the wire it goes by
-        // its older name: the API takes both, a ChatGPT sign-in only this one ("fast" is refused there).
-        ...(connection.fast ? { service_tier: 'priority' as const } : {}),
-        store: false,
-        stream: true
+    const wire = {
+      model: connection.model,
+      instructions: request.system,
+      input: responsesInput(request),
+      ...(tools.length ? { tools } : {}),
+      reasoning: {
+        ...(withSummary ? { summary: 'auto' as const } : {}),
+        ...(effort !== 'default' ? { effort: effort as OpenAI.ReasoningEffort } : {})
       },
-      { signal }
-    )
+      // Without stored responses, this is what lets the model pick its reasoning up again after a tool call.
+      include: ['reasoning.encrypted_content'],
+      // "Fast mode": the same model writing faster, at about twice the price. On the wire it goes by
+      // its older name: the API takes both, a ChatGPT sign-in only this one ("fast" is refused there).
+      ...(connection.fast ? { service_tier: 'priority' as const } : {}),
+      // Which conversation this is, for a service that sends a conversation's requests to one
+      // server by it. In this format xAI reads it from this field. OpenAI is not told: its models
+      // from GPT-5.6 on find their cache without it, and by its documentation the key only fences
+      // one conversation's cache off from the others. Tried with gpt-6.2-sol on 2026-11-23, it
+      // changed no count: paid for by API key everything sent before was read from the cache
+      // with the key and without, and paid for by a ChatGPT plan nothing was, either way.
+      ...(request.conversation && routesByConversation(connection.baseURL) ? { prompt_cache_key: request.conversation } : {}),
+      store: false,
+      stream: true
+      // Checked here, field by field: a name the API does not know is then a mistake the compiler sees.
+    } satisfies OpenAI.Responses.ResponseCreateParamsStreaming
+    request.probe?.sent(wire)
+    const stream = await client.responses.create(wire, { signal })
 
     for await (const event of stream) {
       switch (event.type) {
         case 'response.output_text.delta':
         case 'response.refusal.delta':
           streamed = true
+          request.probe?.arrived()
           message.content += event.delta
           request.onText(event.delta)
           break
@@ -183,18 +198,27 @@ async function run(request: ModelRequest, withSummary: boolean): Promise<ModelRe
           break
         case 'response.reasoning_summary_text.delta':
           streamed = true
+          request.probe?.arrived()
           message.reasoning_content = (message.reasoning_content ?? '') + event.delta
           request.onReasoning(event.delta)
+          break
+        case 'response.function_call_arguments.delta':
+          // A reply that is nothing but a tool call has begun to come, too.
+          request.probe?.arrived()
           break
         case 'response.output_item.done':
           if (REPLAYED.has(event.item.type)) items.push(event.item)
           break
         case 'response.completed':
           ended = true
+          request.probe?.usage(event.response.usage)
+          request.probe?.finished(event.response.status ?? 'completed')
           break
         case 'response.incomplete': {
           ended = true
           const reason = event.response.incomplete_details?.reason
+          request.probe?.usage(event.response.usage)
+          request.probe?.finished(reason ?? 'incomplete')
           stopped =
             reason === 'max_output_tokens'
               ? 'The model ran out of output space before it finished.'

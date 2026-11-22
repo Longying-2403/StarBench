@@ -11,10 +11,18 @@ files:
   # TypeScript sources, type declarations and source maps of dependencies are never loaded at run time.
   - "!**/node_modules/**/*.{ts,mts,cts,map}"
 
+# The plugins that come with the app (plugins/). They go beside the app, not into its archive:
+# the app reads them as plain files, the same way it reads the ones people add themselves.
+extraResources:
+  - from: plugins
+    to: plugins
+
 # No dependency contains native code, so there is nothing to rebuild for Electron.
 npmRebuild: false
 
 win:
+  # Multi-size icon (16–256 px) rendered from build/icon.svg.
+  icon: build/icon.ico
   # The name of the zip; the installer overrides it below.
   artifactName: ${productName}-${version}-win-${arch}.${ext}
   target:

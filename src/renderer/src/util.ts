@@ -1,5 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { CSSProperties, RefObject } from 'react'
+import { SHORTCUTS, pressed } from '../../shared/shortcuts.ts'
+import type { ShortcutId } from '../../shared/shortcuts.ts'
 
 export function errorText(err: unknown): string {
   const text = err instanceof Error ? err.message : String(err)
@@ -9,6 +11,29 @@ export function errorText(err: unknown): string {
 
 /** Folder paths compare without regard to case on Windows; see `folderKey`. */
 export const isWindows = navigator.userAgent.includes('Windows')
+/** On a Mac the shortcuts are on ⌘ where they are on Ctrl elsewhere. */
+export const isMac = navigator.userAgent.includes('Macintosh')
+
+/**
+ * Has `run` called when the keys of a shortcut are pressed, wherever in the window the keyboard
+ * is. Not while a dialog is open, which has the window to itself, and not while an input method
+ * is composing, whose keys are its own.
+ */
+export function useShortcut(id: ShortcutId, run: () => void): void {
+  // Read through a ref so the listener is not re-attached on every render.
+  const latest = useRef(run)
+  latest.current = run
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.isComposing || !pressed(e, SHORTCUTS[id].keys, isMac)) return
+      if (document.querySelector('[aria-modal="true"]')) return
+      e.preventDefault()
+      latest.current()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [id])
+}
 
 /** Where a popup opens, and how tall it may be there without reaching past the edge of the window. */
 export interface PopupPlace {
