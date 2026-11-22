@@ -70,8 +70,8 @@ export function ChatGptPane({
   // What the plan offers depends on the account, so the list is asked again when that changes.
   useEffect(() => {
     setModels([])
-    if (id && provider?.hasApiKey) api.listModels(id).then(setModels, () => {})
-  }, [id, provider?.hasApiKey, account?.email])
+    if (id && provider?.ready) api.listModels(id).then(setModels, () => {})
+  }, [id, provider?.ready, account?.email])
 
   const signIn = async (options: SignInOptions = {}): Promise<void> => {
     const mine = ++attempt.current

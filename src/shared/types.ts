@@ -102,6 +102,30 @@ const hostOf = (url: string): string => {
 }
 
 /**
+ * Whether an address is on this computer or on the network around it. That is where the model
+ * servers people run themselves are found (Ollama, LM Studio, llama.cpp, vLLM), and those ask
+ * for no API key. Only the address is looked at; nothing is looked up.
+ */
+export function isLocalAddress(baseURL: string): boolean {
+  let host: string
+  try {
+    host = new URL(baseURL).hostname.toLowerCase()
+  } catch {
+    return false
+  }
+  // IPv6, written in brackets: this computer, an address of the local network, or one of the link.
+  if (host.startsWith('[')) return /^\[(::1|f[cd][0-9a-f]{2}:.*|fe[89ab][0-9a-f]:.*)\]$/.test(host)
+  const ip = /^(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}$/.exec(host)
+  if (ip) {
+    const [a, b] = [Number(ip[1]), Number(ip[2])]
+    // This computer, the three private ranges, the link, and the shared range that VPNs between one's own machines use.
+    return a === 127 || a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254) || (a === 100 && b >= 64 && b <= 127)
+  }
+  // A name without a dot is a machine of the local network; the endings are the ones kept for such networks.
+  return host === 'localhost' || (host !== '' && !host.includes('.')) || /\.(localhost|local|lan|internal|home\.arpa)$/.test(host)
+}
+
+/**
  * The ladder most services have settled on (OpenAI and Anthropic both use exactly this one).
  * Thinking cannot be switched off on their current models, so there is no "none".
  */
@@ -113,12 +137,20 @@ const EFFORTS_BY_HOST: Record<string, readonly EffortLevel[]> = {
   // The scale ends one step earlier.
   'api.x.ai': ['low', 'medium', 'high', 'xhigh']
 }
+/**
+ * For a model server on one's own machine. Most of the open models think or do not, so switching
+ * it off is the choice that matters; Ollama takes these names, and servers that do not know the
+ * request field leave it aside.
+ */
+const LOCAL_EFFORTS: readonly EffortLevel[] = ['none', 'low', 'medium', 'high']
 
 /**
  * The levels to offer when a service does not say which ones a model takes. A level the model
- * turns out not to know is reported by the service when a message is sent.
+ * turns out not to know is reported by the service when a message is sent. `kind` is the format
+ * the service is spoken to in, when that is known.
  */
-export function usualEfforts(baseURL: string): readonly EffortLevel[] {
+export function usualEfforts(baseURL: string, kind: ProviderKind = 'openai-chat'): readonly EffortLevel[] {
+  if (kind === 'openai-chat' && isLocalAddress(baseURL)) return LOCAL_EFFORTS
   return EFFORTS_BY_HOST[hostOf(baseURL)] ?? COMMON_EFFORTS
 }
 
@@ -158,9 +190,12 @@ export interface ProviderInfo {
   /** The model used with this provider; empty until one is chosen. */
   model: string
   /**
-   * Whether requests can be made: a key is stored or, for a ChatGPT sign-in, the account is signed
-   * in and allows its plan to be used. The key and the tokens themselves never leave the main process.
+   * Whether requests can be made: a key is stored, the service is a local one that asks for none
+   * (see `isLocalAddress`) or, for a ChatGPT sign-in, the account is signed in and allows its plan
+   * to be used.
    */
+  ready: boolean
+  /** Whether a key is stored. The key itself, like the tokens of a sign-in, never leaves the main process. */
   hasApiKey: boolean
   /** Set when requests use a person's ChatGPT plan after signing in, instead of an API key. */
   auth?: 'chatgpt'
@@ -190,7 +225,8 @@ export interface Settings {
   reasoningEffort: ReasoningEffort
   /** Whether faster answers were asked for with that model. It only has an effect where `offersFastMode` says so. */
   fastMode: boolean
-  hasApiKey: boolean
+  /** Whether requests can be made with it; see `ProviderInfo.ready`. */
+  ready: boolean
 }
 
 /** The Claude models that answer faster on request, with nothing to apply for first. */
@@ -210,11 +246,23 @@ export function offersFastMode(provider: Pick<ProviderInfo, 'kind' | 'baseURL' |
 }
 
 /** Starting points for the services the app knows how to talk to. */
-export const PROVIDER_PRESETS: readonly (Omit<ProviderInfo, 'hasApiKey'> & { keyHint: string })[] = [
+export const PROVIDER_PRESETS: readonly (Omit<ProviderInfo, 'ready' | 'hasApiKey'> & { keyHint: string })[] = [
   { id: 'deepseek', name: 'DeepSeek', kind: 'openai-chat', baseURL: 'https://api.deepseek.com', model: 'deepseek-flash', keyHint: 'sk-…' },
   { id: 'openai', name: 'OpenAI', kind: 'openai-responses', baseURL: 'https://api.openai.com/v1', model: '', keyHint: 'sk-…' },
   { id: 'anthropic', name: 'Anthropic', kind: 'anthropic', baseURL: 'https://api.anthropic.com', model: 'claude-opus-5-5', keyHint: 'sk-ant-…' },
   { id: 'xai', name: 'xAI', kind: 'openai-chat', baseURL: 'https://api.x.ai/v1', model: '', keyHint: 'xai-…' }
+]
+
+/**
+ * The programs people run models with on their own computer, and the address each one listens at
+ * unless told otherwise. All of them speak chat completions there. The first is what a new local
+ * provider starts from.
+ */
+export const LOCAL_SERVERS: readonly { name: string; baseURL: string }[] = [
+  { name: 'Ollama', baseURL: 'http://localhost:11434/v1' },
+  { name: 'LM Studio', baseURL: 'http://localhost:1234/v1' },
+  { name: 'llama.cpp', baseURL: 'http://localhost:8080/v1' },
+  { name: 'vLLM', baseURL: 'http://localhost:8000/v1' }
 ]
 
 /** Where a person sees and limits what apps use of their ChatGPT plan. */
@@ -295,8 +343,11 @@ export type AgentEvent =
   | { type: 'permission_request'; id: string; call: ToolCall }
   | { type: 'turn_end' }
   | { type: 'error'; message: string; hint?: ErrorHint }
-  /** Something the person should know that did not stop the turn. `code` is what the page words it by. */
-  | { type: 'notice'; code: 'fast-mode-refused'; message: string }
+  /**
+   * Something the person should know that did not stop the turn. `code` is what the page words it
+   * by; `detail` is what the service itself said, when that helps to look the matter up.
+   */
+  | { type: 'notice'; code: 'fast-mode-refused' | 'tools-refused' | 'stream-refused'; message: string; detail?: string }
 
 export interface SessionEvent {
   sessionId: string

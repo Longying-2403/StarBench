@@ -16,7 +16,9 @@ export type Item =
 
 /** What the notices say, by the code they come with. */
 const NOTICES: Record<Extract<AgentEvent, { type: 'notice' }>['code'], string> = {
-  'fast-mode-refused': '这个模型在当前账户下不支持 Fast Mode，已经自动关闭，这条消息按普通速度发送。'
+  'fast-mode-refused': '这个模型在当前账户下不支持 Fast Mode，已经自动关闭，这条消息按普通速度发送。',
+  'tools-refused': '这个模型（或者运行它的服务）不支持工具调用，所以在这个对话里它只能聊天，不能读写文件，也不能执行命令。',
+  'stream-refused': '这个模型服务在使用工具时不能边生成边显示，所以每次回答会在生成完之后一次出现。中间一段时间没有动静是正常的。'
 }
 
 export function itemsFromMessages(messages: ChatMessage[]): Item[] {
@@ -75,8 +77,10 @@ export function itemsReducer(items: Item[], action: ItemsAction): Item[] {
       return items.map((i) => (i.kind === 'tool' && i.call.id === event.id ? { ...i, output: event.output } : i))
     case 'error':
       return [...items, { kind: 'error', message: event.message, ...(event.hint ? { hint: event.hint } : {}) }]
-    case 'notice':
-      return [...items, { kind: 'notice', text: NOTICES[event.code] ?? event.message }]
+    case 'notice': {
+      const text = NOTICES[event.code] ?? event.message
+      return [...items, { kind: 'notice', text: event.detail ? `${text}（服务返回：${event.detail}）` : text }]
+    }
     default:
       return items
   }

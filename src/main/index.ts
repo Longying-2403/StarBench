@@ -91,6 +91,18 @@ const activeRuns = new Map<string, ActiveRun>()
 const permissionResolvers = new Map<string, (decision: PermissionDecision) => void>()
 /** Per-session "always allow" choices; kept in memory only, so they reset on restart. */
 const alwaysAllowed = new Map<string, Set<string>>()
+/**
+ * Sessions in which the model turned out to take no tools, with the provider and model it was.
+ * Later messages to that model go out as plain conversation at once. Kept in memory and by
+ * session, so a new chat finds out again: the server may have been set up for tools since.
+ */
+const chatOnly = new Map<string, string>()
+/**
+ * Sessions in which the server turned out not to stream a reply while tools are offered, kept the
+ * same way. Later messages ask for whole replies at once, instead of failing first every time.
+ */
+const wholeReplies = new Map<string, string>()
+const modelKey = (connection: { provider: string; model: string }): string => `${connection.provider}\n${connection.model}`
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
@@ -298,6 +310,8 @@ function registerIpc(): void {
   ipcMain.handle('sessions:delete', async (_e, id: string) => {
     activeRuns.get(id)?.controller.abort()
     alwaysAllowed.delete(id)
+    chatOnly.delete(id)
+    wholeReplies.delete(id)
     await store.deleteSession(id)
   })
 
@@ -342,7 +356,7 @@ function registerIpc(): void {
     checkpoint()
 
     void runTurn({
-      connection,
+      connection: wholeReplies.get(current.id) === modelKey(connection) ? { ...connection, wholeReplies: true } : connection,
       workspace: current.workspace,
       messages: current.messages,
       systemExtra,
@@ -354,6 +368,9 @@ function registerIpc(): void {
       onFastRefused: () => {
         store.dropFastMode(connection.provider, connection.model).catch((err) => console.error('[store] could not switch fast mode off:', err))
       },
+      withoutTools: chatOnly.get(current.id) === modelKey(connection),
+      onToolsRefused: () => chatOnly.set(current.id, modelKey(connection)),
+      onStreamRefused: () => wholeReplies.set(current.id, modelKey(connection)),
       requestPermission: (call) =>
         new Promise<PermissionDecision>((resolve) => {
           const id = randomUUID()

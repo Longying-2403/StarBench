@@ -5,7 +5,7 @@
 import type { AgentEvent, ChatMessage, PermissionDecision, ToolCall } from '../shared/types.ts'
 import { adapterFor } from './providers/index.ts'
 import type { Connection, ModelReply, ModelRequest, ProviderAdapter } from './providers/index.ts'
-import { ServiceError } from './providers/types.ts'
+import { ServiceError, ToolsRefused } from './providers/types.ts'
 import type { ToolRegistry } from './tools.ts'
 
 const MAX_STEPS = 50
@@ -30,6 +30,35 @@ export interface TurnOptions {
   checkpoint(): void
   /** Called when the service would not give this model the faster answers that were asked for, so the choice can be taken back. */
   onFastRefused?(): void
+  /** The model is already known to take no tools: none are offered, and it is told that it has none. */
+  withoutTools?: boolean
+  /** Called when the model turned out to take no tools and the turn went on without them, so later turns can start that way. */
+  onToolsRefused?(): void
+  /**
+   * Called when the server turned out not to stream replies while tools are offered, so later
+   * turns can ask for whole replies from the start (`connection.wholeReplies`).
+   */
+  onStreamRefused?(): void
+}
+
+/** The date where the person is. Told to the model as it stands on their calendar, not as it is in Greenwich. */
+export function today(now = new Date()): string {
+  const two = (n: number): string => String(n).padStart(2, '0')
+  return `${now.getFullYear()}-${two(now.getMonth() + 1)}-${two(now.getDate())}`
+}
+
+/** What a model is told when it cannot call tools: it can talk, and must not pretend to do more. */
+function chatOnlyPrompt(): string {
+  return [
+    'You are an assistant running inside a desktop app on the user\'s computer.',
+    'The model you run on cannot call tools in this app, so you cannot read or change files and cannot run commands. Never claim that you did.',
+    'Help with what can be answered from the conversation itself. When a request needs access to files or commands, say that it needs a model that supports tool calling.',
+    '',
+    `Operating system: ${process.platform}`,
+    `Today's date: ${today()}`,
+    '',
+    'Answer in the language the user writes in.'
+  ].join('\n')
 }
 
 function systemPrompt(workspace: string, extra?: string): string {
@@ -41,7 +70,7 @@ function systemPrompt(workspace: string, extra?: string): string {
     `Workspace root: ${workspace}`,
     `Operating system: ${process.platform}`,
     `Shell used by run_command: ${shell}`,
-    `Today's date: ${new Date().toISOString().slice(0, 10)}`,
+    `Today's date: ${today()}`,
     '',
     'Guidelines:',
     '- All file paths are relative to the workspace root; you cannot access files outside it.',
@@ -103,27 +132,55 @@ export async function runTurn(opts: TurnOptions): Promise<void> {
   const adapter = adapterFor(opts.connection.kind)
   const stored = opts.messages
   let connection = opts.connection
+  let withoutTools = opts.withoutTools ?? false
+
+  /** The next request, as things stand now. */
+  const request = (): ModelRequest => ({
+    connection,
+    // The extra text describes skills, which are loaded with a tool.
+    system: withoutTools ? chatOnlyPrompt() : systemPrompt(opts.workspace, opts.systemExtra),
+    messages: stored,
+    tools: withoutTools ? [] : opts.tools.specs(),
+    signal: opts.signal,
+    onText: (text) => opts.emit({ type: 'text_delta', text }),
+    onReasoning: (text) => opts.emit({ type: 'reasoning_delta', text }),
+    onFastRefused: () => {
+      // Not asked again for the rest of the turn: it would be refused at every step.
+      connection = { ...connection, fast: false }
+      opts.emit({
+        type: 'notice',
+        code: 'fast-mode-refused',
+        message: 'The service does not offer Fast Mode for this model here. It was switched off and the message sent at the usual speed.'
+      })
+      opts.onFastRefused?.()
+    },
+    onStreamRefused: () => {
+      // Asked for in one piece from here on: streaming would fail again at every step.
+      connection = { ...connection, wholeReplies: true }
+      opts.emit({
+        type: 'notice',
+        code: 'stream-refused',
+        message: 'This model server cannot stream a reply while tools are offered, so each reply appears all at once when it is finished. Nothing moving for a while is normal.'
+      })
+      opts.onStreamRefused?.()
+    }
+  })
 
   try {
     for (let step = 0; step < MAX_STEPS; step++) {
-      const { message: assistant, stopped } = await ask(adapter, {
-        connection,
-        system: systemPrompt(opts.workspace, opts.systemExtra),
-        messages: stored,
-        tools: opts.tools.specs(),
-        signal: opts.signal,
-        onText: (text) => opts.emit({ type: 'text_delta', text }),
-        onReasoning: (text) => opts.emit({ type: 'reasoning_delta', text }),
-        onFastRefused: () => {
-          // Not asked again for the rest of the turn: it would be refused at every step.
-          connection = { ...connection, fast: false }
-          opts.emit({
-            type: 'notice',
-            code: 'fast-mode-refused',
-            message: 'The service does not offer Fast Mode for this model here. It was switched off and the message sent at the usual speed.'
-          })
-          opts.onFastRefused?.()
-        }
+      const { message: assistant, stopped } = await ask(adapter, request()).catch((err: unknown) => {
+        if (!(err instanceof ToolsRefused) || withoutTools) throw err
+        // The model takes no tools. The message goes out again as plain conversation, and the
+        // person is told what that means; the service's own words go along for looking it up.
+        withoutTools = true
+        opts.emit({
+          type: 'notice',
+          code: 'tools-refused',
+          message: 'This model, or the server running it, does not support tool calling, so it can only chat here: it cannot read or change files or run commands.',
+          detail: err.message
+        })
+        opts.onToolsRefused?.()
+        return ask(adapter, request())
       })
       if (assistant.content || assistant.tool_calls || assistant.reasoning_content) stored.push(assistant)
       opts.emit({ type: 'assistant_done' })

@@ -469,11 +469,21 @@ test('a ChatGPT sign-in is a provider of its own in the settings', () => {
   // The page sees the account, never the sign-in itself.
   const account = { signedIn: true, planUsage: true, email: 'person@example.com' }
   const shown = model.toPublic(settings, { chatgpt: account })
-  assert.deepEqual(shown.providers[1], { id: 'chatgpt', name: 'ChatGPT', kind: 'openai-responses', baseURL: api, model: '', hasApiKey: true, auth: 'chatgpt', account })
-  assert.equal(shown.hasApiKey, true)
+  assert.deepEqual(shown.providers[1], {
+    id: 'chatgpt',
+    name: 'ChatGPT',
+    kind: 'openai-responses',
+    baseURL: api,
+    model: '',
+    ready: true,
+    hasApiKey: false,
+    auth: 'chatgpt',
+    account
+  })
+  assert.equal(shown.ready, true)
   assert.equal(JSON.stringify(shown).includes('BLOB1'), false)
   // An account that did not allow its plan to be used cannot be used for requests; nor can one nothing is known about.
-  assert.equal(model.toPublic(settings, { chatgpt: { ...account, planUsage: false } }).hasApiKey, false)
+  assert.equal(model.toPublic(settings, { chatgpt: { ...account, planUsage: false } }).ready, false)
   assert.deepEqual(model.toPublic(settings).providers[1].account, { signedIn: false, planUsage: false })
 
   // The file is read back as it was written, with what belongs to the installation.

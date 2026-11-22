@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import * as model from '../src/main/settings-model.ts'
-import { offersFastMode, usualEfforts } from '../src/shared/types.ts'
+import { isLocalAddress, offersFastMode, usualEfforts } from '../src/shared/types.ts'
 
 test('settings from before there were providers keep their key, model and effort', () => {
   const old = {
@@ -41,7 +41,7 @@ test('a missing or unusable settings file becomes the defaults', () => {
     assert.equal(settings.providers.length, 1)
     assert.equal(settings.providers[0].id, 'deepseek')
     assert.equal(settings.activeProviderId, 'deepseek')
-    assert.equal(model.toPublic(settings).hasApiKey, false)
+    assert.equal(model.toPublic(settings).ready, false)
   }
   // Hand-edited entries are repaired where possible: ids made unique, unknown efforts dropped.
   const settings = model.readSettings({
@@ -79,6 +79,7 @@ test('providers can be added, changed and removed', () => {
   settings = model.saveProvider(settings, { id: 'anthropic-2', name: 'Gateway', kind: 'anthropic', baseURL: 'https://gateway.example/', model: '' }, null)
   assert.equal(settings.providers[2].encryptedKey, undefined)
   assert.deepEqual(model.toPublic(settings).providers.map((p) => p.hasApiKey), [false, true, false])
+  assert.deepEqual(model.toPublic(settings).providers.map((p) => p.ready), [false, true, false], 'a service on the internet needs its key')
 
   assert.throws(() => model.saveProvider(settings, { name: 'x', kind: 'anthropic', baseURL: 'ftp://nope', model: '' }), /http/)
   assert.throws(() => model.saveProvider(settings, { id: 'ghost', name: 'x', kind: 'anthropic', baseURL: 'https://x', model: '' }), /no longer exists/)
@@ -136,6 +137,64 @@ test('the thinking levels on offer follow the service', () => {
   // A service nothing is known about, or an address that is not one.
   assert.deepEqual(usualEfforts('https://llm.example.com/v1'), common)
   assert.deepEqual(usualEfforts('not an address'), common)
+  // A model server on one's own machine: thinking on or off is what matters, and no rare names are sent.
+  assert.deepEqual(usualEfforts('http://localhost:11434/v1'), ['none', 'low', 'medium', 'high'])
+  assert.deepEqual(usualEfforts('http://192.168.1.20:1234/v1', 'openai-chat'), ['none', 'low', 'medium', 'high'])
+  assert.deepEqual(usualEfforts('http://localhost:11434', 'anthropic'), common, 'the other formats have their own names')
+})
+
+test('an address on this computer or the local network is told from one on the internet', () => {
+  const local = [
+    'http://localhost:11434/v1',
+    'http://LOCALHOST:1234/v1',
+    'http://127.0.0.1:8080/v1',
+    'http://[::1]:8000/v1',
+    'http://10.0.0.5/v1',
+    'http://172.16.0.1:8000/v1',
+    'http://172.31.255.255/v1',
+    'http://192.168.1.20:11434/v1',
+    'http://169.254.10.10:11434/v1',
+    'http://100.100.1.2:11434/v1',
+    'http://[fd12:3456::1]:11434/v1',
+    'http://[fe80::1]:11434/v1',
+    'http://gpu-box:11434/v1',
+    'http://studio.local:1234/v1',
+    'https://models.home.arpa/v1'
+  ]
+  const elsewhere = [
+    'https://api.openai.com/v1',
+    'https://llm.example.com/v1',
+    'https://localhost.example.com/v1',
+    'http://8.8.8.8/v1',
+    'http://172.32.0.1/v1',
+    'http://192.169.1.1/v1',
+    'http://100.128.0.1/v1',
+    'http://[2001:db8::1]/v1',
+    'not an address',
+    ''
+  ]
+  assert.deepEqual(local.filter((address) => !isLocalAddress(address)), [])
+  assert.deepEqual(elsewhere.filter(isLocalAddress), [])
+})
+
+test('a model server on this computer can be used without a key', () => {
+  let settings = model.readSettings(null)
+  settings = model.saveProvider(settings, { name: 'Ollama', kind: 'openai-chat', baseURL: 'http://localhost:11434/v1', model: '' })
+  // Usable as it is, so it takes over from the default provider, which still waits for its key.
+  assert.equal(settings.activeProviderId, 'ollama')
+  assert.equal(settings.providers[1].encryptedKey, undefined)
+  let shown = model.toPublic(settings)
+  assert.deepEqual(shown.providers.map((p) => [p.id, p.ready, p.hasApiKey]), [['deepseek', false, false], ['ollama', true, false]])
+  assert.equal(shown.ready, true)
+
+  // A key can still be given, for a server on the network that asks for one.
+  settings = model.saveProvider(settings, { id: 'ollama', name: 'Ollama', kind: 'openai-chat', baseURL: 'http://192.168.1.20:11434/v1', model: 'qwen3.5:9b' }, 'KEY')
+  shown = model.toPublic(settings)
+  assert.deepEqual([shown.providers[1].ready, shown.providers[1].hasApiKey], [true, true])
+
+  // Moved to an address on the internet without one, it has to wait like any other service.
+  settings = model.saveProvider(settings, { id: 'ollama', name: 'Ollama', kind: 'openai-chat', baseURL: 'https://ollama.example.com/v1', model: 'qwen3.5:9b' }, null)
+  assert.equal(model.toPublic(settings).ready, false)
 })
 
 test('faster answers are remembered for each model, and offered only where the service has them', () => {

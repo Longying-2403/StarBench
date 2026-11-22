@@ -1,7 +1,7 @@
 // The shape of settings.json, how older shapes are brought up to date, and the changes the
 // settings page can make. Nothing in this file depends on Electron or touches the disk.
 
-import { PROVIDER_KINDS, PROVIDER_PRESETS, isReasoningEffort } from '../shared/types.ts'
+import { PROVIDER_KINDS, PROVIDER_PRESETS, isLocalAddress, isReasoningEffort } from '../shared/types.ts'
 import type { ChatGptAccount, ProviderInfo, ProviderInput, ProviderKind, ReasoningEffort, Settings } from '../shared/types.ts'
 
 export interface StoredProvider {
@@ -39,9 +39,15 @@ export interface StoredSettings {
 /** What a ChatGPT sign-in is added as. */
 const CHATGPT = { name: 'ChatGPT', kind: 'openai-responses' } as const
 
+/**
+ * Whether a provider can be used without a key: a model server on this computer or on the local
+ * network asks for none.
+ */
+export const needsNoKey = (provider: StoredProvider): boolean => provider.auth !== 'chatgpt' && isLocalAddress(provider.baseURL)
+
 /** Whether requests can be made with a provider as it is stored. */
 const usable = (provider: StoredProvider): boolean =>
-  provider.auth === 'chatgpt' ? Boolean(provider.signedIn && provider.encryptedLogin) : Boolean(provider.encryptedKey)
+  provider.auth === 'chatgpt' ? Boolean(provider.signedIn && provider.encryptedLogin) : Boolean(provider.encryptedKey) || needsNoKey(provider)
 
 const DEEPSEEK = PROVIDER_PRESETS[0]
 
@@ -171,9 +177,9 @@ export function fastOf(provider: StoredProvider): boolean {
 export function toPublic(settings: StoredSettings, accounts: Readonly<Record<string, ChatGptAccount>> = {}): Settings {
   const describe = (p: StoredProvider): ProviderInfo => {
     const common = { id: p.id, name: p.name, kind: p.kind, baseURL: p.baseURL, model: p.model }
-    if (p.auth !== 'chatgpt') return { ...common, hasApiKey: Boolean(p.encryptedKey) }
+    if (p.auth !== 'chatgpt') return { ...common, ready: usable(p), hasApiKey: Boolean(p.encryptedKey) }
     const account = accounts[p.id] ?? { signedIn: false, planUsage: false }
-    return { ...common, hasApiKey: account.signedIn && account.planUsage, auth: 'chatgpt', account }
+    return { ...common, ready: account.signedIn && account.planUsage, hasApiKey: false, auth: 'chatgpt', account }
   }
   const providers = settings.providers.map(describe)
   const active = activeProvider(settings)
@@ -184,7 +190,7 @@ export function toPublic(settings: StoredSettings, accounts: Readonly<Record<str
     model: active.model,
     reasoningEffort: effortOf(active),
     fastMode: fastOf(active),
-    hasApiKey: providers.find((p) => p.id === active.id)?.hasApiKey ?? false
+    ready: providers.find((p) => p.id === active.id)?.ready ?? false
   }
 }
 

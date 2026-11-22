@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { KeyboardEvent } from 'react'
-import { REASONING_EFFORTS, offersFastMode, usualEfforts } from '../../shared/types.ts'
+import { REASONING_EFFORTS, isLocalAddress, offersFastMode, usualEfforts } from '../../shared/types.ts'
 import type { EffortLevel, ModelChoice, ModelInfo, ProviderInfo, ReasoningEffort, Settings } from '../../shared/types.ts'
 import { BoltIcon, CheckIcon, ChevronDownIcon, ChevronLeftIcon, ChevronRightIcon, ResetIcon, SettingsIcon } from './icons.tsx'
 import { Slider } from './Slider.tsx'
@@ -48,7 +48,8 @@ const cacheKey = (provider: ProviderInfo): string => `${provider.id}\n${provider
  * The saved choice is always among them, so the slider never shows something else than what is sent.
  */
 function levelsFor(settings: Settings, info: ModelInfo | null): EffortLevel[] {
-  const usual = usualEfforts(settings.providers.find((p) => p.id === settings.activeProviderId)?.baseURL ?? '')
+  const active = settings.providers.find((p) => p.id === settings.activeProviderId)
+  const usual = usualEfforts(active?.baseURL ?? '', active?.kind)
   const offered = new Set<ReasoningEffort>(info?.efforts ?? usual)
   if (usual.includes('none')) offered.add('none')
   offered.add(settings.reasoningEffort)
@@ -133,10 +134,10 @@ export function ModelControl({
   }
   useOutsidePress(open, rootRef, () => close(false))
 
-  /** Asks every provider that has a key for its models; what was learned before shows meanwhile. */
+  /** Asks every provider that can be used for its models; what was learned before shows meanwhile. */
   const loadLists = (): void => {
     for (const provider of settings.providers) {
-      if (!provider.hasApiKey) continue
+      if (!provider.ready) continue
       const key = cacheKey(provider)
       setLists((all) => ({ ...all, [provider.id]: { models: listCache.get(key) ?? null } }))
       api.listModels(provider.id).then(
@@ -272,17 +273,22 @@ export function ModelControl({
           return (
             <div key={provider.id} role="group" aria-label={provider.name}>
               <div className="model-group">{provider.name}</div>
-              {!provider.hasApiKey && (
+              {!provider.ready && (
                 <div className="model-note">
                   {provider.auth !== 'chatgpt' ? '还没有填写 API Key' : provider.account?.signedIn ? '还没有启用套餐额度' : '还没有登录'}
                 </div>
               )}
-              {provider.hasApiKey && list?.models === null && choices.length === 0 && <div className="model-note">正在获取模型列表…</div>}
-              {list?.error && <div className="model-note model-note-error" title={list.error}>无法获取模型列表</div>}
-              {provider.hasApiKey && list?.models && choices.length === 0 && !list.error && (
+              {provider.ready && list?.models === null && choices.length === 0 && <div className="model-note">正在获取模型列表…</div>}
+              {list?.error && (
+                <div className="model-note model-note-error" title={list.error}>
+                  {/* A server on one's own machine is usually just not running. */}
+                  {isLocalAddress(provider.baseURL) ? '连不上，本地的模型服务启动了吗？' : '无法获取模型列表'}
+                </div>
+              )}
+              {provider.ready && list?.models && choices.length === 0 && !list.error && (
                 <div className="model-note">{query.trim() ? '没有匹配的模型' : '服务没有列出模型，请在设置里填写模型名'}</div>
               )}
-              {provider.hasApiKey &&
+              {provider.ready &&
                 choices.map((choice) => {
                   const current = provider.id === settings.activeProviderId && choice.id === settings.model
                   return (

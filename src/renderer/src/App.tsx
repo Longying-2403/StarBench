@@ -252,7 +252,7 @@ export function App() {
   useEffect(() => {
     void api.getSettings().then((s) => {
       setSettings(s)
-      if (!s.hasApiKey) setShowSettings(true)
+      if (!s.ready) setShowSettings(true)
     })
     refreshSessions()
     return api.onEvent(({ sessionId: id, event }) => {
@@ -285,11 +285,11 @@ export function App() {
 
   // The service is asked again when the connection changes; an older answer must not overwrite a newer one.
   // `saves` covers a corrected API key, which changes none of the three values the page can see.
-  const { activeProviderId, model, hasApiKey } = settings ?? {}
+  const { activeProviderId, model, ready } = settings ?? {}
   useEffect(() => {
     let current = true
     setModelInfo(null)
-    if (hasApiKey && model) {
+    if (ready && model) {
       api.getModelInfo().then(
         (info) => current && setModelInfo(info),
         () => {}
@@ -298,7 +298,7 @@ export function App() {
     return () => {
       current = false
     }
-  }, [activeProviderId, model, hasApiKey, saves])
+  }, [activeProviderId, model, ready, saves])
 
   useEffect(() => {
     const el = scrollRef.current
@@ -411,8 +411,8 @@ export function App() {
 
   const active = settings?.providers.find((p) => p.id === settings.activeProviderId)
   /** Requests go to a signed-in ChatGPT account and count against its plan. */
-  const onPlan = active?.auth === 'chatgpt' && active.hasApiKey
-  const blocked = !settings?.hasApiKey
+  const onPlan = active?.auth === 'chatgpt' && active.ready
+  const blocked = !settings?.ready
     ? active?.auth !== 'chatgpt'
       ? '请先在设置中填写 API Key'
       : active.account?.signedIn

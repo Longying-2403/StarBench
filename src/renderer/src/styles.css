@@ -1441,6 +1441,17 @@ body {
   min-width: 0;
   overflow-wrap: anywhere;
 }
+/* Help for a model server on one's own computer: the usual addresses, and what such a model needs. */
+.local-help {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+/* The address that is filled in. */
+.local-help .btn[aria-pressed='true'] {
+  border-color: var(--accent);
+  color: var(--accent);
+}
 .toolbar {
   display: flex;
   gap: 8px;

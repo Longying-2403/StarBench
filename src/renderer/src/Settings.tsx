@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
-import { CHATGPT_HELP_URL, PROVIDER_KINDS, PROVIDER_PRESETS } from '../../shared/types.ts'
+import { CHATGPT_HELP_URL, LOCAL_SERVERS, PROVIDER_KINDS, PROVIDER_PRESETS, isLocalAddress } from '../../shared/types.ts'
 import type { McpServerStatus, ModelChoice, PluginInfo, ProviderInfo, ProviderKind, Settings, SkillInfo } from '../../shared/types.ts'
 import { ChatGptButton, ChatGptPane } from './ChatGptPane.tsx'
 import { Notice } from './Notice.tsx'
@@ -43,6 +43,7 @@ interface Draft {
   kind: ProviderKind
   baseURL: string
   model: string
+  /** Whether a key is stored for it. */
   hasApiKey: boolean
   keyHint: string
 }
@@ -73,10 +74,20 @@ function ProviderForm({
   /** Removing takes a second press. */
   const [confirming, setConfirming] = useState(false)
 
-  // The service's own list makes the model field a pick list. It is a convenience: typing still works.
+  /** A model server on this computer or the local network: it asks for no key, and has its own needs. */
+  const local = isLocalAddress(baseURL)
+
+  // The service's own list makes the model field a pick list. It is a convenience: typing still
+  // works, and a provider that cannot be asked yet simply has no list.
   useEffect(() => {
-    if (draft.id && draft.hasApiKey) api.listModels(draft.id).then(setModels, () => {})
-  }, [draft.id, draft.hasApiKey])
+    if (draft.id) api.listModels(draft.id).then(setModels, () => {})
+  }, [draft.id])
+
+  /** Fills in where one of the usual local servers listens, and its name unless another was typed. */
+  const pickServer = (server: (typeof LOCAL_SERVERS)[number]): void => {
+    setBaseURL(server.baseURL)
+    if (!name.trim() || LOCAL_SERVERS.some((s) => s.name === name)) setName(server.name)
+  }
 
   const submit = async (e: FormEvent): Promise<void> => {
     e.preventDefault()
@@ -127,18 +138,43 @@ function ProviderForm({
         接口地址
         <input value={baseURL} onChange={(e) => setBaseURL(e.target.value)} placeholder="https://…" />
       </label>
+      {local && (
+        <div className="local-help">
+          <div className="toolbar toolbar-wrap">
+            <span className="hint">常用地址：</span>
+            {LOCAL_SERVERS.map((server) => (
+              <button
+                key={server.name}
+                type="button"
+                className="btn btn-small"
+                aria-pressed={baseURL.trim() === server.baseURL}
+                title={server.baseURL}
+                onClick={() => pickServer(server)}
+              >
+                {server.name}
+              </button>
+            ))}
+          </div>
+          <span className="hint">
+            模型跑在另一台电脑上时，把 localhost 换成那台电脑的地址。模型需要支持工具调用，并且把上下文长度调到 16K 以上（Ollama 默认只有
+            4K），否则读不了几个文件就会忘记前面的内容。
+          </span>
+        </div>
+      )}
       <label>
         API Key
         <input
           type="password"
           value={apiKey}
-          autoFocus={!draft.hasApiKey}
+          autoFocus={!draft.hasApiKey && !isLocalAddress(draft.baseURL)}
           onChange={(e) => setApiKey(e.target.value)}
-          placeholder={draft.hasApiKey ? '已保存，留空则不修改' : draft.keyHint}
+          placeholder={draft.hasApiKey ? '已保存，留空则不修改' : local ? '本地服务一般不用填' : draft.keyHint}
         />
         <span className="hint">
-          使用系统凭据加密后保存在本机，不会写入项目文件。
-          {planOffered && !draft.hasApiKey && '没有 API Key？点"返回"，可以改用 ChatGPT 套餐登录。'}
+          {local && !draft.hasApiKey
+            ? '本机或局域网里的模型服务一般不需要 API Key，可以留空。'
+            : '使用系统凭据加密后保存在本机，不会写入项目文件。'}
+          {planOffered && !draft.hasApiKey && !local && '没有 API Key？点"返回"，可以改用 ChatGPT 套餐登录。'}
         </span>
       </label>
       <label>
@@ -183,7 +219,7 @@ const editingOf = (provider: ProviderInfo): Editing =>
 
 /** The words for what a provider still needs before it can be used; empty when it needs nothing. */
 function missing(provider: ProviderInfo): string {
-  if (provider.hasApiKey) return ''
+  if (provider.ready) return ''
   if (provider.auth !== 'chatgpt') return '未填 API Key'
   return provider.account?.signedIn ? '未启用套餐额度' : '未登录'
 }
@@ -199,7 +235,7 @@ function ProvidersTab({
 }) {
   // With no usable provider yet, the form for the first one is what the user needs to see.
   const [editing, setEditing] = useState<Editing>(() => {
-    if (settings.hasApiKey) return null
+    if (settings.ready) return null
     return editingOf(settings.providers.find((p) => p.id === settings.activeProviderId) ?? settings.providers[0])
   })
   const hasPlan = settings.providers.some((p) => p.auth === 'chatgpt')
@@ -235,7 +271,7 @@ function ProvidersTab({
   return (
     <div className="tab-body">
       <p className="hint">
-        可以添加多个模型服务，各用各的 API Key，也可以用 ChatGPT 套餐登录。用哪个模型，在输入框右下角点模型名切换。
+        可以添加多个模型服务，各用各的 API Key，也可以用 ChatGPT 套餐登录，或者连接自己电脑上运行的本地模型。用哪个模型，在输入框右下角点模型名切换。
       </p>
       <ul className="rows">
         {settings.providers.map((provider) => (
@@ -268,6 +304,15 @@ function ProvidersTab({
             {preset.name}
           </button>
         ))}
+        {/* A model server on one's own computer: the form starts at the most common one and offers the others. */}
+        <button
+          className="btn btn-small"
+          onClick={() =>
+            setEditing({ type: 'key', draft: { ...LOCAL_SERVERS[0], kind: 'openai-chat', model: '', hasApiKey: false, keyHint: '' } })
+          }
+        >
+          本地模型
+        </button>
         <button
           className="btn btn-small"
           onClick={() => setEditing({ type: 'key', draft: { name: '', kind: 'openai-chat', baseURL: '', model: '', hasApiKey: false, keyHint: '' } })}

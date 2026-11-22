@@ -16,6 +16,12 @@ export interface Connection {
   /** Ask the service to write the answer faster, at its higher price. Set only where the model offers that. */
   fast?: boolean
   /**
+   * Set once a server turned out not to stream a reply while tools are offered (LLaMA-Factory's
+   * API is one). Replies are then asked for in one piece, and the conversation is kept to strict
+   * turns with one tool call at a time, which is all such a server takes.
+   */
+  wholeReplies?: boolean
+  /**
    * Set when requests are paid for by the signed-in person's ChatGPT plan. Its tokens last an
    * hour, so `token` is asked before every request: it resolves with one that is good now, getting
    * a new one when needed. `rejected` names a token the service has just turned down.
@@ -35,6 +41,12 @@ export class ServiceError extends Error {
   }
 }
 
+/**
+ * Thrown, before anything of a reply arrived, when the service will not take tools for this
+ * model: many models people run themselves cannot call any. The message is what the service said.
+ */
+export class ToolsRefused extends Error {}
+
 export type AssistantMessage = Extract<ChatMessage, { role: 'assistant' }>
 
 export interface ModelRequest {
@@ -51,6 +63,11 @@ export interface ModelRequest {
    * every model or account has them) and the request went out again without.
    */
   onFastRefused?(): void
+  /**
+   * Called when the server would not stream this reply because tools were offered, and the reply
+   * was asked for in one piece instead; see `Connection.wholeReplies`.
+   */
+  onStreamRefused?(): void
 }
 
 export interface ModelReply {
@@ -65,7 +82,8 @@ export interface ModelReply {
 export interface ProviderAdapter {
   /**
    * Streams one assistant message. Resolves with whatever arrived when the request is aborted;
-   * rejects when the service reports an error.
+   * rejects when the service reports an error, with `ToolsRefused` when the error is that the
+   * model takes no tools.
    */
   complete(request: ModelRequest): Promise<ModelReply>
   listModels(connection: Connection): Promise<ModelChoice[]>

@@ -257,9 +257,13 @@ async function currentToken(providerId: string, rejected?: string): Promise<stri
 
 const planToken = (providerId: string, rejected?: string): Promise<string> => inTurn(providerId, () => currentToken(providerId, rejected))
 
+/** What is sent in place of a key to a service that asks for none. */
+const NO_KEY = 'local'
+
 /**
  * Main-process only: what is needed to call a provider, with its key decrypted. The active
- * provider unless an id is given. Null when that provider has no key and no usable sign-in.
+ * provider unless an id is given. Null when that provider has no key and no usable sign-in,
+ * and is not a local service that needs neither.
  */
 export async function getConnection(providerId?: string): Promise<Connection | null> {
   const stored = await loadStored()
@@ -285,8 +289,9 @@ export async function getConnection(providerId?: string): Promise<Connection | n
       plan: { token: (rejected) => planToken(id, rejected) }
     }
   }
-  if (!provider.encryptedKey) return null
-  return { ...common, apiKey: await decryptKey(provider), baseURL: provider.baseURL }
+  if (provider.encryptedKey) return { ...common, apiKey: await decryptKey(provider), baseURL: provider.baseURL }
+  // A model server on one's own machine asks for no key, but the clients insist on sending one.
+  return model.needsNoKey(provider) ? { ...common, apiKey: NO_KEY, baseURL: provider.baseURL } : null
 }
 
 /** The id this installation signs in to ChatGPT with: made on first use, then kept. */
