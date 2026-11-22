@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useReducer, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { ABOUT } from '../../shared/about.ts'
+import { hasHidden, revealHidden } from '../../shared/hidden-chars.ts'
 import { formatShare, formatTokens } from '../../shared/stats.ts'
 import type { SessionStats } from '../../shared/stats.ts'
 import { CHATGPT_USAGE_URL, isLocalAddress } from '../../shared/types.ts'
@@ -68,16 +69,61 @@ const TOOL_LABELS: Record<string, string> = {
   run_command: '执行命令'
 }
 
+/** What is shown of a call's arguments: each by its name, the value as written or as JSON; with none to name, the raw text. */
+function shownArgs(call: ToolCall): { entries: [string, string][]; raw: string | null } {
+  const entries = Object.entries(parseArgs(call))
+  if (entries.length === 0) return { entries: [], raw: call.arguments }
+  return { entries: entries.map(([key, value]): [string, string] => [key, typeof value === 'string' ? value : JSON.stringify(value, null, 2)]), raw: null }
+}
+
+/** Whether what is shown of a call holds a character that would not show (shared/hidden-chars.ts). */
+function hidesCharacters(call: ToolCall): boolean {
+  const { entries, raw } = shownArgs(call)
+  return [raw ?? '', ...entries.flat()].some(hasHidden)
+}
+
+/** How a character that would not show is marked: its code point in a red frame. */
+const HIDDEN_MARK = { color: 'var(--danger)', border: '1px solid var(--danger)', borderRadius: 3, padding: '0 2px', margin: '0 1px', fontSize: '0.85em' } as const
+
+/**
+ * Text as it will be used, with every character that would not show marked where it is: a mark
+ * that turns the direction of the text around can make a command read as something it is not.
+ */
+function Shown({ text }: { text: string }) {
+  return (
+    <>
+      {revealHidden(text).map((piece, i) =>
+        typeof piece === 'string' ? (
+          <Fragment key={i}>{piece}</Fragment>
+        ) : (
+          <span key={i} title="看不见的字符" style={HIDDEN_MARK}>
+            {piece.hidden}
+          </span>
+        )
+      )}
+    </>
+  )
+}
+
 function ToolDetails({ call }: { call: ToolCall }) {
-  const args = parseArgs(call)
-  const entries = Object.entries(args)
-  if (entries.length === 0) return <pre className="code">{call.arguments}</pre>
+  const { entries, raw } = shownArgs(call)
+  if (raw !== null) {
+    return (
+      <pre className="code">
+        <Shown text={raw} />
+      </pre>
+    )
+  }
   return (
     <>
       {entries.map(([key, value]) => (
         <div key={key} className="arg">
-          <div className="arg-name">{key}</div>
-          <pre className="code">{typeof value === 'string' ? value : JSON.stringify(value, null, 2)}</pre>
+          <div className="arg-name">
+            <Shown text={key} />
+          </div>
+          <pre className="code">
+            <Shown text={value} />
+          </pre>
         </div>
       ))}
     </>
@@ -101,7 +147,9 @@ function ToolCard({ item, faded }: { item: Extract<Item, { kind: 'tool' }>; fade
     <details className={`tool${failed ? ' tool-failed' : ''}${faded ? ' faded' : ''}`}>
       <summary>
         <span className="tool-name">{TOOL_LABELS[item.call.name] ?? item.call.name}</span>
-        <span className="tool-summary">{callSummary(item.call)}</span>
+        <span className="tool-summary">
+          <Shown text={callSummary(item.call)} />
+        </span>
         {/* Still shown here in full; the model is sent a line in its place. */}
         {item.cleared && <span className="tool-cleared">结果已清理</span>}
         <span className="tool-status">{status}</span>
@@ -254,16 +302,24 @@ function Transcript({ items, workspace, onOpenSettings }: { items: Item[]; works
 
 function PermissionBar({
   call,
+  workspace,
   onDecide
 }: {
   call: ToolCall
+  /** The folder of the conversation that asks: where its files are, and where a command runs. */
+  workspace: string
   onDecide: (decision: PermissionDecision) => void
 }) {
+  const label = TOOL_LABELS[call.name]
   return (
     <div className="permission" role="alertdialog" aria-label="权限确认">
-      <div className="permission-title">
-        {TOOL_LABELS[call.name] ? `允许${TOOL_LABELS[call.name]}？` : `允许调用工具 ${call.name}？`}
+      <div className="permission-title">{label ? `允许${label}？` : `允许调用工具 ${call.name}？`}</div>
+      <div className="hint" title={workspace}>
+        工作文件夹：{workspace || '（未选择）'}
       </div>
+      {hidesCharacters(call) && (
+        <Notice role="alert">这次调用里有看不见的字符，已用红框标出。显示出来的内容可能和实际执行的不一样，看清楚再决定。</Notice>
+      )}
       <div className="permission-body">
         <ToolDetails call={call} />
       </div>
@@ -271,8 +327,9 @@ function PermissionBar({
         <button className="btn btn-primary" onClick={() => onDecide('allow')}>
           允许
         </button>
-        <button className="btn" onClick={() => onDecide('always')}>
-          本次会话始终允许
+        {/* What it lets through is said on it: every later call of this kind in this conversation, until the app starts again. */}
+        <button className="btn" onClick={() => onDecide('always')} title="这个对话里之后同类的调用都直接放行，重启应用后恢复询问。">
+          {`本次会话不再询问「${label ?? call.name}」`}
         </button>
         <button className="btn" onClick={() => onDecide('deny')}>
           拒绝
@@ -299,7 +356,13 @@ export function App() {
   const [workspace, setWorkspace] = useState(readLastWorkspace)
   const [items, dispatch] = useReducer(itemsReducer, [])
   const [running, setRunning] = useState(false)
-  const [permission, setPermission] = useState<{ id: string; call: ToolCall } | null>(null)
+  /**
+   * The questions waiting for an answer, by the session that asked. A question waits with its
+   * session whether that is on the page or not: going back to the session shows it again, and a
+   * question is never shown with another session's conversation.
+   */
+  const [prompts, setPrompts] = useState<Record<string, { id: string; call: ToolCall }>>({})
+  const permission = sessionId ? (prompts[sessionId] ?? null) : null
   /** What was measured of the conversation on the page, as far as the app has kept count of it. */
   const [stats, setStats] = useState<SessionStats | null>(null)
   /** The model is writing the summary of the conversation, which takes a while and shows nothing. */
@@ -336,14 +399,33 @@ export function App() {
     return api.onEvent(({ sessionId: id, event }) => {
       // The switch was taken back for the model, whichever session found out; the page shows it at once.
       if (event.type === 'notice' && event.code === 'fast-mode-refused') setSettings((s) => (s ? { ...s, fastMode: false } : s))
+      // A question is kept with the session that asked it, and goes when that session's turn ends.
+      if (event.type === 'permission_request') {
+        setPrompts((all) => ({ ...all, [id]: { id: event.id, call: event.call } }))
+        if (id !== sessionRef.current) {
+          // A session started elsewhere than on this page: it is put in the list, if it is not there yet, and named in a notice.
+          const tell = (title?: string): void => {
+            notify({ key: `permission:${id}`, title: '有对话在等你确认', text: `${title ? `「${title}」` : '另一个对话'}要调用一个需要你允许的工具，打开它就能看到。` })
+          }
+          api.listSessions().then(
+            (list) => {
+              setSessions(list)
+              tell(list.find((s) => s.id === id)?.title)
+            },
+            () => tell()
+          )
+        }
+      }
+      if (event.type === 'turn_end') {
+        setPrompts(({ [id]: _ended, ...rest }) => rest)
+        toasts.dismissKey(`permission:${id}`)
+      }
       if (id !== sessionRef.current) return
-      if (event.type === 'permission_request') setPermission({ id: event.id, call: event.call })
       if (event.type === 'stats') return setStats(event.stats)
       if (event.type === 'compacting') return setCompacting(event.on)
       if (event.type === 'turn_end') {
         setRunning(false)
         setCompacting(false)
-        setPermission(null)
         refreshSessions()
       }
       // The sign-in was given up behind the page's back; what it shows about it is out of date.
@@ -384,6 +466,8 @@ export function App() {
   useEffect(keepEndInView, [items, permission, keepEndInView])
 
   const openSession = async (id: string): Promise<void> => {
+    // A question this session asked is answered on its page, which is about to show.
+    toasts.dismissKey(`permission:${id}`)
     const session = await api.loadSession(id)
     if (!session) return refreshSessions()
     sessionRef.current = id
@@ -516,9 +600,9 @@ export function App() {
   }
 
   const decide = (decision: PermissionDecision): void => {
-    if (!permission) return
+    if (!permission || !sessionId) return
     void api.respondPermission(permission.id, decision)
-    setPermission(null)
+    setPrompts(({ [sessionId]: _answered, ...rest }) => rest)
   }
 
   const active = settings?.providers.find((p) => p.id === settings.activeProviderId)
@@ -624,7 +708,7 @@ export function App() {
             </>
           )}
 
-          {permission && <PermissionBar call={permission.call} onDecide={decide} />}
+          {permission && <PermissionBar call={permission.call} workspace={workspace} onDecide={decide} />}
 
           <div className="dock">
             {/* Before the first message the folder is chosen right above the box it applies to. */}
@@ -660,7 +744,7 @@ export function App() {
           <section className="page" aria-labelledby="plugins-title">
             <PluginsPage onBack={() => setPage('chat')} />
             {/* The model waits for an answer wherever the person is looking. */}
-            {permission && <PermissionBar call={permission.call} onDecide={decide} />}
+            {permission && <PermissionBar call={permission.call} workspace={workspace} onDecide={decide} />}
           </section>
         )}
       </div>

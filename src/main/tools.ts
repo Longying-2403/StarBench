@@ -4,7 +4,9 @@
 import { spawn } from 'node:child_process'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
+import { Worker } from 'node:worker_threads'
 import { decodeOutput } from './decode.ts'
+import { system32, windowsPowerShell } from './program-path.ts'
 
 const MAX_OUTPUT_CHARS = 30_000
 /** Command output beyond this is dropped while it is still being read. */
@@ -106,15 +108,54 @@ function str(args: Record<string, unknown>, key: string): string {
   return value
 }
 
-/** Resolves a model-supplied path and refuses anything outside the workspace. */
+/** Thrown for a path outside the workspace: as it is written, or by way of a link in it. */
+export class OutsideWorkspace extends Error {}
+
+/** Whether `full` lies in `root`, or is it; both written out in full. */
+function within(root: string, full: string): boolean {
+  const rel = path.relative(root, full)
+  return !rel.startsWith('..') && !path.isAbsolute(rel)
+}
+
+/**
+ * Resolves a model-supplied path and refuses anything outside the workspace, as far as the path
+ * as it is written tells. Links are not looked at; the tools go by `workspacePath`.
+ */
 export function resolveInWorkspace(workspace: string, target: string): string {
   const root = path.resolve(workspace)
   const full = path.resolve(root, target)
-  const rel = path.relative(root, full)
-  if (rel.startsWith('..') || path.isAbsolute(rel)) {
-    throw new Error(`Path is outside the workspace: ${target}`)
-  }
+  if (!within(root, full)) throw new OutsideWorkspace(`Path is outside the workspace: ${target}`)
   return full
+}
+
+const notThere = (err: unknown): boolean => {
+  const code = (err as NodeJS.ErrnoException | null)?.code
+  return code === 'ENOENT' || code === 'ENOTDIR'
+}
+
+/**
+ * Resolves a model-supplied path like `resolveInWorkspace`, and also refuses one that leads out of
+ * the workspace through a link: a symbolic link or a junction in it may point anywhere, and what
+ * is read or written through it is read or written there. A path to something not made yet is
+ * judged by the deepest folder of it that exists. A link that leads nowhere is refused as well:
+ * writing through it would make the file it points to, wherever that is.
+ */
+export async function workspacePath(workspace: string, target: string): Promise<string> {
+  const full = resolveInWorkspace(workspace, target)
+  const root = await fs.realpath(path.resolve(workspace))
+  for (let at = full; ; at = path.dirname(at)) {
+    let real: string
+    try {
+      real = await fs.realpath(at)
+    } catch (err) {
+      if (!notThere(err) || path.dirname(at) === at) throw err
+      // Not there, unless it is a link whose target is gone.
+      if (await fs.lstat(at).then(() => true, () => false)) throw new OutsideWorkspace(`Path goes through a link that leads nowhere: ${target}`)
+      continue
+    }
+    if (!within(root, real)) throw new OutsideWorkspace(`Path leads outside the workspace through a link: ${target}`)
+    return full
+  }
 }
 
 async function readTextFile(full: string): Promise<string> {
@@ -125,24 +166,110 @@ async function readTextFile(full: string): Promise<string> {
   return fs.readFile(full, 'utf8')
 }
 
-async function* walk(dir: string): AsyncGenerator<string> {
-  const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => [])
+/** How long one search may run. It runs beside the app, which stays usable meanwhile. */
+const SEARCH_TIMEOUT_MS = 30_000
+
+/** A search as `searchInWorker` is asked for it. */
+export interface SearchJob {
+  /** The file or folder to search, already found to lie in the workspace. */
+  start: string
+  directory: boolean
+  /** What the paths in the result are written relative to. */
+  workspace: string
+  pattern: string
+  flags: string
+}
+
+/**
+ * The search itself, as a worker thread runs it: plain JavaScript, so that it loads the same in the
+ * built app and in the tests. Links are not followed into folders, and the folders of dependencies
+ * and build output are left out.
+ */
+const SEARCH_WORKER = `
+const { parentPort, workerData } = require('node:worker_threads')
+const fs = require('node:fs')
+const path = require('node:path')
+const { start, directory, workspace, pattern, flags, maxBytes, maxHits, skipped } = workerData
+const regex = new RegExp(pattern, flags)
+const skip = new Set(skipped)
+function* walk(dir) {
+  let entries = []
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true })
+  } catch {}
   for (const entry of entries) {
     const full = path.join(dir, entry.name)
     if (entry.isDirectory()) {
-      if (!SKIPPED_DIRS.has(entry.name)) yield* walk(full)
+      if (!skip.has(entry.name)) yield* walk(full)
     } else if (entry.isFile()) {
       yield full
     }
   }
+}
+function search() {
+  const hits = []
+  for (const file of directory ? walk(start) : [start]) {
+    let text
+    try {
+      if (fs.statSync(file).size > maxBytes) continue
+      text = fs.readFileSync(file, 'utf8')
+    } catch {
+      continue
+    }
+    if (text.includes('\\u0000')) continue
+    const rel = path.relative(workspace, file).split(path.sep).join('/')
+    const lines = text.split('\\n')
+    for (let i = 0; i < lines.length; i++) {
+      if (!regex.test(lines[i])) continue
+      hits.push(rel + ':' + (i + 1) + ': ' + lines[i].trim().slice(0, 300))
+      if (hits.length >= maxHits) return { hits, stopped: true }
+    }
+  }
+  return { hits, stopped: false }
+}
+parentPort.postMessage(search())
+`
+
+/**
+ * Runs a search in a worker thread. A pattern with nested repetition can take longer than any file
+ * is worth, and in this process, which also answers the window, it would hold up the whole app.
+ * There it holds up nothing, and it is stopped when its time is up or the turn is stopped.
+ */
+export function searchInWorker(job: SearchJob, signal: AbortSignal, timeoutMs = SEARCH_TIMEOUT_MS): Promise<{ hits: string[]; stopped: boolean } | 'cancelled'> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) return resolve('cancelled')
+    const worker = new Worker(SEARCH_WORKER, {
+      eval: true,
+      workerData: { ...job, maxBytes: MAX_FILE_BYTES, maxHits: MAX_SEARCH_HITS, skipped: [...SKIPPED_DIRS] }
+    })
+    let settled = false
+    const finish = (settle: () => void): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      signal.removeEventListener('abort', onAbort)
+      void worker.terminate()
+      settle()
+    }
+    const onAbort = (): void => finish(() => resolve('cancelled'))
+    const timer = setTimeout(
+      () => finish(() => reject(new Error(`The search took longer than ${timeoutMs / 1000} seconds and was stopped. A simpler pattern or a narrower path may help.`))),
+      timeoutMs
+    )
+    signal.addEventListener('abort', onAbort, { once: true })
+    worker.once('message', (result: { hits: string[]; stopped: boolean }) => finish(() => resolve(result)))
+    worker.once('error', (err) => finish(() => reject(err)))
+    worker.once('exit', (code) => finish(() => reject(new Error(`The search ended without a result (exit code ${code}).`))))
+  })
 }
 
 function runCommand(command: string, ctx: ToolContext): Promise<string> {
   return new Promise((resolve) => {
     const isWindows = process.platform === 'win32'
     const child = isWindows
-      ? // Without this prefix PowerShell and the programs it starts write in the system code page.
-        spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `${POWERSHELL_UTF8}${command}`], {
+      ? // Without this prefix PowerShell and the programs it starts write in the system code page. By
+        // its full path: by name alone, a powershell.exe in the workspace would be started (program-path.ts).
+        spawn(windowsPowerShell(), ['-NoProfile', '-NonInteractive', '-Command', `${POWERSHELL_UTF8}${command}`], {
           cwd: ctx.workspace,
           windowsHide: true
         })
@@ -163,7 +290,7 @@ function runCommand(command: string, ctx: ToolContext): Promise<string> {
       note = reason
       if (isWindows && child.pid) {
         // Kill the whole process tree; child.kill() only stops the shell.
-        spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true })
+        spawn(system32('taskkill.exe'), ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true })
       } else {
         child.kill('SIGKILL')
       }
@@ -198,7 +325,7 @@ const BUILTIN_TOOLS: Record<string, Omit<ToolSpec, 'name'>> = {
     },
     needsPermission: false,
     async run(args, ctx) {
-      const text = await readTextFile(resolveInWorkspace(ctx.workspace, str(args, 'path')))
+      const text = await readTextFile(await workspacePath(ctx.workspace, str(args, 'path')))
       const lines = text.split(/\r?\n/)
       const offset = Math.max(1, Number(args.offset) || 1)
       const limit = Math.max(1, Number(args.limit) || 2000)
@@ -221,7 +348,7 @@ const BUILTIN_TOOLS: Record<string, Omit<ToolSpec, 'name'>> = {
     },
     needsPermission: true,
     async run(args, ctx) {
-      const full = resolveInWorkspace(ctx.workspace, str(args, 'path'))
+      const full = await workspacePath(ctx.workspace, str(args, 'path'))
       const content = str(args, 'content')
       await fs.mkdir(path.dirname(full), { recursive: true })
       await fs.writeFile(full, content, 'utf8')
@@ -244,7 +371,7 @@ const BUILTIN_TOOLS: Record<string, Omit<ToolSpec, 'name'>> = {
     },
     needsPermission: true,
     async run(args, ctx) {
-      const full = resolveInWorkspace(ctx.workspace, str(args, 'path'))
+      const full = await workspacePath(ctx.workspace, str(args, 'path'))
       const oldString = str(args, 'old_string')
       const newString = str(args, 'new_string')
       if (!oldString) throw new Error('old_string must not be empty')
@@ -278,7 +405,7 @@ const BUILTIN_TOOLS: Record<string, Omit<ToolSpec, 'name'>> = {
     needsPermission: false,
     async run(args, ctx) {
       const target = typeof args.path === 'string' && args.path ? args.path : '.'
-      const entries = await fs.readdir(resolveInWorkspace(ctx.workspace, target), { withFileTypes: true })
+      const entries = await fs.readdir(await workspacePath(ctx.workspace, target), { withFileTypes: true })
       if (entries.length === 0) return '(empty directory)'
       return truncate(
         entries
@@ -303,30 +430,17 @@ const BUILTIN_TOOLS: Record<string, Omit<ToolSpec, 'name'>> = {
     },
     needsPermission: false,
     async run(args, ctx) {
-      const regex = new RegExp(str(args, 'pattern'), args.case_insensitive === true ? 'i' : '')
+      const pattern = str(args, 'pattern')
+      const flags = args.case_insensitive === true ? 'i' : ''
+      // Made here as well, so that what is no pattern is reported at once.
+      new RegExp(pattern, flags)
       const target = typeof args.path === 'string' && args.path ? args.path : '.'
-      const start = resolveInWorkspace(ctx.workspace, target)
+      const start = await workspacePath(ctx.workspace, target)
       const stat = await fs.stat(start)
-      const files = stat.isDirectory() ? walk(start) : [start]
-
-      const hits: string[] = []
-      for await (const file of files) {
-        if (ctx.signal.aborted) break
-        const info = await fs.stat(file).catch(() => null)
-        if (!info || info.size > MAX_FILE_BYTES) continue
-        const text = await fs.readFile(file, 'utf8').catch(() => '')
-        if (text.includes('\u0000')) continue // binary
-        const rel = path.relative(ctx.workspace, file).split(path.sep).join('/')
-        const lines = text.split('\n')
-        for (let i = 0; i < lines.length; i++) {
-          if (!regex.test(lines[i])) continue
-          hits.push(`${rel}:${i + 1}: ${lines[i].trim().slice(0, 300)}`)
-          if (hits.length >= MAX_SEARCH_HITS) {
-            return truncate(`${hits.join('\n')}\n… [stopped at ${MAX_SEARCH_HITS} matches]`)
-          }
-        }
-      }
-      return hits.length ? truncate(hits.join('\n')) : 'No matches'
+      const found = await searchInWorker({ start, directory: stat.isDirectory(), workspace: ctx.workspace, pattern, flags }, ctx.signal)
+      if (found === 'cancelled') return 'Cancelled by user'
+      if (found.stopped) return truncate(`${found.hits.join('\n')}\n… [stopped at ${MAX_SEARCH_HITS} matches]`)
+      return found.hits.length ? truncate(found.hits.join('\n')) : 'No matches'
     }
   },
 

@@ -29,6 +29,7 @@ import type { Connection } from './providers/index.ts'
 import { createKernel } from './kernel.ts'
 import type { Kernel } from './kernel.ts'
 import { McpManager } from './mcp.ts'
+import { mayGrant, mayNavigate } from './page-guard.ts'
 import { PluginChannel } from './plugin-channel.ts'
 import { PluginManager } from './plugins.ts'
 import { SamplingRegistry } from './sampling.ts'
@@ -84,7 +85,9 @@ tools.register(loadSkillTool(skills), 'builtin')
 const mcp = new McpManager({
   configFile: path.join(app.getPath('userData'), 'mcp.json'),
   tools,
-  clientInfo: { name: 'starbench', version: app.getVersion() }
+  clientInfo: { name: 'starbench', version: app.getVersion() },
+  // The tokens in `env` and `headers` are kept on disk the way API keys are.
+  secrets: { seal: store.sealSecret, open: store.openSecret }
 })
 let kernel: Kernel | null = null
 let plugins: PluginManager | null = null
@@ -207,10 +210,12 @@ function createWindow(): void {
     return { action: 'deny' }
   })
   mainWindow.webContents.on('will-navigate', (event) => {
-    // Allow dev-server reloads of the app itself, block everything else.
-    const current = mainWindow?.webContents.getURL() ?? ''
-    if (!current || new URL(event.url).origin !== new URL(current).origin) event.preventDefault()
+    // The page goes nowhere; while developing it reloads from the development server (page-guard.ts).
+    if (!mayNavigate(event.url, DEV_PAGE_URL)) event.preventDefault()
   })
+  // Of what a browser asks permission for, the page gets the clipboard and nothing else; Electron
+  // would grant all of it (page-guard.ts).
+  mainWindow.webContents.session.setPermissionRequestHandler((_contents, permission, grant) => grant(mayGrant(permission)))
 
   if (DEV_PAGE_URL) {
     mainWindow.webContents.on('console-message', (event) => {

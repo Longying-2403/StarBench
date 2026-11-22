@@ -7,7 +7,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { writtenAddress } from '../shared/links.ts'
 import type { FileProblem, ImagePreview } from '../shared/types.ts'
-import { resolveInWorkspace } from './tools.ts'
+import { OutsideWorkspace, workspacePath } from './tools.ts'
 
 /** The kinds of picture the page can draw, with the type each is handed over as. */
 const IMAGE_TYPES: Record<string, string> = {
@@ -28,13 +28,15 @@ export const MAX_IMAGE_BYTES = 20 * 1024 * 1024
 /**
  * Kinds of file that the program the system opens them with shows or plays. Every other kind is
  * pointed out in its folder and not opened: a link in an answer that says "open the report" may
- * lead to a script, and opening that would run it. No legacy Office formats, which can carry
- * macros, and nothing that is a shortcut to something else.
+ * lead to a script, and opening that would run it. Nothing that is a shortcut to something else.
+ * Office documents and RTF are pointed out too: the files of a cloned repository or an unpacked
+ * folder carry no mark of the web, so Office opens them outside its Protected View, and these
+ * formats have long been a way in for attacks. So are web pages and SVG pictures, which run
+ * scripts in the browser; the page shows an SVG picture itself, without running anything.
  */
 const SHOWN_WHEN_OPENED = new Set([
-  ...['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg', 'ico', 'avif', 'tif', 'tiff', 'heic'],
-  ...['pdf', 'txt', 'md', 'markdown', 'log', 'csv', 'tsv', 'json', 'xml', 'yaml', 'yml', 'toml', 'ini', 'html', 'htm', 'rtf'],
-  ...['docx', 'xlsx', 'pptx', 'odt', 'ods', 'odp'],
+  ...['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'ico', 'avif', 'tif', 'tiff', 'heic'],
+  ...['pdf', 'txt', 'md', 'markdown', 'log', 'csv', 'tsv', 'json', 'xml', 'yaml', 'yml', 'toml', 'ini'],
   ...['mp3', 'wav', 'ogg', 'flac', 'm4a', 'mp4', 'webm', 'mov', 'mkv', 'avi']
 ])
 
@@ -73,8 +75,11 @@ export async function findNamed(workspace: string, address: string): Promise<Nam
   for (const candidate of pathsNamed(address)) {
     let full: string
     try {
-      full = resolveInWorkspace(workspace, candidate)
-    } catch {
+      // Followed through links as well: a link in the workspace may lead anywhere.
+      full = await workspacePath(workspace, candidate)
+    } catch (err) {
+      // Whatever else goes wrong (the folder itself is gone) leaves a file that is missing.
+      if (!(err instanceof OutsideWorkspace)) inside = true
       continue
     }
     inside = true

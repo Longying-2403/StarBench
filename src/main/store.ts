@@ -104,6 +104,16 @@ async function encrypt(secret: string, what: string): Promise<string> {
 }
 const encryptKey = (key: string): Promise<string> => encrypt(key, 'API key')
 
+/** Seals a secret the way API keys are kept, for the tokens in mcp.json: base64 of what the operating system encrypted. */
+export function sealSecret(secret: string): Promise<string> {
+  return encrypt(secret, 'secret')
+}
+
+/** Opens what `sealSecret` sealed. Throws where this computer and this user cannot open it. */
+export async function openSecret(sealed: string): Promise<string> {
+  return (await safeStorage.decryptStringAsync(Buffer.from(sealed, 'base64'))).result
+}
+
 /** The input arrives over IPC; the settings model checks it. An empty key removes the stored one. */
 export function saveProvider(input: ProviderInput): Promise<Settings> {
   return mutate(async (settings) => {
@@ -329,7 +339,11 @@ export async function getConnection(providerId?: string): Promise<Connection | n
       plan: { token: (rejected) => planToken(id, rejected) }
     }
   }
-  if (provider.encryptedKey) return { ...common, apiKey: await decryptKey(provider), baseURL: provider.baseURL }
+  if (provider.encryptedKey) {
+    // Saved before keys were held to https, or written into the file by hand: not sent over plain http to the internet either.
+    if (!model.sendsKeySafely(provider.baseURL)) throw new Error(model.KEY_NEEDS_HTTPS)
+    return { ...common, apiKey: await decryptKey(provider), baseURL: provider.baseURL }
+  }
   // A model server on one's own machine asks for no key, but the clients insist on sending one.
   return model.needsNoKey(provider) ? { ...common, apiKey: NO_KEY, baseURL: provider.baseURL } : null
 }

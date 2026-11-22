@@ -2,6 +2,7 @@
 // the system code page (GBK on a Chinese system, for example), not UTF-8.
 
 import { execFileSync } from 'node:child_process'
+import { system32 } from './program-path.ts'
 
 /** Windows code pages and the TextDecoder label that reads them. */
 const CODE_PAGES: Record<number, string> = {
@@ -23,7 +24,8 @@ function detectLegacyEncoding(): string {
   if (process.platform === 'win32') {
     try {
       // Prints e.g. "Active code page: 936"; the label is localised, the number is not.
-      const out = execFileSync('chcp.com', { encoding: 'latin1', windowsHide: true, timeout: 3000 })
+      // By its full path, like every program of Windows the app starts (program-path.ts).
+      const out = execFileSync(system32('chcp.com'), { encoding: 'latin1', windowsHide: true, timeout: 3000 })
       const page = Number(/(\d+)\D*$/.exec(out)?.[1])
       if (CODE_PAGES[page]) legacyEncoding = CODE_PAGES[page]
       else if (page >= 1250 && page <= 1258) legacyEncoding = `windows-${page}`

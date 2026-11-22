@@ -13,6 +13,8 @@ import type { Readable } from 'node:stream'
 import type { McpServerStatus } from '../shared/types.ts'
 import { OutputTail } from './decode.ts'
 import { writeJson } from './json-file.ts'
+import { envValue, onPath } from './program-path.ts'
+import { sendsKeySafely } from '../shared/key-address.ts'
 import type { ToolRegistry } from './tools.ts'
 
 /** Generous, because `npx` may download the server on first use. */
@@ -20,6 +22,11 @@ const CONNECT_TIMEOUT_MS = 60_000
 const CALL_TIMEOUT_MS = 120_000
 const MAX_DESCRIPTION_CHARS = 2000
 const STDERR_TAIL_CHARS = 600
+/** Why the headers of a remote server go only where plain http would not expose them (shared/key-address.ts). */
+const HEADERS_NEED_HTTPS =
+  "Headers are only sent over https://, or over http:// to this computer or to a local-network IP address: they usually carry a token, and a name could be answered for by another machine. Change the address to https://, or write the server's IP address."
+/** How a value of `env` or `headers` starts in mcp.json once it is sealed; the sealed form follows. */
+const SEALED = 'starbench-sealed:'
 
 export const EMPTY_MCP_CONFIG = '{\n  "mcpServers": {}\n}\n'
 
@@ -126,6 +133,34 @@ function describe(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
 }
 
+/** Seals secrets and opens them again: the operating system's credential store, the way API keys are kept (store.ts). */
+export interface SecretBox {
+  seal(value: string): Promise<string>
+  open(sealed: string): Promise<string>
+}
+
+/** Applies `change` to every value of `env` and `headers` of every server of a parsed mcp.json; the rest stays as it is. */
+async function mapSecrets(raw: unknown, change: (value: string) => Promise<string>): Promise<unknown> {
+  if (!isRecord(raw) || !isRecord(raw.mcpServers)) return raw
+  const servers: Record<string, unknown> = {}
+  for (const [name, server] of Object.entries(raw.mcpServers)) {
+    if (!isRecord(server)) {
+      servers[name] = server
+      continue
+    }
+    const next: Record<string, unknown> = { ...server }
+    for (const field of ['env', 'headers']) {
+      const values = server[field]
+      if (!isRecord(values)) continue
+      const changed: Record<string, unknown> = {}
+      for (const [key, value] of Object.entries(values)) changed[key] = typeof value === 'string' ? await change(value) : value
+      next[field] = changed
+    }
+    servers[name] = next
+  }
+  return { ...raw, mcpServers: servers }
+}
+
 interface Connection {
   name: string
   config: McpServerConfig
@@ -142,6 +177,11 @@ export interface McpManagerOptions {
   tools: ToolRegistry
   /** How this app introduces itself to servers. */
   clientInfo: { name: string; version: string }
+  /**
+   * How the values of `env` and `headers` are kept on disk: sealed, and opened again to be used
+   * or edited. Without it they are kept as they are written.
+   */
+  secrets?: SecretBox
 }
 
 export class McpManager {
@@ -167,27 +207,84 @@ export class McpManager {
    */
   async init(): Promise<void> {
     let config: McpConfig
+    let text: string
     try {
-      config = parseMcpConfig(await this.readConfigText())
+      text = await this.readFileText()
+      config = parseMcpConfig(text)
     } catch (err) {
       this.lastLoadError = describe(err)
       throw err
     }
     this.lastLoadError = undefined
+    // A token written into the file by hand, or by a version that kept them as written, is sealed now.
+    await this.sealOnDisk(text).catch((err) => console.error('[mcp] could not seal the secrets in mcp.json:', describe(err)))
     await this.apply(config)
   }
 
-  async readConfigText(): Promise<string> {
+  private readFileText(): Promise<string> {
     return fs.readFile(this.opts.configFile, 'utf8').catch(() => EMPTY_MCP_CONFIG)
   }
 
-  /** Validates and saves new configuration text, then reconnects every server. */
+  /**
+   * The text of mcp.json as the settings page edits it: with the secrets opened. One that cannot be
+   * opened here is shown sealed, to be replaced; its server says why it does not connect.
+   */
+  async readConfigText(): Promise<string> {
+    const text = await this.readFileText()
+    if (!this.opts.secrets || !text.includes(SEALED)) return text
+    let raw: unknown
+    try {
+      raw = JSON.parse(text)
+    } catch {
+      return text
+    }
+    return `${JSON.stringify(await mapSecrets(raw, (value) => this.openValue(value).catch(() => value)), null, 2)}\n`
+  }
+
+  /** Validates and saves new configuration text, its secrets sealed, then reconnects every server. */
   async saveConfigText(text: string): Promise<void> {
     const config = parseMcpConfig(text)
     // Saved as the user wrote it would be nicer, but re-serialising guarantees the file parses next launch.
-    await writeJson(this.opts.configFile, JSON.parse(text))
+    await writeJson(this.opts.configFile, await mapSecrets(JSON.parse(text), (value) => this.sealValue(value)))
     this.lastLoadError = undefined
     await this.apply(config)
+  }
+
+  /** Seals what mcp.json holds unsealed. The file is written again only where there was something to seal. */
+  private async sealOnDisk(text: string): Promise<void> {
+    if (!this.opts.secrets) return
+    let plain = false
+    const sealed = await mapSecrets(JSON.parse(text), async (value) => {
+      if (value.startsWith(SEALED)) return value
+      plain = true
+      return this.sealValue(value)
+    })
+    if (plain) await writeJson(this.opts.configFile, sealed)
+  }
+
+  /** A value as it is kept on disk: sealed, unless it already is or there is nothing to seal with. */
+  private async sealValue(value: string): Promise<string> {
+    return !this.opts.secrets || value.startsWith(SEALED) ? value : SEALED + (await this.opts.secrets.seal(value))
+  }
+
+  /** A value as it is used. Throws for a sealed one that cannot be opened here. */
+  private async openValue(value: string): Promise<string> {
+    if (!value.startsWith(SEALED)) return value
+    if (!this.opts.secrets) throw new Error('Nothing was given to open sealed values with')
+    return this.opts.secrets.open(value.slice(SEALED.length))
+  }
+
+  /** The values of `env` or `headers` as they are used; one that cannot be read here fails the server, saying what to do. */
+  private async openAll(values: Record<string, string>): Promise<Record<string, string>> {
+    const opened: Record<string, string> = {}
+    for (const [key, value] of Object.entries(values)) {
+      try {
+        opened[key] = await this.openValue(value)
+      } catch {
+        throw new Error(`The value of "${key}" was saved on another computer or by another Windows user and cannot be read here. Enter it again in the MCP settings.`)
+      }
+    }
+    return opened
   }
 
   /** Drops every connection and connects again from the saved file. */
@@ -327,11 +424,13 @@ export class McpManager {
     }
 
     if (config.command) {
+      // An explicit env replaces the default one in the SDK, which would drop PATH.
+      const env = { ...getDefaultEnvironment(), ...(config.env ? await this.openAll(config.env) : {}) }
       const transport = new StdioClientTransport({
-        command: config.command,
+        // Looked up in PATH here: by name alone, a program of that name in `cwd` would be started instead (program-path.ts).
+        command: onPath(config.command, envValue(env, 'PATH'), process.env.PATHEXT),
         args: config.args,
-        // An explicit env replaces the default one in the SDK, which would drop PATH.
-        env: { ...getDefaultEnvironment(), ...config.env },
+        env,
         cwd: config.cwd,
         stderr: 'pipe'
       })
@@ -340,8 +439,10 @@ export class McpManager {
       return attempt(transport)
     }
 
+    // Headers mostly carry a token, which plain http would hand to every network on the way.
+    if (config.headers && Object.keys(config.headers).length > 0 && !sendsKeySafely(config.url as string)) throw new Error(HEADERS_NEED_HTTPS)
     const url = new URL(config.url as string)
-    const requestInit = config.headers ? { headers: config.headers } : undefined
+    const requestInit = config.headers ? { headers: await this.openAll(config.headers) } : undefined
     if (config.type === 'sse') return attempt(new SSEClientTransport(url, { requestInit }))
     try {
       return await attempt(new StreamableHTTPClientTransport(url, { requestInit }))

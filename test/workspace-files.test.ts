@@ -95,9 +95,14 @@ test('a picture in the workspace is handed to the page, and nothing else is', as
 
 test('a link opens what the system only shows, and points out what opening might run', () => {
   const file = (full: string): 'open' | 'reveal' => howToOpen({ full, directory: false })
-  for (const shown of ['sunset.png', 'Report.PDF', 'page.html', 'notes.md', 'data.csv', 'slides.pptx', 'clip.mp4']) assert.equal(file(shown), 'open', shown)
+  for (const shown of ['sunset.png', 'Report.PDF', 'notes.md', 'data.csv', 'clip.mp4']) assert.equal(file(shown), 'open', shown)
   for (const run of ['run.bat', 'setup.exe', 'build.js', 'tool.py', 'script.ps1', 'app.lnk', 'site.url', 'macro.xlsm', 'old.doc', 'Makefile', 'archive.zip']) {
     assert.equal(file(run), 'reveal', run)
+  }
+  // What Office or a browser opens is pointed out as well: the files of a cloned repository carry
+  // no mark of the web, so Office opens them outside Protected View, and a page or an SVG runs scripts.
+  for (const document of ['page.html', 'page.HTM', 'slides.pptx', 'letter.docx', 'sheet.xlsx', 'notes.rtf', 'text.odt', 'chart.svg']) {
+    assert.equal(file(document), 'reveal', document)
   }
   assert.equal(howToOpen({ full: path.join('out', 'charts'), directory: true }), 'open')
   // On a Mac a folder with an extension may be an application.

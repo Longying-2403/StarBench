@@ -3,6 +3,7 @@
 
 import { COMPACTION_DEFAULTS, CAP_MAX, CAP_MIN, isCap, readShare } from '../shared/compaction.ts'
 import type { CompactionSettings } from '../shared/compaction.ts'
+import { sendsKeySafely } from '../shared/key-address.ts'
 import { CUSTOM_PROMPT_LIMIT, PROVIDER_KINDS, PROVIDER_PRESETS, isLocalAddress, isReasoningEffort } from '../shared/types.ts'
 import type { ChatGptAccount, CustomPrompt, ProviderInfo, ProviderInput, ProviderKind, ReasoningEffort, Settings } from '../shared/types.ts'
 
@@ -54,6 +55,13 @@ const CHATGPT = { name: 'ChatGPT', kind: 'openai-responses' } as const
  * network asks for none.
  */
 export const needsNoKey = (provider: StoredProvider): boolean => provider.auth !== 'chatgpt' && isLocalAddress(provider.baseURL)
+
+/** Whether a key may be sent to an address: over https, or over plain http to this computer or a local-network IP address (shared/key-address.ts). */
+export { sendsKeySafely }
+
+/** Why no key is saved for, nor sent to, an address that plain http would expose it on. */
+export const KEY_NEEDS_HTTPS =
+  "An API key is only sent over https://, or over http:// to this computer or to a local-network IP address: a name could be answered for by another machine on the network. Change the address to https://, or write the server's IP address."
 
 /** Whether requests can be made with a provider as it is stored. */
 const usable = (provider: StoredProvider): boolean =>
@@ -293,8 +301,13 @@ export function saveProvider(settings: StoredSettings, input: ProviderInput, key
     // Where a sign-in talks to is decided by the sign-in, and it has no key: only its name and model change here.
     next.kind = existing.kind
     next.baseURL = existing.baseURL
-  } else if (key === null) delete next.encryptedKey
-  else if (key !== undefined) next.encryptedKey = key
+  } else {
+    if (key === null) delete next.encryptedKey
+    else if (key !== undefined) next.encryptedKey = key
+    // A key goes to the host it was given for and to no other: moved to another host, the provider is left without it.
+    else if (existing?.encryptedKey && hostOf(existing.baseURL) !== hostOf(baseURL)) delete next.encryptedKey
+    if (next.encryptedKey && !sendsKeySafely(baseURL)) throw new Error(KEY_NEEDS_HTTPS)
+  }
 
   const providers = existing ? settings.providers.map((p) => (p === existing ? next : p)) : [...settings.providers, next]
   // The first provider that can actually be used takes over from ones that cannot.

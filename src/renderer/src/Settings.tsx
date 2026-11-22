@@ -1,12 +1,14 @@
 import { Fragment, useCallback, useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
 import { CHATGPT_HELP_URL, LOCAL_SERVERS, PROVIDER_KINDS, PROVIDER_PRESETS, isLocalAddress } from '../../shared/types.ts'
+import { sendsKeySafely } from '../../shared/key-address.ts'
 import type { McpServerStatus, ModelChoice, ProviderInfo, ProviderKind, Settings, SkillInfo } from '../../shared/types.ts'
 import { ABOUT } from '../../shared/about.ts'
 import { CAP_MIN, SHARE_MAX, SHARE_MIN, isCap } from '../../shared/compaction.ts'
 import type { CompactionChange } from '../../shared/compaction.ts'
 import { formatTokens, readWindow } from '../../shared/stats.ts'
 import { ChatGptButton, ChatGptPane } from './ChatGptPane.tsx'
+import { Notice } from './Notice.tsx'
 import { errorText } from './util.ts'
 
 const api = window.harness
@@ -83,6 +85,12 @@ function ProviderForm({
 
   /** A model server on this computer or the local network: it asks for no key, and has its own needs. */
   const local = isLocalAddress(baseURL)
+  /** The address names another host than the stored key was given for: saving leaves that key behind (settings-model.ts). */
+  const movedHost = draft.hasApiKey && hostOf(baseURL.trim()) !== hostOf(draft.baseURL)
+  /** A key sent here would cross the network as it is, or reach whoever answers for a name: none is saved for it (shared/key-address.ts). */
+  const plainHttp = /^http:\/\//i.test(baseURL.trim()) && !sendsKeySafely(baseURL.trim())
+  /** A key goes along when the form is saved: one typed in, or the stored one where the host stays. */
+  const keyGoesAlong = Boolean(apiKey.trim()) || (draft.hasApiKey && !movedHost)
 
   // The service's own list makes the model field a pick list. It is a convenience: typing still
   // works, and a provider that cannot be asked yet simply has no list.
@@ -175,7 +183,7 @@ function ProviderForm({
           value={apiKey}
           autoFocus={!draft.hasApiKey && !isLocalAddress(draft.baseURL)}
           onChange={(e) => setApiKey(e.target.value)}
-          placeholder={draft.hasApiKey ? '已保存，留空则不修改' : local ? '本地服务一般不用填' : draft.keyHint}
+          placeholder={movedHost ? '地址换了主机，请重新填写' : draft.hasApiKey ? '已保存，留空则不修改' : local ? '本地服务一般不用填' : draft.keyHint}
         />
         <span className="hint">
           {local && !draft.hasApiKey
@@ -184,6 +192,13 @@ function ProviderForm({
           {planOffered && !draft.hasApiKey && !local && '没有 API Key？点"返回"，可以改用 ChatGPT 套餐登录。'}
         </span>
       </label>
+      {plainHttp && keyGoesAlong ? (
+        <Notice role="status">
+          这个地址用的是 http://，又不是本机或局域网的 IP 地址，所以不能带着 API Key 保存：Key 会明文经过网络，按名字找到的电脑也可能被同一网络里的其他电脑冒充。请改用 https://；局域网里的服务器可以改填它的 IP 地址。
+        </Notice>
+      ) : movedHost ? (
+        <Notice role="status">地址换到了另一个主机。之前保存的 Key 只会发往原来的主机，保存后会被清除；要继续使用，请在上面重新填写。</Notice>
+      ) : null}
       <label>
         模型
         <input value={model} onChange={(e) => setModel(e.target.value)} list="provider-models" placeholder="可以留空" />
@@ -456,7 +471,7 @@ function McpTab() {
     <div className="tab-body">
       <p className="hint">
         MCP 服务器给模型提供现成的工具。配置使用通用的 mcpServers 格式，可以直接粘贴其他应用里的配置。每次调用 MCP
-        工具前都会征求你的同意。环境变量和请求头里的密钥会以明文保存在本机的 mcp.json 里。
+        工具前都会征求你的同意。环境变量和请求头里的值会用系统凭据加密后保存在本机的 mcp.json 里，换电脑或换 Windows 账户后需要重新填写。
       </p>
       {/* The server list comes first: it is what people check, and it must not hide below the editor. */}
       <ul className="rows">

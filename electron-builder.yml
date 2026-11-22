@@ -20,6 +20,18 @@ extraResources:
 # No dependency contains native code, so there is nothing to rebuild for Electron.
 npmRebuild: false
 
+# Electron's fuses, switched in the packaged program itself. It cannot be started as a plain
+# Node.js (ELECTRON_RUN_AS_NODE), NODE_OPTIONS and --inspect do not reach its main process, and it
+# starts only from its own app.asar, whose contents are checked against what was packaged: nothing
+# else on the computer can borrow it to run code, or change the code it runs.
+electronFuses:
+  runAsNode: false
+  enableNodeOptionsEnvironmentVariable: false
+  enableNodeCliInspectArguments: false
+  enableEmbeddedAsarIntegrityValidation: true
+  onlyLoadAppFromAsar: true
+  enableCookieEncryption: true
+
 win:
   # Multi-size icon (16–256 px) rendered from build/icon.svg.
   icon: build/icon.ico

@@ -71,8 +71,11 @@ function AnswerLink({ href, title, children }: ComponentProps<'a'>) {
       </FileLink>
     )
   }
+  const address = href ? webAddress(href) : undefined
+  // The window has no status bar to show where a link leads, and the words of an answer can say
+  // anything: pointing at a link shows its whole address, to be judged before the press.
   return (
-    <a href={href && webAddress(href)} title={title} target="_blank" rel="noreferrer">
+    <a href={address} title={title && address ? `${title}\n${address}` : (address ?? title)} target="_blank" rel="noreferrer">
       {children}
     </a>
   )

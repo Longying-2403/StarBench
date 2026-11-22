@@ -115,6 +115,12 @@ export class SkillStore {
     if (relative.startsWith('..') || path.isAbsolute(relative)) {
       throw new Error(`File is outside the skill folder: ${file}`)
     }
+    // Followed through links as well, on both sides: a link in a skill folder may lead anywhere.
+    const [root, real] = await Promise.all([fs.realpath(skill.dir), fs.realpath(full)])
+    const realRelative = path.relative(root, real)
+    if (realRelative.startsWith('..') || path.isAbsolute(realRelative)) {
+      throw new Error(`File is outside the skill folder: ${file}`)
+    }
     const stat = await fs.stat(full)
     if (stat.size > MAX_FILE_BYTES) throw new Error(`File is too large to read (${stat.size} bytes)`)
     return fs.readFile(full, 'utf8')
