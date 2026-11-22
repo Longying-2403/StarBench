@@ -26,13 +26,15 @@ jobs:
       matrix:
         # The oldest version the README asks for, and the one StarBench is developed with.
         node: ['22.18.0', '26']
+    # Actions are pinned to a commit: a tag can later be moved to other code, a
+    # commit cannot. The comment after each one names its release.
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Nothing here pushes, so the token is not left in the checkout.
           persist-credentials: false
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ matrix.node }}
           cache: npm
