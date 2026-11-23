@@ -274,7 +274,8 @@ body {
   display: flex;
   border-radius: 6px;
 }
-.group-head:hover {
+.group-head:hover,
+.group-menu-open {
   background: var(--raised);
 }
 .group-toggle {
@@ -300,8 +301,32 @@ body {
   display: inline-flex;
   transition: transform 120ms ease;
 }
-.group-toggle[aria-expanded='false'] .group-chevron {
+.group-toggle[aria-expanded='false'] .group-chevron,
+.group-renaming[data-folded] .group-chevron {
   transform: rotate(-90deg);
+}
+/* The name of a workspace being typed anew, where it stands: the arrow and the folder before it stay. */
+.group-renaming {
+  padding-top: 3px;
+  padding-bottom: 3px;
+  cursor: default;
+}
+.group-rename {
+  flex: 1;
+  min-width: 0;
+  /* To the left by as much as its own edge takes, so that the letters stay where they were. */
+  margin-left: -7px;
+  padding: 2px 6px;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  outline: none;
+}
+.group-rename::placeholder {
+  color: var(--muted);
+  font-weight: 400;
 }
 .group-name {
   min-width: 0;
@@ -323,6 +348,7 @@ body {
   padding-left: 22px;
 }
 .group-add,
+.group-more,
 .session-more {
   flex-shrink: 0;
   display: inline-grid;
@@ -336,25 +362,59 @@ body {
   /* Shown on hover or keyboard focus; still there for screen readers. */
   opacity: 0;
 }
+/* Beside the button for a new chat, and narrower, so that the name of the workspace keeps its room. */
+.group-more {
+  width: 24px;
+}
 .group-head:hover .group-add,
+.group-head:hover .group-more,
 .group-add:focus-visible,
+.group-more:focus-visible,
+.group-menu-open .group-add,
+.group-menu-open .group-more,
 .session:hover .session-more,
 .session-more:focus-visible,
 .session-menu-open .session-more {
   opacity: 1;
 }
 .group-add:hover:not(:disabled),
+.group-more:hover:not(:disabled),
 .session-more:hover:not(:disabled) {
   color: var(--text);
 }
 .group-add:disabled,
+.group-more:disabled,
 .session-more:disabled {
   cursor: default;
 }
 
 .session {
+  position: relative;
   display: flex;
   border-radius: 6px;
+}
+/* A turn of the session is under way: a ring that turns, in the margin left of its mark. */
+.session-working {
+  position: absolute;
+  top: 50%;
+  left: -16px;
+  width: 11px;
+  height: 11px;
+  margin-top: -5.5px;
+  border: 2px solid color-mix(in srgb, var(--accent) 28%, transparent);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: session-turn 0.9s linear infinite;
+}
+@keyframes session-turn {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .session-working {
+    animation-duration: 4s;
+  }
 }
 .session:hover,
 .session-active,
@@ -376,7 +436,7 @@ body {
   text-align: left;
   cursor: pointer;
 }
-/* The name of a session and, under it, where a search found its words. */
+/* The name of a session and, under it, the workspace of an archived one and where a search found its words. */
 .session-words {
   min-width: 0;
   display: flex;
@@ -388,7 +448,8 @@ body {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.session-snippet {
+.session-snippet,
+.session-place {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -430,7 +491,7 @@ body {
   font-size: 13px;
   outline: none;
 }
-/* Placed in window coordinates by Sidebar.tsx, so the scrolling list cannot cut it off. */
+/* The menu of a session, and that of a workspace. Placed in window coordinates by Sidebar.tsx, so the scrolling list cannot cut it off. */
 .menu.session-menu {
   position: fixed;
   top: auto;
@@ -469,8 +530,16 @@ body {
 .session-menu .menu-item {
   font-size: 13px;
 }
-.menu-item-danger {
+/* Said of an entry of a menu, whose own colours come further down this file: hence the two names. */
+.menu-item.menu-item-danger {
   color: var(--danger);
+}
+/* The second press of "delete", the one that deletes: red all over, so that it is not pressed out of habit. */
+.menu-item.menu-item-confirm,
+.menu-item.menu-item-confirm:hover,
+.menu-item.menu-item-confirm:focus-visible {
+  background: var(--danger);
+  color: #fff;
 }
 @media (prefers-reduced-motion: reduce) {
   .group-chevron {
@@ -944,6 +1013,27 @@ textarea.plugin-input {
 }
 .tool-failed .tool-status {
   color: var(--danger);
+}
+/* A call that was kept from running, or stopped, by the person: their no, their stop, or the
+   conversation being set to view-only. Not a failure, so it looks like a notice (`.notice`) and
+   not like an error: the bar and the tint of a warning, and its mark before the words. */
+.tool-held {
+  border-color: color-mix(in srgb, var(--warn) 40%, transparent);
+  border-left: 5px solid var(--warn);
+  background: color-mix(in srgb, var(--warn) 12%, var(--panel));
+  /* The bar takes four pixels more than the border it replaces; the words stay in line with the cards around them. */
+  padding-left: 6px;
+}
+.tool-held .tool-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--warn);
+}
+.tool-held .tool-status svg {
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
 }
 /* On a call whose result is no longer sent to the model, to make room in its context. */
 .tool-cleared {
@@ -1522,6 +1612,46 @@ textarea.plugin-input {
 .effort-head .icon-btn[aria-pressed='true'] {
   color: var(--warn);
   background: color-mix(in srgb, var(--warn) 16%, transparent);
+}
+/* Two switches on the left (Fast Mode, web search) and room for two on the right, so the heading stays in the middle. */
+.effort-head.effort-head-switches {
+  grid-template-columns: 26px 26px minmax(0, 1fr) 26px 26px;
+}
+/* Web search is on: blue, where Fast Mode is amber. */
+.effort-head .web-toggle[aria-pressed='true'] {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+}
+.effort-web {
+  display: inline-flex;
+  flex-shrink: 0;
+  color: var(--accent);
+}
+.effort-web svg {
+  width: 13px;
+  height: 13px;
+}
+/* The pages a search of the service's own found: a short list of links, a little smaller than an answer. */
+.web-sources .markdown {
+  font-size: 13px;
+  line-height: 1.6;
+}
+.web-sources .markdown ol {
+  margin: 0;
+  padding-left: 22px;
+}
+/*
+ * Google's Search Suggestions under a search of Gemini's: one row, drawn by Google's own HTML in
+ * a frame that can say nothing of its height, so the frame has the row's: chips 32px high in 8px
+ * of padding, and a pixel for the outline around it.
+ */
+.search-suggestions {
+  display: block;
+  width: 100%;
+  height: 50px;
+  margin-top: -6px;
+  border: 0;
+  background: transparent;
 }
 .effort-model {
   min-width: 0;
@@ -2336,9 +2466,10 @@ textarea.plugin-input {
 .dialog-body > p {
   margin: 0;
 }
-/* The button for the person's own prompt, when there is one: it changes every answer, so it shows. */
-.composer-bar .btn[data-set] {
-  border-color: var(--accent);
+/* The button for the person's own prompt, when there is one: it changes every answer, so it shows.
+   The button of a plugin's panel that is open is marked the same way. (Further down, `.dock-tools`
+   says how the buttons under the message box look otherwise.) */
+.dock-tools .btn[data-set] {
   color: var(--accent);
 }
 /* The person's own instructions for a provider's models, with the app's own to look at underneath. */
@@ -2708,4 +2839,332 @@ a.btn {
   font-size: 12px;
   color: var(--muted);
   white-space: pre-wrap;
+}
+
+/* The lower left of the message box: what can be put with a message (PlusMenu.tsx), and what the
+   model may do in the conversation without asking (ModeMenu.tsx). */
+.plus-root {
+  position: relative;
+  flex-shrink: 0;
+  /* The card keeps more room at its left than at its right, for the text; the button sits a little into it. */
+  margin-left: -6px;
+}
+.plus-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+}
+.plus-trigger:hover:not(:disabled),
+.plus-trigger[aria-expanded='true'] {
+  border-color: var(--accent);
+  color: var(--text);
+}
+.plus-trigger:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+/* The menu of the "+" and, beside it, the list of skills: under the button while the box sits in
+   the middle of a new chat, above it once the box is at the bottom of the window. Never wider
+   than the chat column; the list of skills is what gives way. */
+.plus-pop {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 10;
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+  width: max-content;
+  max-width: calc(100vw - var(--sidebar) - var(--plugin-panel, 0px) - 48px);
+}
+.plus-pop[data-side='up'] {
+  top: auto;
+  bottom: calc(100% + 6px);
+  align-items: flex-end;
+}
+.plus-pop .menu {
+  position: static;
+  min-width: 0;
+}
+.plus-menu {
+  flex-shrink: 0;
+  width: 172px;
+}
+.plus-sub {
+  flex-shrink: 1;
+  width: 300px;
+}
+.plus-sub .menu-list {
+  max-height: min(280px, calc(var(--popup-room, 280px) - 10px));
+}
+/* A description is a sentence, not a path: it may take two lines. */
+.plus-sub .menu-item-path {
+  display: -webkit-box;
+  white-space: normal;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+/* The text of an entry that has something after it, at the far end. */
+.menu-item-grow {
+  flex: 1;
+  min-width: 0;
+}
+/* The entry whose list is open beside the menu. */
+.menu-item[data-open] {
+  background: var(--raised);
+}
+
+.mode-root {
+  position: relative;
+  display: inline-flex;
+  min-width: 0;
+}
+.mode-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  height: 28px;
+  padding: 0 6px 0 8px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.mode-trigger:hover,
+.mode-trigger[aria-expanded='true'] {
+  background: var(--raised);
+  color: var(--text);
+}
+.mode-trigger svg {
+  flex-shrink: 0;
+}
+.mode-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Nothing is asked about any more: red, so that it is not left on unnoticed. */
+.mode-trigger[data-mode='full'],
+.mode-trigger[data-mode='full']:hover,
+.mode-trigger[data-mode='full'][aria-expanded='true'] {
+  color: var(--danger);
+}
+.mode-trigger[data-mode='full']:hover,
+.mode-trigger[data-mode='full'][aria-expanded='true'] {
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+}
+/* Wide enough for the longest of the four descriptions on one line, with the mark of the mode in force beside it. */
+.mode-menu {
+  width: min(352px, calc(100vw - var(--sidebar) - 60px));
+}
+/* An entry is two lines; its drawing stands by the first. */
+.mode-menu .menu-item {
+  align-items: flex-start;
+}
+.mode-menu .menu-item svg {
+  margin-top: 3px;
+}
+.mode-menu .menu-item-path {
+  white-space: normal;
+}
+.mode-menu .menu-item-danger .menu-item-path {
+  color: color-mix(in srgb, var(--danger) 75%, var(--muted));
+}
+
+/* The files put with a message (Attachments.tsx): above the text in the message box, where each
+   can be taken off again, and in the message once it was sent. */
+.attach-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  cursor: default;
+}
+.attach {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--raised);
+  color: var(--text);
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+.attach-text {
+  height: 32px;
+  padding: 0 6px 0 8px;
+}
+.attach-text svg {
+  flex-shrink: 0;
+  color: var(--muted);
+}
+.attach-name {
+  max-width: 16em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.attach-image img {
+  display: block;
+  width: 48px;
+  height: 48px;
+  border-radius: 7px;
+  object-fit: cover;
+}
+.attach-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+.attach-remove:hover {
+  background: var(--border);
+  color: var(--text);
+}
+/* On a picture it sits on the corner. */
+.attach-image .attach-remove {
+  position: absolute;
+  top: -7px;
+  right: -7px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+}
+.attach-image .attach-remove:hover {
+  background: var(--raised);
+}
+/* In a message that was sent, a picture is large enough to be looked at. The message keeps line
+   breaks as they were typed; the row is not text. */
+.attach-row-sent {
+  margin-bottom: 6px;
+  white-space: normal;
+}
+.attach-row-sent:last-child {
+  margin-bottom: 0;
+}
+.attach-row-sent .attach {
+  background: var(--panel);
+}
+.attach-row-sent .attach-text {
+  padding-right: 8px;
+}
+/* The frame is held to a width and the picture to the frame, so that the frame is never wider than the picture in it. */
+.attach-row-sent .attach-image {
+  max-width: min(260px, 100%);
+}
+.attach-row-sent .attach-image img {
+  width: auto;
+  height: auto;
+  max-width: 100%;
+  max-height: 200px;
+  object-fit: contain;
+}
+/* Files held over the box, about to be dropped on it. */
+.composer[data-dropping] {
+  border-style: dashed;
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, var(--panel));
+}
+
+/* The row under the message box. At its left the buttons that are not about the message being
+   written: the person's own prompt, and what plugins have there. In the middle, under the box,
+   what the conversation has cost (`.status-row`): in the middle for as long as the buttons leave
+   it there, and beside them once they need the room. */
+.dock-row {
+  display: grid;
+  grid-template-columns: minmax(max-content, 1fr) minmax(0, auto) minmax(0, 1fr);
+  align-items: center;
+  gap: 4px 8px;
+  min-height: 24px;
+  /* Closer to the box than the gap of the dock puts it. */
+  margin-top: -2px;
+}
+.dock-row .status-row {
+  margin-top: 0;
+}
+.dock-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 4px;
+  min-width: 0;
+}
+.dock-tools .plugin-row {
+  gap: 2px 4px;
+}
+/* Quiet, like the numbers beside them: a drawing and a word, with a background only under the pointer. */
+.dock-tools .btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  padding: 0 8px;
+  border-color: transparent;
+  background: none;
+  color: var(--muted);
+  font-size: 12px;
+}
+.dock-tools .btn svg {
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+}
+.dock-tools .btn:hover:not(:disabled),
+.dock-tools .btn[aria-pressed='true'] {
+  border-color: transparent;
+  background: var(--raised);
+  color: var(--text);
+}
+.dock-tools .btn[data-set]:hover:not(:disabled),
+.dock-tools .btn[data-set][aria-pressed='true'] {
+  color: var(--accent);
+}
+/* The title a plugin chose for its panel is what gives way in its button, not the drawing before it. */
+.plugin-panel-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The folder a new chat asks about (TrustDialog.tsx), written out whole. */
+.trust-path {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  font-family: var(--mono);
+  font-size: 12.5px;
+  overflow-wrap: anywhere;
+}
+.trust-path svg {
+  flex-shrink: 0;
+  margin-top: 3px;
+  color: var(--muted);
 }

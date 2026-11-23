@@ -423,17 +423,19 @@ test('the real Anthropic API gets the newer request fields, and only the models 
     onReasoning: () => {}
   })
   const opus = anthropicParams(request('claude-opus-5-5', 'max'), null)
-  assert.deepEqual([opus.fallbacks, opus.betas], ['default', ['server-side-fallback-2026-07-01']])
+  assert.deepEqual([opus.fallbacks, opus.betas], ['default', ['server-side-fallback-2026-07-01', 'thinking-binding-controls-2026-08-01']])
+  // A thinking block whose conversation changed since is left out instead of failing the request.
+  assert.deepEqual(opus.thinking, { type: 'adaptive', display: 'summarized', block_binding: { prefix_mismatch_behavior: 'drop_block' } })
   assert.deepEqual(opus.output_config, { effort: 'max' })
   assert.deepEqual(opus.tools, [{ name: 'save', description: 'saves', input_schema: { properties: { path: { type: 'string' } }, type: 'object' }, eager_input_streaming: true }])
 
   // No server-side fallback exists for this model; sending the parameter would be wrong.
   const haiku = anthropicParams(request('claude-haiku-5-5'), null)
-  assert.deepEqual([haiku.fallbacks, haiku.betas, haiku.output_config], [undefined, undefined, undefined])
+  assert.deepEqual([haiku.fallbacks, haiku.betas, haiku.output_config], [undefined, ['thinking-binding-controls-2026-08-01'], undefined])
 
   // What the service says about a model decides thinking and effort.
   const old = anthropicParams(request('claude-haiku-4-5', 'high'), { name: 'Old', maxTokens: 64_000, contextWindow: 200_000, adaptive: false, efforts: [] })
-  assert.deepEqual([old.thinking, old.output_config], [undefined, undefined])
+  assert.deepEqual([old.thinking, old.output_config, old.betas], [undefined, undefined, undefined])
   // A level Claude does not have is not sent.
   assert.equal(anthropicParams(request('claude-opus-5-5', 'none'), null).output_config, undefined)
 })

@@ -4,10 +4,13 @@
 
 import { COMPACTION_DEFAULTS, compactFrom } from '../shared/compaction.ts'
 import type { CompactionSettings } from '../shared/compaction.ts'
+import { DEFAULT_PERMISSION_MODE, VIEW_ONLY_RESULT, rulingFor } from '../shared/permissions.ts'
+import type { PermissionMode, Ruling } from '../shared/permissions.ts'
 import { isLocalAddress } from '../shared/types.ts'
 import type { AgentEvent, CompactionMark, CompactionReport, CustomPrompt, PermissionDecision, StoredMessage, ToolCall } from '../shared/types.ts'
 import { STEP_SHARE, TARGET_SHARE, carriedTokens, compact, fitTokens, saysTooLong, sendable, storedWeight, windowSaid } from './compaction.ts'
 import { languageOf } from './language.ts'
+import { ImagesRefused } from './providers/attachments.ts'
 import { adapterFor } from './providers/index.ts'
 import type { Connection, ModelReply, ModelRequest, ProviderAdapter } from './providers/index.ts'
 import { ServiceError, ToolsRefused } from './providers/types.ts'
@@ -49,11 +52,17 @@ export interface TurnOptions {
   conversation?: string
   signal: AbortSignal
   /** Read on every model request, so tools added mid-turn are picked up at the next step. */
-  tools: Pick<ToolRegistry, 'specs' | 'needsPermission' | 'execute'> & Partial<Pick<ToolRegistry, 'list'>>
+  tools: Pick<ToolRegistry, 'specs' | 'needsPermission' | 'execute'> & Partial<Pick<ToolRegistry, 'list' | 'accessOf'>>
   /** Asked on every model request for the fields plugins add to it, so a changed setting counts from the next step. */
   sampling?: Pick<SamplingRegistry, 'paramsFor'>
   /** Tool names the user chose to always allow; owned by the caller so it outlives one turn. */
   alwaysAllowed: Set<string>
+  /**
+   * What the model may do in this conversation without asking (shared/permissions.ts). Asked
+   * before every tool call, so that a change the person makes while the turn runs counts from
+   * the next call. Without it, every tool that asks is asked about.
+   */
+  permissionMode?(): PermissionMode
   emit(event: AgentEvent): void
   /** Asks the user whether a tool call may run. */
   requestPermission(call: ToolCall): Promise<PermissionDecision>
@@ -71,6 +80,11 @@ export interface TurnOptions {
    * turns can ask for whole replies from the start (`connection.wholeReplies`).
    */
   onStreamRefused?(): void
+  /**
+   * Called when the model turned out to take no pictures and the turn went on with the pictures
+   * told in words, so that later turns can start that way (`connection.noImages`).
+   */
+  onImagesRefused?(): void
   /**
    * Where a record of each request and its reply goes while someone watches (trace.ts). `active`
    * is read before every request, so that watching can begin and end in the middle of a turn;
@@ -110,6 +124,8 @@ export interface PromptParts {
   extra?: string
   /** The language the person writes in, where their writing shows it (`languageOf`): the model is asked to think in it. */
   language?: string
+  /** The model can search the web with its service's own tool (`Connection.webSearch`). */
+  webSearch?: boolean
 }
 
 /**
@@ -152,6 +168,17 @@ function ownInstructions(parts: PromptParts): string {
   const model = parts.model ? [`Model in use: ${parts.model.id}${parts.model.provider ? ` (provider: ${parts.model.provider})` : ''}`] : []
   // Last, where it was when real models were tried with it.
   const thinking = parts.language ? ['', thinkingIn(parts.language)] : []
+  // The search tool is the service's own and comes with the service's own instructions; this says
+  // when to reach for it here, and that it is there at all. Told only that it could search with
+  // its service's own tools, deepseek-flash answered in 9 tries of 24 that it had no web access
+  // (2026-11-24, asked for the latest Electron release, at high and low effort). With the search
+  // told apart from the app's tools and the access said outright, it searched in all 16; questions
+  // it searched for anyway went on as before.
+  const web = parts.webSearch
+    ? [
+        '- Web search is on in this conversation. Besides this app\'s tools for files and commands, the service you run on gives you its own tools to search the web and read pages, so you do have internet access. Use them whenever the answer may have changed since your training or you are not sure, and name the pages you relied on.'
+      ]
+    : []
   return [
     'You are working as a coding agent inside StarBench, a desktop app on the user\'s computer.',
     'You help with software tasks by reading and editing files and running commands through the provided tools.',
@@ -165,6 +192,7 @@ function ownInstructions(parts: PromptParts): string {
     '- Prefer edit_file for changes to existing files; use write_file for new files.',
     '- The user approves file changes and commands individually. If a request is denied, do not retry it unchanged; adjust or ask.',
     '- When the work is done, reply with a short summary of what changed. Answer in the language the user writes in.',
+    ...web,
     `- ${askedWho(parts)}`,
     ...thinking
   ].join('\n')
@@ -204,7 +232,12 @@ const DENIED = 'The user denied this tool call.'
 /** Produces the result of one tool call. Always resolves: every call needs a result, or the next request is rejected. */
 async function runToolCall(call: ToolCall, opts: TurnOptions): Promise<string> {
   if (opts.signal.aborted) return CANCELLED
-  if (opts.tools.needsPermission(call.name) && !opts.alwaysAllowed.has(call.name)) {
+  // What the conversation is set to says whether the call is run, asked about, or not run at all.
+  const access = opts.tools.accessOf?.(call.name) ?? (opts.tools.needsPermission(call.name) ? 'other' : 'read')
+  const ruling: Ruling = rulingFor(opts.permissionMode?.() ?? DEFAULT_PERMISSION_MODE, access)
+  if (ruling === 'refuse') return VIEW_ONLY_RESULT
+  if (ruling === 'ask' && !opts.alwaysAllowed.has(call.name)) {
+    // The answer to a question that was asked stands, whatever the setting was changed to meanwhile.
     const decision = await opts.requestPermission(call)
     // A stop while the prompt was open ends the wait; that is a cancellation, not a refusal.
     if (opts.signal.aborted) return CANCELLED
@@ -320,7 +353,8 @@ function requestOf(talk: Talk): ModelRequest {
       model: { id: connection.model, provider: connection.providerName },
       custom: connection.prompt,
       extra: opts.systemExtra,
-      language: talk.language
+      language: talk.language,
+      webSearch: connection.webSearch
     }),
     // What is kept, less what was compacted away.
     messages: sendable(opts.messages),
@@ -331,6 +365,7 @@ function requestOf(talk: Talk): ModelRequest {
     onText: (text) => opts.emit({ type: 'text_delta', text }),
     onReasoning: (text) => opts.emit({ type: 'reasoning_delta', text }),
     onRewrite: (shown) => opts.emit({ type: 'assistant_rewrite', ...shown }),
+    onWebActivity: (activity) => opts.emit({ type: 'web_activity', activity }),
     onFastRefused: () => {
       // Not asked again for the rest of the turn: it would be refused at every step.
       talk.connection = { ...talk.connection, fast: false }
@@ -445,7 +480,8 @@ async function makeRoom(talk: Talk, why: Why, refusal?: unknown): Promise<Compac
     },
     summarize: async (system, record) => {
       // Not at the price of faster answers: nobody is waiting to read these words as they come.
-      const connection: Connection = { ...talk.connection, fast: false }
+      // Nor with a search: the summary is of what was said, and nothing on the web belongs in it.
+      const connection: Connection = { ...talk.connection, fast: false, webSearch: false }
       const watch = opts.trace?.active ? watchExchange(connection) : undefined
       const meter = opts.stats ? meterStep(connection) : undefined
       // Without the name of the conversation: this is a request about it, not one of it, and
@@ -549,7 +585,25 @@ export async function runTurn(opts: TurnOptions): Promise<void> {
       const watched = watch ? watch.over(requestOf(talk)) : requestOf(talk)
       return meter ? meter.over(watched) : watched
     }
+    /**
+     * The request, made again where the model turned out to take no pictures: with those the
+     * person attached told in words instead (`Connection.noImages`). The person is told, with
+     * the service's own words for looking it up.
+     */
+    const withoutImages = (err: unknown): Promise<ModelReply> => {
+      if (!(err instanceof ImagesRefused) || talk.connection.noImages) throw err
+      talk.connection = { ...talk.connection, noImages: true }
+      opts.emit({
+        type: 'notice',
+        code: 'images-refused',
+        message: 'This model does not take pictures, so the pictures were left out and it was told their file names instead.',
+        detail: err.message
+      })
+      opts.onImagesRefused?.()
+      return ask(talk.adapter, next())
+    }
     const reply = await ask(talk.adapter, next())
+      .catch(withoutImages)
       .catch((err: unknown) => {
         if (!(err instanceof ToolsRefused) || talk.connection.textTools) throw err
         // The server takes no tool definitions. That says little of the model: many a model
@@ -566,7 +620,8 @@ export async function runTurn(opts: TurnOptions): Promise<void> {
           detail: err.message
         })
         opts.onToolsRefused?.()
-        return ask(talk.adapter, next())
+        // A server that takes no tools may take no pictures either, and says so only now.
+        return ask(talk.adapter, next()).catch(withoutImages)
       })
       .catch((err: unknown) => {
         if (watch) opts.trace?.record(watch.failed(err))
@@ -612,7 +667,7 @@ export async function runTurn(opts: TurnOptions): Promise<void> {
       // The same, found out while the reply was being written: what came of it is dropped, and the page shows the conversation anew.
       if (reply.tooLong && !opts.signal.aborted && (await makeRoom(talk, 'refused')).done) reply = await exchange()
       const { message: assistant, stopped } = reply
-      if (assistant.content || assistant.tool_calls || assistant.reasoning_content) stored.push(assistant)
+      if (assistant.content || assistant.tool_calls || assistant.reasoning_content || assistant.web?.length) stored.push(assistant)
       opts.emit({ type: 'assistant_done' })
       opts.checkpoint()
       // The service declined, or cut the reply short: what came is kept, nothing in it is run.

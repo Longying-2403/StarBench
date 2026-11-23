@@ -6,8 +6,10 @@ import { app, safeStorage } from 'electron'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import type { CompactionSettings } from '../shared/compaction.ts'
+import { DEFAULT_PERMISSION_MODE } from '../shared/permissions.ts'
+import type { PermissionMode } from '../shared/permissions.ts'
 import type { ChatGptAccount, ProviderInput, ReasoningEffort, Session, SessionHit, SessionIcon, SessionSummary, Settings } from '../shared/types.ts'
-import { isReasoningEffort, isSessionIcon, offersFastMode } from '../shared/types.ts'
+import { isReasoningEffort, isSessionIcon, offersFastMode, searchWorksAt, webSearchService } from '../shared/types.ts'
 import { OPENAI, canUsePlan, clientIsGone, newHostId, readRecord, refreshed, renewalDue, revoke, tokensAreDead } from './chatgpt/oauth.ts'
 import type { AuthService, LoginRecord } from './chatgpt/oauth.ts'
 import { readJson, writeJson } from './json-file.ts'
@@ -17,7 +19,7 @@ import { searchSessions as searchSessionsIn, searchableOf } from './session-sear
 import type { Searchable } from './session-search.ts'
 import * as model from './settings-model.ts'
 import type { StoredProvider, StoredSettings } from './settings-model.ts'
-import { MAX_RECENT_FOLDERS, mergeFolders } from './workspaces.ts'
+import { MAX_RECENT_FOLDERS, folderKey, mergeFolders } from './workspaces.ts'
 
 const settingsFile = (): string => path.join(app.getPath('userData'), 'settings.json')
 const sessionsDir = (): string => path.join(app.getPath('userData'), 'sessions')
@@ -93,7 +95,28 @@ function mutate(apply: (settings: StoredSettings) => StoredSettings | Promise<St
 }
 
 export async function getSettings(): Promise<Settings> {
+  await seedTrust()
   return visible(await loadStored())
+}
+
+let trustSeeded: Promise<void> | undefined
+
+/**
+ * Sees to the folders from before the app asked whether a model may read a folder. Each of them
+ * was chosen by the person for exactly that, so they count as trusted: the remembered ones, and
+ * those the saved sessions ran in. Done once, the first time the settings are asked for; from
+ * then on the list in the settings is the one that counts.
+ */
+function seedTrust(): Promise<void> {
+  trustSeeded ??= (async () => {
+    if ((await loadStored()).trustedFolders) return
+    const used = (await listSessions()).map((s) => s.workspace)
+    await mutate((settings) => (settings.trustedFolders ? settings : model.trustFolders(settings, [...(settings.recentWorkspaces ?? []), ...used], onWindows)))
+  })().catch((err) => {
+    // Not a reason to go without settings: every folder is then asked about, which is the careful side.
+    console.error('[store] could not write down the folders in use as trusted:', err)
+  })
+  return trustSeeded
 }
 
 async function encrypt(secret: string, what: string): Promise<string> {
@@ -156,6 +179,11 @@ export function setFastMode(on: unknown): Promise<Settings> {
   return mutate((settings) => model.setFast(settings, on === true))
 }
 
+/** Applies to the active provider's current model. `on` arrives over IPC; anything but `true` turns it off. */
+export function setWebSearch(on: unknown): Promise<Settings> {
+  return mutate((settings) => model.setSearch(settings, on === true))
+}
+
 /** Says how many tokens the context of a model holds, or with null takes that back. The input arrives over IPC. */
 export function setContextWindow(providerId: unknown, modelId: unknown, tokens: unknown): Promise<Settings> {
   return mutate((settings) => model.setWindow(settings, String(providerId), String(modelId), tokens === null ? null : Number(tokens)))
@@ -196,13 +224,46 @@ export async function rememberWorkspace(dir: string): Promise<void> {
   await mutate((settings) => ({ ...settings, recentWorkspaces: mergeFolders([[dir], settings.recentWorkspaces ?? []]) }))
 }
 
+/** How folders are told apart on this computer (`folderKey`). */
+const onWindows = process.platform === 'win32'
+
 /**
- * The folders to offer when picking a workspace: the remembered ones, then those of saved
- * sessions, most recent first. Folders that no longer exist are left out.
+ * Writes down the person's yes to a folder: a model may read it. The folder moves to the front
+ * of the remembered ones as well. It arrives over IPC, so it has to be a whole path.
+ */
+export function trustFolder(folder: unknown): Promise<Settings> {
+  const dir = typeof folder === 'string' ? folder.trim() : ''
+  if (!dir || !path.isAbsolute(dir)) return Promise.reject(new Error('No folder was named.'))
+  return mutate((settings) => ({
+    ...model.trustFolders(settings, [dir], onWindows),
+    recentWorkspaces: mergeFolders([[dir], settings.recentWorkspaces ?? []])
+  }))
+}
+
+/** Gives a workspace a name of the person's own, or with an empty one takes it back. The name arrives over IPC; the settings model checks it. */
+export function nameWorkspace(folder: string, name: unknown): Promise<Settings> {
+  return mutate((settings) => model.nameWorkspace(settings, folder, name, onWindows))
+}
+
+/** Stops offering a folder as a workspace, and forgets the name it was given. */
+export function forgetWorkspace(folder: string): Promise<Settings> {
+  return mutate((settings) => model.forgetWorkspace(settings, folder, onWindows))
+}
+
+/** The saved sessions that ran in a folder, archived ones among them, most recent first. */
+export async function sessionsIn(folder: string): Promise<SessionSummary[]> {
+  const key = folderKey(folder)
+  return (await listSessions()).filter((s) => folderKey(s.workspace) === key)
+}
+
+/**
+ * The folders to offer when picking a workspace: the remembered ones, then those of the saved
+ * sessions that are not archived, most recent first. Folders that no longer exist are left out.
  */
 export async function listWorkspaces(): Promise<string[]> {
   const stored = await loadStored()
-  const fromSessions = (await listSessions()).map((s) => s.workspace)
+  // What was put away does not bring its folder back by itself: a workspace taken out of the list stays out.
+  const fromSessions = (await listSessions()).filter((s) => !s.archived).map((s) => s.workspace)
   const existing: string[] = []
   for (const dir of mergeFolders([stored.recentWorkspaces ?? [], fromSessions], Infinity)) {
     if (existing.length >= MAX_RECENT_FOLDERS) break
@@ -325,7 +386,9 @@ export async function getConnection(providerId?: string): Promise<Connection | n
     reasoningEffort: model.effortOf(provider),
     ...(provider.prompt ? { prompt: provider.prompt } : {}),
     // Asked for only where it exists: a service that does not know the request field would refuse the request.
-    ...(model.fastOf(provider) && offersFastMode(provider) ? { fast: true } : {})
+    ...(model.fastOf(provider) && offersFastMode(provider) ? { fast: true } : {}),
+    // Likewise: the search tool goes only to a service that has it, and while the thinking allows it (DeepSeek's).
+    ...(model.searchOf(provider) && searchWorksAt(webSearchService(provider), model.effortOf(provider)) ? { webSearch: true } : {})
   }
   if (provider.auth === 'chatgpt') {
     const record = await loginOf(provider)
@@ -400,22 +463,45 @@ export function signOut(providerId: string): Promise<{ settings: Settings; revok
   })
 }
 
+/**
+ * What the list shows of each saved session, by file, for as long as the file is as it was. A
+ * session can hold pictures the person attached, and the list is asked for at every turn of
+ * every conversation: reading every file whole each time would be felt.
+ */
+const listed = new Map<string, { stamp: string; summary: SessionSummary | null }>()
+
 export async function listSessions(): Promise<SessionSummary[]> {
-  const names = await fs.readdir(sessionsDir()).catch(() => [] as string[])
-  const sessions = await Promise.all(
-    names.filter((n) => n.endsWith('.json')).map((n) => readJson<Session>(path.join(sessionsDir(), n)))
+  const names = (await fs.readdir(sessionsDir()).catch(() => [] as string[])).filter((n) => n.endsWith('.json'))
+  const summaries = await Promise.all(
+    names.map(async (name): Promise<SessionSummary | null> => {
+      const file = path.join(sessionsDir(), name)
+      const stat = await fs.stat(file).catch(() => null)
+      if (!stat) return null
+      const stamp = `${stat.mtimeMs}:${stat.size}`
+      const kept = listed.get(name)
+      if (kept?.stamp === stamp) return kept.summary
+      const session = await readJson<Session>(file)
+      const summary: SessionSummary | null = session
+        ? {
+            id: session.id,
+            title: session.title,
+            workspace: session.workspace,
+            updatedAt: session.updatedAt,
+            ...(session.archived ? { archived: session.archived } : {}),
+            // A file can hold a name this version does not know; the list then shows no mark.
+            ...(isSessionIcon(session.icon) ? { icon: session.icon } : {})
+          }
+        : null
+      listed.set(name, { stamp, summary })
+      return summary
+    })
   )
-  return sessions
-    .filter((s): s is Session => s !== null)
-    .map(({ id, title, workspace, updatedAt, archived, icon }) => ({
-      id,
-      title,
-      workspace,
-      updatedAt,
-      ...(archived ? { archived } : {}),
-      // A file can hold a name this version does not know; the list then shows no mark.
-      ...(isSessionIcon(icon) ? { icon } : {})
-    }))
+  // What is kept of a session that was deleted goes with it.
+  for (const name of [...listed.keys()]) if (!names.includes(name)) listed.delete(name)
+  return summaries
+    .filter((s): s is SessionSummary => s !== null)
+    // Each caller gets its own: what one of them adds to an entry is not there for the next.
+    .map((s) => ({ ...s }))
     .sort((a, b) => b.updatedAt - a.updatedAt)
 }
 
@@ -460,10 +546,13 @@ export function saveSession(session: Session): Promise<void> {
 }
 
 /**
- * Changes the name, the archived mark or the icon of a saved session; a null icon takes the icon
- * away. `updatedAt` stays, so the list keeps its order.
+ * Changes the name, the archived mark, the icon or the permission mode of a saved session; a null
+ * icon takes the icon away. `updatedAt` stays, so the list keeps its order.
  */
-export async function updateSession(id: string, change: { title?: string; archived?: boolean; icon?: SessionIcon | null }): Promise<void> {
+export async function updateSession(
+  id: string,
+  change: { title?: string; archived?: boolean; icon?: SessionIcon | null; permissionMode?: PermissionMode }
+): Promise<void> {
   const session = await loadSession(id)
   if (!session) throw new Error('This session no longer exists.')
   if (change.title !== undefined) session.title = change.title
@@ -471,6 +560,9 @@ export async function updateSession(id: string, change: { title?: string; archiv
   if (change.archived === false) delete session.archived
   if (change.icon === null) delete session.icon
   else if (change.icon !== undefined) session.icon = change.icon
+  // The mode a conversation starts with is not written down.
+  if (change.permissionMode === DEFAULT_PERMISSION_MODE) delete session.permissionMode
+  else if (change.permissionMode !== undefined) session.permissionMode = change.permissionMode
   await saveSession(session)
 }
 

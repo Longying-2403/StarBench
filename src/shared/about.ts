@@ -14,7 +14,7 @@ export const ABOUT = {
    * written with a hyphen, as in the names of the released files. It is counted by the author
    * and written here by hand; nothing works it out.
    */
-  revision: 9,
+  revision: 10,
   repo: { label: 'github.com/Longying-2403/StarBench', url: 'https://github.com/Longying-2403/StarBench' },
   issues: { label: 'GitHub Issues', url: 'https://github.com/Longying-2403/StarBench/issues' },
   /** Who makes it, each with what they are to the project and where to find them. */

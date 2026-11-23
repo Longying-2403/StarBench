@@ -2,8 +2,11 @@
 
 import Anthropic from '@anthropic-ai/sdk'
 import type { ModelChoice, ModelInfo, ToolCall } from '../../shared/types.ts'
-import { isErrorResult, newReply, replayOf, userText, withToolResults } from './history.ts'
+import type { WebActivity } from '../../shared/types.ts'
+import { ImagesRefused, carriesImages, refusesImages, userImages } from './attachments.ts'
+import { isErrorResult, newReply, replayOf, searchNote, userText, withSearchNote, withToolResults } from './history.ts'
 import type { AssistantMessage, Connection, ModelReply, ModelRequest, ProviderAdapter } from './types.ts'
+import { CLAUDE_SEARCH_BLOCKS, WebLog, claudeCall, claudeResult } from './web-search.ts'
 
 type MessageParam = Anthropic.Beta.BetaMessageParam
 type BlockParam = Anthropic.Beta.BetaContentBlockParam
@@ -26,6 +29,28 @@ type Effort = (typeof EFFORTS)[number]
  */
 const WITH_FALLBACK = new Set(['claude-fable-5-2', 'claude-fable-5-1', 'claude-opus-5-5', 'claude-opus-5', 'claude-sonnet-5-5'])
 const FALLBACK_BETA = 'server-side-fallback-2026-07-01'
+
+/**
+ * Claude's own web search and page reading, which run on Anthropic's side. These versions are
+ * called by the model directly; the later ones go through code execution first by default, which
+ * took 18 s and 37k tokens for a question the direct search answered in 4 s (tried 2026-11-23).
+ * Each step may search and read this many times; a page read gives the model at most this many
+ * tokens of the page. Searches cost $10 per 1,000; reading costs only the tokens it adds.
+ * Reading takes only addresses that are already in the conversation: the service sees to that.
+ */
+/**
+ * What Claude is to do with a thinking block it is sent back when the conversation before the
+ * block is no longer the one it was written in (other instructions, other tools, earlier messages
+ * changed): leave the block out and go on. Without this, Claude Opus 5.5 refused the next request
+ * once web search had been switched off, which changes the tools, the instructions and the
+ * earlier replies (tried 2026-11-23). Haiku 5.5 takes the setting too.
+ */
+const BINDING_BETA = 'thinking-binding-controls-2026-08-01'
+
+const SERVER_TOOLS: Anthropic.Beta.BetaToolUnion[] = [
+  { type: 'web_search_20250305', name: 'web_search', max_uses: 8 },
+  { type: 'web_fetch_20250910', name: 'web_fetch', max_uses: 8, max_content_tokens: 40_000 }
+]
 
 const baseURLOf = (connection: Connection): string => connection.baseURL.trim().replace(/\/+$/, '') || OFFICIAL_API
 /** A gateway in front of the API may not know the newer request fields, so those go to the real API only. */
@@ -90,7 +115,28 @@ function parseInput(raw: string): Record<string, unknown> {
   }
 }
 
-function toMessages(request: ModelRequest, withFallback: boolean): MessageParam[] {
+/**
+ * A block of a reply of Claude's as it goes back to a request without the search tools: a
+ * search becomes a note of what it looked for and found (`searchNote`), its results are left
+ * out, and the text loses the citations that pointed into them. Sent as they were, the model
+ * went on writing its citations into the answer as text, like `(cite index="4-1">…</cite>`; sent
+ * without a word of the search, it took its own sources back as made up (both tried 2026-11-23).
+ * Thinking blocks are not touched.
+ */
+function withoutSearch(block: BlockParam, web: readonly WebActivity[]): BlockParam[] {
+  if (block.type === 'server_tool_use') {
+    const searched = web.find((a) => a.id === block.id)
+    return searched ? [{ type: 'text', text: searchNote(searched) }] : []
+  }
+  if (CLAUDE_SEARCH_BLOCKS.has(block.type)) return []
+  if (block.type === 'text' && block.citations) {
+    const { citations: _gone, ...rest } = block
+    return [rest]
+  }
+  return [block]
+}
+
+function toMessages(request: ModelRequest, withFallback: boolean, withSearch: boolean): MessageParam[] {
   const out: MessageParam[] = []
   /** The user message the results of one step's tool calls are collected in: they must arrive together. */
   let results: ResultBlock[] | null = null
@@ -110,7 +156,14 @@ function toMessages(request: ModelRequest, withFallback: boolean): MessageParam[
     }
     results = null
     if (message.role === 'user') {
-      out.push({ role: 'user', content: userText(message) })
+      const text = userText(message, request.connection)
+      const images = userImages(message, request.connection)
+      // Pictures go in front of the words about them, which is where Claude reads them best.
+      const blocks: BlockParam[] = [
+        ...images.map((image): BlockParam => ({ type: 'image', source: { type: 'base64', media_type: image.type, data: image.data } })),
+        ...(text ? [{ type: 'text' as const, text }] : [])
+      ]
+      out.push({ role: 'user', content: images.length ? blocks : text })
       continue
     }
 
@@ -118,12 +171,16 @@ function toMessages(request: ModelRequest, withFallback: boolean): MessageParam[
     const blocks = replayOf(message, request.connection)
     if (Array.isArray(blocks)) {
       // A block marking a hand-over to a fallback model is only understood together with that feature.
-      const content = (blocks as BlockParam[]).filter((b) => withFallback || b.type !== 'fallback')
+      const content = (blocks as BlockParam[])
+        .filter((b) => withFallback || b.type !== 'fallback')
+        .flatMap((b) => (withSearch ? [b] : withoutSearch(b, message.web ?? [])))
       if (content.length) out.push({ role: 'assistant', content })
       continue
     }
     const content: BlockParam[] = []
-    if (message.content.trim()) content.push({ type: 'text', text: message.content })
+    // Another service's reply, with its searches told in words.
+    const text = withSearchNote(message)
+    if (text.trim()) content.push({ type: 'text', text })
     for (const call of message.tool_calls ?? []) {
       content.push({ type: 'tool_use', id: safeId(call.id), name: call.name, input: parseInput(call.arguments) })
     }
@@ -140,35 +197,42 @@ export function anthropicParams(request: ModelRequest, facts: ModelFacts | null)
   const { connection } = request
   const official = isOfficial(connection)
   const withFallback = official && WITH_FALLBACK.has(connection.model)
+  // A gateway in front of the API may not know the server tools.
+  const withSearch = official && Boolean(connection.webSearch)
+  const adaptive = facts?.adaptive !== false
+  const betas = [...(withFallback ? [FALLBACK_BETA] : []), ...(official && adaptive ? [BINDING_BETA] : [])]
   const effort = connection.reasoningEffort
+  const tools: Anthropic.Beta.BetaToolUnion[] = [
+    ...(withSearch ? SERVER_TOOLS : []),
+    ...request.tools.map((t) => ({
+      name: t.name,
+      description: t.description,
+      input_schema: { ...t.parameters, type: 'object' as const },
+      // Lets long tool inputs stream as they are written. The service then no longer checks
+      // them, which is why arguments are checked before a tool runs (see ToolRegistry.execute).
+      ...(official ? { eager_input_streaming: true } : {})
+    }))
+  ]
   return {
     model: connection.model,
     max_tokens: Math.min(MAX_OUTPUT_TOKENS, facts?.maxTokens ?? MAX_OUTPUT_TOKENS),
     system: request.system,
-    messages: toMessages(request, withFallback),
+    messages: toMessages(request, withFallback, withSearch),
     // Caches the unchanging start of the conversation, which every step of a turn sends again.
     cache_control: { type: 'ephemeral' },
-    ...(request.tools.length
-      ? {
-          tools: request.tools.map((t) => ({
-            name: t.name,
-            description: t.description,
-            input_schema: { ...t.parameters, type: 'object' as const },
-            // Lets long tool inputs stream as they are written. The service then no longer checks
-            // them, which is why arguments are checked before a tool runs (see ToolRegistry.execute).
-            ...(official ? { eager_input_streaming: true } : {})
-          }))
-        }
-      : {}),
+    ...(tools.length ? { tools } : {}),
     // "summarized" asks for a readable summary of the thinking; by default none is returned.
-    ...(facts?.adaptive !== false ? { thinking: { type: 'adaptive', display: 'summarized' } } : {}),
+    ...(adaptive
+      ? { thinking: { type: 'adaptive', display: 'summarized', ...(official ? { block_binding: { prefix_mismatch_behavior: 'drop_block' as const } } : {}) } }
+      : {}),
     ...((EFFORTS as readonly string[]).includes(effort) && facts?.efforts.length !== 0
       ? { output_config: { effort: effort as Effort } }
       : {}),
     // "Fast mode": the same model writing faster, at twice the price. Only some models have it,
     // which is decided before the connection is marked (see `offersFastMode`).
     ...(connection.fast && official ? { speed: 'fast' as const } : {}),
-    ...(withFallback ? { fallbacks: 'default', betas: [FALLBACK_BETA] } : {})
+    ...(withFallback ? { fallbacks: 'default' as const } : {}),
+    ...(betas.length ? { betas } : {})
   }
 }
 
@@ -178,13 +242,42 @@ async function attempt(request: ModelRequest, message: AssistantMessage): Promis
   // Not knowing the model is no reason to fail.
   const facts = await factsFor(connection).catch(() => null)
   const stream = clientFor(connection).beta.messages.stream(anthropicParams(request, facts), { signal })
+  const web = new WebLog(message, request.onWebActivity)
+  /** The searches and page reads being written, by the index of their block, with their input as far as it came. */
+  const writing = new Map<number, { block: unknown; input: string }>()
 
   for await (const event of stream) {
     if (event.type === 'content_block_start' && event.content_block.type === 'thinking' && message.reasoning_content) {
       message.reasoning_content += '\n\n'
       request.onReasoning('\n\n')
     }
+    if (event.type === 'content_block_start') {
+      // A search begins (its words follow as input), or its results arrive whole.
+      const begun = claudeCall(event.content_block)
+      if (begun) {
+        writing.set(event.index, { block: event.content_block, input: '' })
+        web.put(begun)
+      }
+      const ended = claudeResult(event.content_block)
+      if (ended && web.has(ended.id)) web.put(ended)
+      if (begun || ended) request.probe?.arrived()
+    }
+    if (event.type === 'content_block_stop') {
+      const call = writing.get(event.index)
+      writing.delete(event.index)
+      if (call) {
+        let input: unknown
+        try {
+          input = JSON.parse(call.input || '{}')
+        } catch {
+          // Half an input says nothing yet; the reply as a whole is read again at its end.
+        }
+        const known = claudeCall(call.block, input)
+        if (known) web.put(known)
+      }
+    }
     if (event.type !== 'content_block_delta') continue
+    if (event.delta.type === 'input_json_delta' && writing.has(event.index)) writing.get(event.index)!.input += event.delta.partial_json
     // Text, thinking, or the input of a tool call being written.
     request.probe?.arrived()
     if (event.delta.type === 'text_delta') {
@@ -198,6 +291,11 @@ async function attempt(request: ModelRequest, message: AssistantMessage): Promis
   const final = await stream.finalMessage()
   request.probe?.usage(final.usage)
   if (final.stop_reason) request.probe?.finished(final.stop_reason)
+  // The whole reply has the last word on each search: what it searched for, and what came of it.
+  for (const block of final.content) {
+    const searched = claudeCall(block) ?? claudeResult(block)
+    if (searched) web.put(searched)
+  }
 
   if (final.stop_reason === 'refusal') {
     const category = final.stop_details?.category
@@ -241,6 +339,9 @@ export const anthropicAdapter: ProviderAdapter = {
           request = { ...request, connection: { ...request.connection, fast: false } }
           continue
         }
+        // The pictures were what was turned down, as a gateway in front of the API may do: the
+        // caller can send the message again with those told in words.
+        if (!message.content && !message.reasoning_content && carriesImages(request) && refusesImages(err)) throw new ImagesRefused((err as Error).message)
         // What the service reports (bad key, rate limit, invalid request) is for the user to see.
         if (err instanceof Anthropic.APIError) throw err
         // What is left is a dropped connection, or a tool input the SDK could not read at all.

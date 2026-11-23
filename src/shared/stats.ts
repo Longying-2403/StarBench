@@ -176,6 +176,22 @@ export function normalizeUsage(kind: ProviderKind, raw: unknown): StepUsage | un
       reasoning: count(field(field(raw, 'output_tokens_details'), 'thinking_tokens'))
     })
   }
+  if (kind === 'gemini') {
+    // Gemini's own API gives the whole input with the part of it read from the cache, and the
+    // reply without its thinking, which it counts apart. What its own tools read on the way (the
+    // pages of a page read) it counts apart too, as `toolUsePromptTokenCount`: that is billed as
+    // input but is no part of the conversation that goes out again, and is left out here.
+    const whole = count(field(raw, 'promptTokenCount'))
+    const cached = count(field(raw, 'cachedContentTokenCount'))
+    const reply = count(field(raw, 'candidatesTokenCount'))
+    const thought = count(field(raw, 'thoughtsTokenCount'))
+    return told({
+      input: whole === undefined ? undefined : Math.max(0, whole - (cached ?? 0)),
+      cacheRead: cached,
+      output: reply === undefined && thought === undefined ? undefined : (reply ?? 0) + (thought ?? 0),
+      reasoning: thought
+    })
+  }
   const responses = kind === 'openai-responses'
   const whole = count(field(raw, responses ? 'input_tokens' : 'prompt_tokens'))
   const detail = field(raw, responses ? 'input_tokens_details' : 'prompt_tokens_details')

@@ -43,6 +43,34 @@ export interface ExchangeWatch {
   failed(err: unknown): ExchangeDraft
 }
 
+/** From how long on the data of a picture is left out of a record. Nothing that short is one worth leaving out. */
+const PICTURE_FROM = 512
+const leftOut = (characters: number): string => `[${characters} characters of picture data, left out of this record]`
+
+/**
+ * A copy of what a request holds, for the record, without the pictures the person attached: one
+ * of them is megabytes of letters that tell a reader nothing, and the record goes to the page.
+ * A picture is known by where it stands: an address that holds one (`data:image/…;base64,`), or
+ * the `data` of a part that is marked as a picture, each format in its own way. Everything else
+ * is copied as it is, long as it may be.
+ */
+export function withoutPictures(value: unknown): unknown {
+  if (typeof value === 'string') {
+    const comma = value.length > PICTURE_FROM && /^data:image\/[\w.+-]+;base64,/i.test(value) ? value.indexOf(',') : -1
+    return comma < 0 ? value : `${value.slice(0, comma + 1)}${leftOut(value.length - comma - 1)}`
+  }
+  if (Array.isArray(value)) return value.map(withoutPictures)
+  if (typeof value !== 'object' || value === null) return value
+  const proto: unknown = Object.getPrototypeOf(value)
+  // What is no plain object is copied the way everything was before.
+  if (proto !== Object.prototype && proto !== null) return structuredClone(value)
+  const part = value as Record<string, unknown>
+  const picture = part.kind === 'image' || part.type === 'base64' || typeof part.media_type === 'string' || typeof part.mimeType === 'string'
+  return Object.fromEntries(
+    Object.entries(part).map(([key, held]) => [key, picture && key === 'data' && typeof held === 'string' && held.length > PICTURE_FROM ? leftOut(held.length) : withoutPictures(held)])
+  )
+}
+
 /** Starts to follow a request that is about to go to `connection`. */
 export function watchExchange(connection: Connection): ExchangeWatch {
   const at = Date.now()
@@ -63,7 +91,7 @@ export function watchExchange(connection: Connection): ExchangeWatch {
     sent(body, headers) {
       attempts++
       // A copy: the body is made of the conversation itself, and who reads the record must not be able to change that.
-      wire = structuredClone(body)
+      wire = withoutPictures(body)
       // Those of this attempt, and none left over from the one before.
       added = headers && Object.keys(headers).length > 0 ? { ...headers } : undefined
     },
@@ -96,7 +124,7 @@ export function watchExchange(connection: Connection): ExchangeWatch {
   })
   return {
     over(request) {
-      asked = structuredClone({ system: request.system, messages: request.messages, tools: request.tools.map((t) => t.name), ...(request.sampling ? { sampling: request.sampling } : {}) })
+      asked = withoutPictures({ system: request.system, messages: request.messages, tools: request.tools.map((t) => t.name), ...(request.sampling ? { sampling: request.sampling } : {}) })
       return {
         ...request,
         probe,

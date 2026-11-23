@@ -14,7 +14,7 @@
 
 import { SUMMARY_CLOSE, SUMMARY_OPEN } from '../shared/compaction.ts'
 import { charsWithin, estimateTokens } from '../shared/stats.ts'
-import type { ChatMessage, CompactionMark, StoredMessage } from '../shared/types.ts'
+import type { ChatMessage, CompactionMark, StoredMessage, WebActivity } from '../shared/types.ts'
 import { messageWeight } from './meter.ts'
 import { thinkingReturns, userText } from './providers/history.ts'
 
@@ -80,7 +80,10 @@ export function sendable(stored: readonly StoredMessage[]): ChatMessage[] {
       const summary = lead
       lead = undefined
       if (message.role === 'user') {
-        out.push({ role: 'user', content: `${summary}\n\n${userText(message)}` })
+        // The text files of the message are part of its text by now; its pictures stay with it.
+        const images = (message.attachments ?? []).filter((file) => file.kind === 'image')
+        const said = userText({ ...message, attachments: (message.attachments ?? []).filter((file) => file.kind === 'text') })
+        out.push({ role: 'user', content: said ? `${summary}\n\n${said}` : summary, ...(images.length ? { attachments: images } : {}) })
         continue
       }
       out.push({ role: 'user', content: `${summary}\n\n${CARRY_ON}` })
@@ -250,6 +253,26 @@ const CLIPS: readonly Clips[] = [
 ]
 const LEFT_OUT = '[The beginning of this part of the conversation is left out here: it did not fit.]'
 
+/** The most pages of one search that are named in the record. */
+const RECORD_SOURCES = 8
+
+/**
+ * A web search or page read that a service did by itself for a reply, as a line of the record:
+ * what was looked for, and what was found. Such a search is no tool call and leaves no result
+ * among the messages, so without this line a summary knew of it only as far as the reply's own
+ * text spoke of it, and the model might search for the same thing again.
+ */
+function searchLine(activity: WebActivity, clips: Clips): string {
+  const failed = activity.status === 'failed' ? ', which failed' : ''
+  const pages = (activity.sources ?? [])
+    .slice(0, RECORD_SOURCES)
+    .map((source) => (source.title ? `${source.title} <${source.url}>` : `<${source.url}>`))
+    .join('; ')
+  if (activity.kind === 'open') return `[assistant read the web page ${clip(activity.url ?? pages, clips.result)}${failed}]`
+  const asked = (activity.queries ?? []).map((query) => `"${query}"`).join(', ')
+  return `[assistant searched the web${asked ? ` for ${clip(asked, clips.args)}` : ''}${failed}]${pages ? ` ${clip(`Pages found: ${pages}`, clips.result)}` : ''}`
+}
+
 /** The messages from `from` up to `to` written out as a record for a model to summarize. */
 function recordOf(messages: readonly StoredMessage[], from: number, to: number, clips: Clips, names: ReadonlyMap<string, string>): string {
   const blocks: string[] = []
@@ -257,9 +280,16 @@ function recordOf(messages: readonly StoredMessage[], from: number, to: number, 
     const message = messages[i]
     if (message.role === 'compaction') continue
     if (message.role === 'user') {
-      blocks.push(`[user${message.skill ? `, with the skill "${message.skill.name}" attached` : ''}]\n${clip(message.content, clips.text)}`)
+      // What came with the message is named; what the files said is in the replies that were made of them.
+      const came = [
+        ...(message.skill ? [`the skill "${message.skill.name}"`] : []),
+        ...(message.attachments ?? []).map((file) => `the ${file.kind === 'image' ? 'picture' : 'file'} "${file.name}"`)
+      ]
+      blocks.push(`[user${came.length ? `, with ${came.join(', ')} attached` : ''}]\n${clip(message.content, clips.text)}`)
     } else if (message.role === 'assistant') {
-      const lines = message.content.trim() ? [`[assistant]\n${clip(message.content.trim(), clips.text)}`] : []
+      // The searches the service did by itself stand before what was written with them, as they do on the page.
+      const lines = (message.web ?? []).map((activity) => searchLine(activity, clips))
+      if (message.content.trim()) lines.push(`[assistant]\n${clip(message.content.trim(), clips.text)}`)
       for (const call of message.tool_calls ?? []) lines.push(`[assistant calls ${call.name}] ${clip(call.arguments, clips.args)}`)
       if (lines.length) blocks.push(lines.join('\n'))
     } else {

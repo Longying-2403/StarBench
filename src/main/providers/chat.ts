@@ -2,16 +2,18 @@
 // people run on their own machines among them.
 
 import OpenAI from 'openai'
-import { isLocalAddress, routesByConversation } from '../../shared/types.ts'
+import { isGemini, isLocalAddress, routesByConversation } from '../../shared/types.ts'
 import type { ToolCall } from '../../shared/types.ts'
 import { fetchModelInfo, listModels } from '../models.ts'
-import { newReply, replayOf, userText, withToolResults } from './history.ts'
+import { ImagesRefused, carriesImages, imageUrl, refusesImages, userImages } from './attachments.ts'
+import { newReply, replayOf, userText, withSearchNote, withToolResults } from './history.ts'
 import { ThinkTags } from './think-tags.ts'
 import type { Split } from './think-tags.ts'
 import { WrittenCalls, callText, newCallId, resultText, textBeforeCalls, toolsPrompt, trailingCalls } from './tool-text.ts'
 import type { WrittenCall } from './tool-text.ts'
 import { ToolsRefused } from './types.ts'
 import type { AssistantMessage, Connection, ModelReply, ModelRequest, ProviderAdapter } from './types.ts'
+import { WebLog, deepSeekActivities } from './web-search.ts'
 
 type ApiMessage = OpenAI.Chat.ChatCompletionMessageParam
 
@@ -22,12 +24,60 @@ type ApiMessage = OpenAI.Chat.ChatCompletionMessageParam
  */
 type Thinking = 'reasoning' | 'inline'
 
+/**
+ * What a reply keeps to be continued from exactly (`origin.replay`): how its thinking came, and
+ * the signatures Gemini put on its tool calls, by call id. Gemini 3 and later refuse a request
+ * that carries a call of theirs back without its signature
+ * (https://ai.google.dev/gemini-api/docs/thought-signatures).
+ */
+interface ChatReplay {
+  thinking?: Thinking
+  signatures?: Record<string, string>
+}
+
+/**
+ * What Gemini's OpenAI-compatible endpoint puts on a tool call besides what OpenAI's has: the
+ * signature of the thinking that led to it.
+ */
+interface GeminiExtra {
+  google?: { thought_signature?: unknown }
+}
+
 /** What a piece of a reply can hold, be it a chunk of a stream or a whole message. */
 interface Piece {
   content?: unknown
   reasoning_content?: unknown
   reasoning?: unknown
-  tool_calls?: readonly { index?: number; id?: string; function?: { name?: string; arguments?: string } }[] | null
+  tool_calls?: readonly { index?: number; id?: string; function?: { name?: string; arguments?: string }; extra_content?: GeminiExtra }[] | null
+  /** DeepSeek's account of the searches it made itself (`deepseek_web_search`). */
+  server_tool_calls?: unknown
+}
+
+/**
+ * What Gemini takes in place of a signature on a call it did not write, such as one made by
+ * another model earlier in the conversation. Its documentation names this value for that.
+ */
+const NO_SIGNATURE = 'skip_thought_signature_validator'
+
+/**
+ * The names DeepSeek keeps for its own tools while its search is on: a function of the request
+ * with one of them is refused ("the name `search` is reserved when `deepseek_web_search` is
+ * used"; these four found by trying, 2026-11-23). A tool of the app's with such a name goes by
+ * another one on the wire, and the model's calls of that name are read back as the tool's own.
+ * `search`, the app's search through the files, is the one that matters.
+ */
+const RESERVED_BY_SEARCH: Readonly<Record<string, string>> = {
+  search: 'search_files',
+  image_search: 'image_search_tool',
+  open: 'open_tool',
+  find: 'find_tool'
+}
+
+/** What a tool is called on the wire, and what a name from the wire is called in the app, for this connection. */
+export function wireNames(connection: Pick<Connection, 'webSearch'>): { out(name: string): string; back(name: string): string } {
+  if (!connection.webSearch) return { out: (name) => name, back: (name) => name }
+  const backwards = new Map(Object.entries(RESERVED_BY_SEARCH).map(([own, wire]) => [wire, own]))
+  return { out: (name) => RESERVED_BY_SEARCH[name] ?? name, back: (name) => backwards.get(name) ?? name }
 }
 
 /**
@@ -125,6 +175,10 @@ async function readableErrors(input: string | URL | Request, init?: RequestInit)
 /** Put between tool results and a user message that follows them directly, for a server that takes strict turns. */
 const NO_REPLY = '(No reply: the turn was stopped here.)'
 
+type UserPart = OpenAI.Chat.ChatCompletionContentPart
+/** What a user message says, as the parts of a message that also holds pictures. Text that is empty is no part. */
+const partsOf = (content: string | readonly UserPart[]): UserPart[] => (typeof content === 'string' ? (content ? [{ type: 'text', text: content }] : []) : [...content])
+
 /**
  * The conversation as chat completions take it. Two user messages in a row, as there are after a
  * reply that failed, go out as one, because many chat templates insist on taking turns.
@@ -145,15 +199,20 @@ export function chatMessages(
   const written = Boolean(request.connection.textTools)
   const system = written && request.tools?.length ? `${request.system}\n\n${toolsPrompt(request.tools)}` : request.system
   const out: ApiMessage[] = [{ role: 'system', content: system }]
+  const names = wireNames(request.connection)
   for (const message of withToolResults(request.messages)) {
     const before = out.at(-1)
     if (message.role === 'user') {
-      if (before?.role === 'user' && typeof before.content === 'string') {
-        before.content = `${before.content}\n\n${userText(message)}`
+      const text = userText(message, request.connection)
+      // Pictures make the message a list of parts: the text, then each picture as an address that holds it.
+      const images = userImages(message, request.connection).map((image): UserPart => ({ type: 'image_url', image_url: { url: imageUrl(image) } }))
+      if (before?.role === 'user') {
+        if (typeof before.content === 'string' && images.length === 0) before.content = `${before.content}\n\n${text}`
+        else before.content = [...partsOf(before.content), ...partsOf(text), ...images]
         continue
       }
       if (turns && before?.role === 'tool') out.push({ role: 'assistant', content: NO_REPLY })
-      out.push({ role: 'user', content: userText(message) })
+      out.push({ role: 'user', content: images.length ? [...partsOf(text), ...images] : text })
     } else if (message.role === 'tool') {
       if (written) {
         // The results of one reply's calls stand together, one under the other.
@@ -177,18 +236,30 @@ export function chatMessages(
       const own = !message.origin || message.origin.provider === request.connection.provider
       const field = thinkingField(message, request.connection)
       const calls = message.tool_calls ?? []
+      // Gemini wants its own calls back with their signatures, and the first call of a reply it
+      // did not write with the value that stands for none.
+      const replay = replayOf(message, request.connection)
+      const signatures = typeof replay === 'object' && replay !== null ? ((replay as ChatReplay).signatures ?? {}) : {}
+      const gemini = isGemini(request.connection.baseURL)
+      const signed = (id: string, first: boolean): { extra_content?: GeminiExtra } => {
+        const signature = signatures[id] ?? (gemini && first ? NO_SIGNATURE : undefined)
+        return signature ? { extra_content: { google: { thought_signature: signature } } } : {}
+      }
+      // The reply's own web searches are told in words in front of it: they never go back in another form here.
+      const said = withSearchNote(message)
       out.push({
         role: 'assistant',
         // Written out, a call follows what the model said before it, as the model would write it.
-        content: written && calls.length ? [message.content, calls.map(callText).join('\n')].filter(Boolean).join('\n\n') : message.content,
+        content: written && calls.length ? [said, calls.map(callText).join('\n')].filter(Boolean).join('\n\n') : said,
         // Neither name is in the SDK's message type.
         ...(own && message.reasoning_content && field ? { [field]: message.reasoning_content } : {}),
         ...(calls.length && !written
           ? {
-              tool_calls: calls.map((c) => ({
+              tool_calls: calls.map((c, index) => ({
                 id: c.id,
                 type: 'function' as const,
-                function: { name: c.name, arguments: c.arguments }
+                function: { name: names.out(c.name), arguments: c.arguments },
+                ...signed(c.id, index === 0)
               }))
             }
           : {})
@@ -204,6 +275,9 @@ export const chatAdapter: ProviderAdapter = {
     const client = new OpenAI({ apiKey: connection.apiKey, baseURL: connection.baseURL, fetch: readableErrors })
     const message = newReply(connection)
     const calls: ToolCall[] = []
+    /** The signatures Gemini put on the calls, by call (see `ChatReplay`). */
+    const signatureOf = new Map<ToolCall, string>()
+    const web = new WebLog(message, request.onWebActivity)
     const effort = connection.reasoningEffort
     // Which conversation this is, for a service that sends a conversation's requests to one
     // server by it. In this format xAI reads it from a header.
@@ -285,8 +359,19 @@ export const chatAdapter: ProviderAdapter = {
         if (part.id) call.id = part.id
         if (part.function?.name) call.name += part.function.name
         if (part.function?.arguments) call.arguments += part.function.arguments
+        const signature = part.extra_content?.google?.thought_signature
+        if (typeof signature === 'string' && signature) signatureOf.set(call, signature)
       }
+      // DeepSeek tells of its searches in one piece, every one of them done.
+      if (piece.server_tool_calls) for (const searched of deepSeekActivities(piece.server_tool_calls)) web.put(searched)
     }
+    /**
+     * DeepSeek's own web search, which it runs itself and tells of in `server_tool_calls`. Only
+     * DeepSeek is ever marked for it (`webSearchService`); the SDK's type does not know the tool.
+     */
+    const search = connection.webSearch && !described ? [{ type: 'deepseek_web_search' } as unknown as OpenAI.Chat.ChatCompletionTool] : []
+    const names = wireNames(connection)
+    const functions = wired ? request.tools.map((t) => ({ type: 'function' as const, function: { ...t, name: names.out(t.name) } })) : []
     /** The request, but for how the reply is to come. `turns` is for a server that takes strict turns only. */
     const body = (turns: boolean) => ({
       // What plugins add. It comes first, so that nothing in it replaces a field below.
@@ -294,7 +379,7 @@ export const chatAdapter: ProviderAdapter = {
       model: connection.model,
       messages: chatMessages(request, turns),
       // The API rejects an empty tools array. A server that takes none finds them in the instructions.
-      ...(wired ? { tools: request.tools.map((t) => ({ type: 'function' as const, function: { ...t } })) } : {}),
+      ...(functions.length || search.length ? { tools: [...functions, ...search] } : {}),
       // Left out unless the user chose a level: not every compatible service knows the parameter.
       // The cast is for levels the SDK's list does not have but some services do.
       ...(effort !== 'default' ? { reasoning_effort: effort as OpenAI.ReasoningEffort } : {})
@@ -304,6 +389,8 @@ export const chatAdapter: ProviderAdapter = {
       if (signal.aborted) return err
       // The caller can send the message again with the tools described in the instructions.
       if (wired && refusesTools(err)) return new ToolsRefused((err as Error).message)
+      // Or, where it was the pictures that were turned down, with those told in words.
+      if (carriesImages(request) && refusesImages(err)) return new ImagesRefused((err as Error).message)
       // A model server on one's own machine that does not answer is, as a rule, one that was not started.
       if (err instanceof OpenAI.APIConnectionError && isLocalAddress(connection.baseURL)) {
         return new Error(`Could not reach the model server at ${connection.baseURL}. Is it running?`)
@@ -419,7 +506,9 @@ export const chatAdapter: ProviderAdapter = {
     // Thinking that was only taken for it and is left as it is came inside the answer as well.
     if (tags.found || (tags.assumed && tags.open)) thinking = 'inline'
     if (thinking && message.reasoning_content && message.origin) message.origin.replay = { thinking }
+    // Calls of a tool that went by another name on the wire are calls of the tool (`wireNames`).
     let complete = calls.filter((c) => c && c.id && c.name)
+    for (const call of complete) call.name = names.back(call.name)
     const called = (found: readonly WrittenCall[]): ToolCall[] => found.map((call) => ({ id: newCallId(), ...call }))
     if (tail && !complete.length && tail.calls.length) {
       // The server left the calls in the answer, where they were held back from the page. What
@@ -444,6 +533,11 @@ export const chatAdapter: ProviderAdapter = {
     // Strict turns have room for one result. The model makes its other calls once it has seen this one.
     if (whole && complete.length > 1) complete = complete.slice(0, 1)
     if (complete.length) message.tool_calls = complete
+    const signatures = Object.fromEntries(complete.flatMap((c) => (signatureOf.has(c) ? [[c.id, signatureOf.get(c)!]] : [])))
+    if (Object.keys(signatures).length && message.origin) {
+      const replay: ChatReplay = { ...(message.origin.replay as ChatReplay | undefined), signatures }
+      message.origin.replay = replay
+    }
     // Cut off in the middle of a tool call, its arguments are incomplete: running it would act on half an input.
     if (cutShort && (complete.length || tail?.unfinished)) {
       delete message.tool_calls

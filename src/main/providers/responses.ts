@@ -15,15 +15,21 @@ import OpenAI from 'openai'
 import { routesByConversation } from '../../shared/types.ts'
 import type { ToolCall } from '../../shared/types.ts'
 import { fetchModelInfo, fetchPlanModelInfo, listModels, listPlanModels } from '../models.ts'
-import { newReply, replayOf, userText, withToolResults } from './history.ts'
+import { ImagesRefused, carriesImages, imageUrl, refusesImages, userImages } from './attachments.ts'
+import { newReply, replayOf, userText, withSearchNote, withToolResults } from './history.ts'
 import { ServiceError } from './types.ts'
 import type { Connection, ModelReply, ModelRequest, ProviderAdapter } from './types.ts'
+import { WebLog, responsesActivity } from './web-search.ts'
 
 type InputItem = OpenAI.Responses.ResponseInputItem
 type OutputItem = OpenAI.Responses.ResponseOutputItem
 
-/** The kinds of output this app produces and can hand back to the service as they came. */
-const REPLAYED = new Set(['reasoning', 'message', 'function_call'])
+/**
+ * The kinds of output this app produces and can hand back to the service as they came. A search
+ * the service made goes back too: without it, xAI searched for the same thing again in the next
+ * turn (tried on 2026-11-23; with it, it did not, and the request was taken either way).
+ */
+const REPLAYED = new Set(['reasoning', 'message', 'function_call', 'web_search_call'])
 
 /** Plan usage wants function tools grouped under a name; the model's calls then name the group too. */
 const TOOL_GROUP = 'starbench'
@@ -37,17 +43,32 @@ export function responsesInput(request: Pick<ModelRequest, 'messages' | 'connect
   const group = request.connection.plan ? { namespace: TOOL_GROUP } : {}
   for (const message of withToolResults(request.messages)) {
     if (message.role === 'user') {
-      input.push({ role: 'user', content: userText(message) })
+      const text = userText(message, request.connection)
+      const images = userImages(message, request.connection)
+      // With pictures, the message is a list of parts: the text, then each picture as an address that holds it.
+      if (images.length === 0) input.push({ role: 'user', content: text })
+      else {
+        input.push({
+          role: 'user',
+          content: [...(text ? [{ type: 'input_text' as const, text }] : []), ...images.map((image) => ({ type: 'input_image' as const, image_url: imageUrl(image), detail: 'auto' as const }))]
+        })
+      }
     } else if (message.role === 'tool') {
       input.push({ type: 'function_call_output', call_id: message.tool_call_id, output: message.content })
     } else {
       // Encrypted reasoning only means something to the model that wrote it.
       const items = replayOf(message, request.connection, true)
-      if (Array.isArray(items)) {
+      // A reply with a search in it goes back as it came only to a request that can search too.
+      // Without the tool the search item may not be taken, and leaving out just that item would
+      // part a reasoning item from what followed it. Such a reply then goes as another model's would.
+      const searched = Array.isArray(items) && items.some((item) => (item as { type?: unknown }).type === 'web_search_call')
+      if (Array.isArray(items) && (!searched || request.connection.webSearch)) {
         input.push(...(items as InputItem[]))
         continue
       }
-      if (message.content) input.push({ role: 'assistant', content: message.content })
+      // A search of the reply's own is told in words: the model is to know it looked.
+      const content = withSearchNote(message)
+      if (content) input.push({ role: 'assistant', content })
       for (const call of message.tool_calls ?? []) {
         input.push({ type: 'function_call', call_id: call.id, name: call.name, arguments: call.arguments, ...group })
       }
@@ -66,8 +87,21 @@ export function responsesTools(request: Pick<ModelRequest, 'tools' | 'connection
     // The tools' schemas are written for people, not to the strict subset.
     strict: false
   }))
-  if (functions.length === 0 || !request.connection.plan) return functions
-  return [{ type: 'namespace', name: TOOL_GROUP, description: TOOL_GROUP_ABOUT, tools: functions }]
+  // The service's own web search, which it runs itself. It stands beside the group a plan wants.
+  const search: OpenAI.Responses.Tool[] = request.connection.webSearch ? [{ type: 'web_search' }] : []
+  if (functions.length === 0 || !request.connection.plan) return [...functions, ...search]
+  return [{ type: 'namespace', name: TOOL_GROUP, description: TOOL_GROUP_ABOUT, tools: functions }, ...search]
+}
+
+/**
+ * What the reply is to hold beyond its text. The pages a search found are only told by OpenAI's
+ * API when asked for, with a key and with a ChatGPT plan alike; xAI tells them unasked. The plan
+ * route took the field when tried with gpt-6.2-sol on 2026-11-24, and each search came back with
+ * its pages (none without it).
+ */
+function includes(connection: Connection): OpenAI.Responses.ResponseIncludable[] {
+  const own = Boolean(connection.plan) || /^https:\/\/api\.openai\.com(\/|$)/i.test(connection.baseURL)
+  return ['reasoning.encrypted_content', ...(connection.webSearch && own ? (['web_search_call.action.sources'] as const) : [])]
 }
 
 /** Whether a rejected request was rejected for asking for reasoning summaries, which not every account may. */
@@ -147,6 +181,7 @@ async function run(request: ModelRequest, withSummary: boolean): Promise<ModelRe
   const effort = connection.reasoningEffort
   const tools = responsesTools(request)
   const items: OutputItem[] = []
+  const web = new WebLog(message, request.onWebActivity)
   let streamed = false
   let ended = false
   let stopped: string | undefined
@@ -162,7 +197,7 @@ async function run(request: ModelRequest, withSummary: boolean): Promise<ModelRe
         ...(effort !== 'default' ? { effort: effort as OpenAI.ReasoningEffort } : {})
       },
       // Without stored responses, this is what lets the model pick its reasoning up again after a tool call.
-      include: ['reasoning.encrypted_content'],
+      include: includes(connection),
       // "Fast mode": the same model writing faster, at about twice the price. On the wire it goes by
       // its older name: the API takes both, a ChatGPT sign-in only this one ("fast" is refused there).
       ...(connection.fast ? { service_tier: 'priority' as const } : {}),
@@ -206,9 +241,21 @@ async function run(request: ModelRequest, withSummary: boolean): Promise<ModelRe
           // A reply that is nothing but a tool call has begun to come, too.
           request.probe?.arrived()
           break
-        case 'response.output_item.done':
-          if (REPLAYED.has(event.item.type)) items.push(event.item)
+        case 'response.output_item.added': {
+          // A search of the service's own begins: shown as under way until it is done.
+          const searching = responsesActivity(event.item)
+          if (searching) {
+            request.probe?.arrived()
+            web.put(searching)
+          }
           break
+        }
+        case 'response.output_item.done': {
+          if (REPLAYED.has(event.item.type)) items.push(event.item)
+          const searched = responsesActivity(event.item)
+          if (searched) web.put(searched)
+          break
+        }
         case 'response.completed':
           ended = true
           request.probe?.usage(event.response.usage)
@@ -247,6 +294,8 @@ async function run(request: ModelRequest, withSummary: boolean): Promise<ModelRe
       request.onFastRefused?.()
       return run({ ...request, connection: { ...connection, fast: false } }, withSummary)
     }
+    // The pictures were what the service turned down: the caller can send the message again with those told in words.
+    if (!streamed && carriesImages(request) && refusesImages(err)) throw new ImagesRefused((err as Error).message)
     if (connection.plan && err instanceof OpenAI.APIError) {
       throw planFailure({ code: err.code, message: err.message, status: err.status, param: err.param, requestID: err.requestID })
     }

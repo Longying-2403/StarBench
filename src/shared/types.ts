@@ -1,6 +1,8 @@
 // Types shared between the main process, the preload bridge and the renderer.
 
+import type { Attachment, AttachmentsRead } from './attachments.ts'
 import type { CompactionChange, CompactionSettings } from './compaction.ts'
+import type { PermissionMode } from './permissions.ts'
 import type { SessionStats } from './stats.ts'
 
 export interface ToolCall {
@@ -10,9 +12,35 @@ export interface ToolCall {
   arguments: string
 }
 
+/**
+ * A web search, or a page read, that a model service did on its own side while writing a reply,
+ * with its own search tool, which the person switched on (`webSearchService`). The app runs
+ * nothing for it and asks no permission: it shows what the service says was done.
+ */
+export interface WebActivity {
+  /** The service's id for it, unique within the reply. */
+  id: string
+  kind: 'search' | 'open'
+  /** What was searched for. Some services search for several things at once. */
+  queries?: string[]
+  /** The page that was opened, or looked through. */
+  url?: string
+  status: 'running' | 'done' | 'failed'
+  /** Why it failed, in the service's words. */
+  error?: string
+  /** The pages it found or read, with their titles where the service gave them. */
+  sources?: { url: string; title?: string }[]
+  /**
+   * HTML that the service requires to be shown with an answer its search went into: Google's
+   * Search Suggestions, a row of links to the same searches on Google (Gemini API Additional
+   * Terms, "Grounding with Google Search"). Shown as it came, in a frame of its own that runs nothing.
+   */
+  suggestions?: string
+}
+
 /** The wire format a model service speaks. */
-export type ProviderKind = 'openai-chat' | 'openai-responses' | 'anthropic'
-export const PROVIDER_KINDS: readonly ProviderKind[] = ['openai-chat', 'openai-responses', 'anthropic']
+export type ProviderKind = 'openai-chat' | 'openai-responses' | 'anthropic' | 'gemini'
+export const PROVIDER_KINDS: readonly ProviderKind[] = ['openai-chat', 'openai-responses', 'anthropic', 'gemini']
 
 /**
  * One message of the conversation, in a form every provider's format can be built from:
@@ -27,6 +55,11 @@ export type ChatMessage =
        * sent to the model, kept so later requests replay the same conversation.
        */
       skill?: { name: string; prompt: string }
+      /**
+       * The files the person put with the message (shared/attachments.ts): text files, whose
+       * content goes in front of what was typed, and pictures, which go to a model that can see.
+       */
+      attachments?: Attachment[]
     }
   | {
       role: 'assistant'
@@ -34,6 +67,12 @@ export type ChatMessage =
       /** The model's thinking, or the summary of it the service returned. Shown to the user. */
       reasoning_content?: string
       tool_calls?: ToolCall[]
+      /**
+       * The web searches and page reads the service did by itself while writing this reply, with
+       * its own search tool. Shown with the reply. What a service wants back of them travels in
+       * `origin.replay`, like everything else of its own.
+       */
+      web?: WebActivity[]
       /**
        * Who wrote the message. `replay` holds what that service wants to see again to carry on from
        * this message exactly (signed thinking blocks, encrypted reasoning); only the same provider
@@ -143,12 +182,17 @@ export interface Session {
   archived?: boolean
   /** The mark shown before the name in the list. */
   icon?: SessionIcon
+  /** What the model may do in this conversation without asking (shared/permissions.ts). Absent, every tool that asks is asked about. */
+  permissionMode?: PermissionMode
   messages: StoredMessage[]
   /** What was measured of the conversation since the app began to keep count (shared/stats.ts). */
   stats?: SessionStats
 }
 
-export type SessionSummary = Pick<Session, 'id' | 'title' | 'workspace' | 'updatedAt' | 'archived' | 'icon'>
+export type SessionSummary = Pick<Session, 'id' | 'title' | 'workspace' | 'updatedAt' | 'archived' | 'icon'> & {
+  /** A turn of the session is under way, or it is being compacted. Said of the sessions that are; absent of the rest. */
+  running?: true
+}
 
 /** A conversation that a search found. */
 export interface SessionHit {
@@ -219,12 +263,22 @@ export function isLocalAddress(baseURL: string): boolean {
  * Thinking cannot be switched off on their current models, so there is no "none".
  */
 const COMMON_EFFORTS: readonly EffortLevel[] = ['low', 'medium', 'high', 'xhigh', 'max']
+/** Where Google's Gemini API is reached, through its OpenAI-compatible endpoint as well as its own. */
+const GEMINI_HOST = 'generativelanguage.googleapis.com'
 /** The services whose models take other levels, by the host of their address. */
 const EFFORTS_BY_HOST: Record<string, readonly EffortLevel[]> = {
   // Thinking can be switched off here, and there is nothing between low and high.
   'api.deepseek.com': ['none', 'low', 'high', 'max'],
   // The scale ends one step earlier.
-  'api.x.ai': ['low', 'medium', 'high', 'xhigh']
+  'api.x.ai': ['low', 'medium', 'high', 'xhigh'],
+  // What its OpenAI-compatible endpoint maps to the models' own levels. Gemini 3 and later cannot
+  // stop thinking, and only two Gemini 4 models go above high (https://ai.google.dev/gemini-api/docs/openai#thinking).
+  [GEMINI_HOST]: ['minimal', 'low', 'medium', 'high']
+}
+
+/** Whether an address is Google's Gemini API. */
+export function isGemini(baseURL: string): boolean {
+  return serviceHost(baseURL) === GEMINI_HOST
 }
 /**
  * For a model server on one's own machine. Most of the open models think or do not, so switching
@@ -367,12 +421,24 @@ export interface Settings {
   reasoningEffort: ReasoningEffort
   /** Whether faster answers were asked for with that model. It only has an effect where `offersFastMode` says so. */
   fastMode: boolean
+  /** Whether that model may search the web with its service's own search tool. It only has an effect where `webSearchService` names one. */
+  webSearch: boolean
   /** Whether requests can be made with it; see `ProviderInfo.ready`. */
   ready: boolean
   /** Whether the app keeps count of what conversations cost: requests, time, tokens, and how full the context is. */
   stats: boolean
   /** Whether, and from where on, a conversation is compacted as it fills the model's context. */
   compaction: CompactionSettings
+  /**
+   * The names the person gave workspaces, by the key of the folder (`folderKey` in
+   * shared/folders.ts). A workspace that is not in here goes by the name of its folder.
+   */
+  workspaceNames: Record<string, string>
+  /**
+   * The folders the person said a model may read, as they were chosen. A new chat in any other
+   * folder asks first (`trustFolder`).
+   */
+  trustedFolders: string[]
 }
 
 /** The Claude models that answer faster on request, with nothing to apply for first. */
@@ -391,12 +457,58 @@ export function offersFastMode(provider: Pick<ProviderInfo, 'kind' | 'baseURL' |
   return false
 }
 
+/** The services whose own web search the app can switch on for their models. */
+export type WebSearchService = 'openai' | 'xai' | 'anthropic' | 'deepseek' | 'google'
+
+/**
+ * Whether a Gemini model can search Google and call the app's tools in the same request. Those of
+ * Gemini 3 and later can, in preview (Google's tool-combination documentation, 2026-11-23); with
+ * Gemini 2.5 and earlier a request has one or the other.
+ */
+export function geminiSearchesWithTools(model: string): boolean {
+  return /^(?:models\/)?gemini-(?![12]\.)/i.test(model.trim())
+}
+
+/**
+ * Whose own web search a provider's models can use, if anyone's. Each is a tool of the request
+ * that runs on the service's side: OpenAI's (with an API key or a ChatGPT sign-in) and xAI's in
+ * the Responses format, Anthropic's on its own API, DeepSeek's in chat completions, and Google's
+ * on the Gemini API for Gemini 3 and later (`geminiSearchesWithTools`). A gateway in front of any
+ * of them may not know the tool. Gemini's OpenAI-compatible endpoint has none for chat (only for
+ * making pictures), and xAI has its search in the Responses format only.
+ */
+export function webSearchService(provider: Pick<ProviderInfo, 'kind' | 'baseURL' | 'model' | 'auth'>): WebSearchService | undefined {
+  if (!provider.model) return undefined
+  const host = serviceHost(provider.baseURL)
+  if (provider.kind === 'openai-responses') {
+    if (provider.auth === 'chatgpt' || host === 'api.openai.com') return 'openai'
+    return host === 'api.x.ai' ? 'xai' : undefined
+  }
+  if (provider.kind === 'anthropic') return host === 'api.anthropic.com' ? 'anthropic' : undefined
+  if (provider.kind === 'gemini') return host === GEMINI_HOST && geminiSearchesWithTools(provider.model) ? 'google' : undefined
+  return host === 'api.deepseek.com' ? 'deepseek' : undefined
+}
+
+/**
+ * Whether the service's own search can go out with the model's thinking set as it is. DeepSeek
+ * takes its search beside the app's tools only while the model thinks: with thinking switched off
+ * it refused every such request (400 "client tools can only be used together with
+ * `deepseek_web_search` in thinking mode", 2026-11-24). Gemini needs no such rule: the models that
+ * have its search cannot switch their thinking off.
+ */
+export function searchWorksAt(service: WebSearchService | undefined, effort: ReasoningEffort): boolean {
+  return service !== undefined && !(service === 'deepseek' && effort === 'none')
+}
+
 /** Starting points for the services the app knows how to talk to. */
 export const PROVIDER_PRESETS: readonly (Omit<ProviderInfo, 'ready' | 'hasApiKey'> & { keyHint: string })[] = [
   { id: 'deepseek', name: 'DeepSeek', kind: 'openai-chat', baseURL: 'https://api.deepseek.com', model: 'deepseek-flash', keyHint: 'sk-…' },
   { id: 'openai', name: 'OpenAI', kind: 'openai-responses', baseURL: 'https://api.openai.com/v1', model: '', keyHint: 'sk-…' },
   { id: 'anthropic', name: 'Anthropic', kind: 'anthropic', baseURL: 'https://api.anthropic.com', model: 'claude-opus-5-5', keyHint: 'sk-ant-…' },
-  { id: 'xai', name: 'xAI', kind: 'openai-chat', baseURL: 'https://api.x.ai/v1', model: '', keyHint: 'xai-…' }
+  { id: 'xai', name: 'xAI', kind: 'openai-chat', baseURL: 'https://api.x.ai/v1', model: '', keyHint: 'xai-…' },
+  // Its own API: only there do its models search Google. Its OpenAI-compatible endpoint
+  // (`/v1beta/openai`, chat completions) still works for a provider set up that way.
+  { id: 'gemini', name: 'Gemini', kind: 'gemini', baseURL: `https://${GEMINI_HOST}/v1beta`, model: '', keyHint: 'AIza…' }
 ]
 
 /**
@@ -490,6 +602,14 @@ export interface SkillInfo {
 
 export type PermissionDecision = 'allow' | 'always' | 'deny'
 
+/** What goes with a message besides its text and its skill. */
+export interface SendExtras {
+  /** What the model may do in the conversation without asking, as the page shows it at this moment. */
+  mode?: PermissionMode
+  /** The files put with the message. */
+  attachments?: Attachment[]
+}
+
 export type AgentEvent =
   | { type: 'reasoning_delta'; text: string }
   | { type: 'text_delta'; text: string }
@@ -504,6 +624,8 @@ export type AgentEvent =
   | { type: 'assistant_done' }
   | { type: 'tool_start'; call: ToolCall }
   | { type: 'tool_result'; id: string; output: string }
+  /** The service searched the web, or read a page, with its own search tool. Told again under the same id as it goes on. */
+  | { type: 'web_activity'; activity: WebActivity }
   | { type: 'permission_request'; id: string; call: ToolCall }
   | { type: 'turn_end' }
   /** The numbers of the conversation, after a request or a tool call changed them. */
@@ -519,7 +641,7 @@ export type AgentEvent =
    * Something the person should know that did not stop the turn. `code` is what the page words it
    * by; `detail` is what the service itself said, when that helps to look the matter up.
    */
-  | { type: 'notice'; code: 'fast-mode-refused' | 'tools-as-text' | 'stream-refused' | 'compaction-failed'; message: string; detail?: string }
+  | { type: 'notice'; code: 'fast-mode-refused' | 'tools-as-text' | 'stream-refused' | 'compaction-failed' | 'images-refused'; message: string; detail?: string }
 
 export interface SessionEvent {
   sessionId: string
@@ -575,6 +697,8 @@ export interface HarnessApi {
   setReasoningEffort(effort: ReasoningEffort): Promise<Settings>
   /** Asks for faster answers from the current model, or stops asking. Resolves with the updated settings. */
   setFastMode(on: boolean): Promise<Settings>
+  /** Lets the current model search the web with its service's own search tool, or stops it. Resolves with the updated settings. */
+  setWebSearch(on: boolean): Promise<Settings>
   /** Asks the model service about the current model. Null when it has nothing to say or cannot be reached. */
   getModelInfo(): Promise<ModelInfo | null>
   /** Says how many tokens the context of a model holds, for a model the app cannot find it out for. Null takes the number back. */
@@ -612,10 +736,31 @@ export interface HarnessApi {
   saveMcp(config: string): Promise<McpServerStatus[]>
   reconnectMcp(): Promise<McpServerStatus[]>
   mcpStatus(): Promise<McpServerStatus[]>
-  /** Opens the system folder dialog. Resolves with null when it is cancelled. */
+  /** Opens the system folder dialog. Resolves with null when it is cancelled. The folder is not remembered until it is trusted or used. */
   pickWorkspace(): Promise<string | null>
+  /**
+   * Says that models may read a folder: the person's yes to the question a new chat asks of a
+   * folder it has not been in before. The folder is remembered among those used. Resolves with
+   * the updated settings.
+   */
+  trustFolder(folder: string): Promise<Settings>
   /** Folders used before that still exist, most recent first. */
   listWorkspaces(): Promise<string[]>
+  /**
+   * Gives a workspace a name of the person's own, for the lists of the app: the folder on the disk
+   * keeps its name. An empty name, or the folder's own, takes a given one back. Resolves with the
+   * updated settings.
+   */
+  renameWorkspace(folder: string, name: string): Promise<Settings>
+  /** Archives the sessions the list shows under a workspace. Resolves with their ids. */
+  archiveWorkspace(folder: string): Promise<string[]>
+  /**
+   * Takes a workspace out of the app: deletes the named sessions of it, which are the ones the
+   * person was shown and said yes to, no longer offers the folder, and forgets the name it was
+   * given. Its archived sessions stay, and nothing in the folder itself is touched. Resolves
+   * with the updated settings.
+   */
+  removeWorkspace(folder: string, sessions: string[]): Promise<Settings>
   /** A picture in the workspace that an answer shows. `address` is what the answer wrote: a path, or a file: address. */
   readImage(workspace: string, address: string): Promise<ImagePreview>
   /** Opens a file or folder in the workspace that an answer points to, with the program the system has for it. */
@@ -632,9 +777,22 @@ export interface HarnessApi {
   setSessionIcon(id: string, icon: SessionIcon | null): Promise<void>
   /**
    * Starts a turn. Creates the session when `sessionId` is null. Resolves with the session id.
-   * `skill` names a skill the user picked for this message.
+   * `skill` names a skill the user picked for this message; `extras` holds what else goes with it.
    */
-  send(sessionId: string | null, workspace: string, text: string, skill?: string): Promise<string>
+  send(sessionId: string | null, workspace: string, text: string, skill?: string, extras?: SendExtras): Promise<string>
+  /**
+   * Opens the system dialog for picking files to put with a message, and reads those picked.
+   * Resolves with nothing in it when the dialog is cancelled.
+   */
+  pickAttachments(): Promise<AttachmentsRead>
+  /** Reads files the person dropped on the message box, or pasted into it, the way picked ones are read. */
+  readAttachments(files: { name: string; data: ArrayBuffer }[]): Promise<AttachmentsRead>
+  /**
+   * Sets what the model may do in a saved conversation without asking. It counts from the next
+   * tool call, also in a turn that is under way; a question that is already waiting still waits
+   * for its answer.
+   */
+  setPermissionMode(sessionId: string, mode: PermissionMode): Promise<void>
   /**
    * Compacts a conversation now, with the model in use, whatever its context still holds. What
    * was done is told through `onEvent`, as in a turn. `done` is false when there was nothing

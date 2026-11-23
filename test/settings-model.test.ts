@@ -432,3 +432,52 @@ test('conversations are compacted by themselves at four fifths of the context un
   assert.deepEqual(read.compaction, { share: 0.95 })
   assert.equal('compaction' in model.readSettings({ compaction: 'on' }), false)
 })
+
+test('a workspace can be given a name of its own, which goes when the workspace is forgotten', () => {
+  const windows = true
+  const fresh = model.readSettings({ recentWorkspaces: ['D:\\Work\\App', 'D:\\Notes'] })
+  assert.equal('workspaceNames' in fresh, false)
+  assert.deepEqual(model.toPublic(fresh).workspaceNames, {})
+
+  // Kept by the folder, on one line; the folder itself is not what is renamed.
+  let settings = model.nameWorkspace(fresh, 'D:\\Work\\App', '  主\n项目 ', windows)
+  assert.deepEqual(settings.workspaceNames, { 'd:/work/app': '主 项目' })
+  assert.deepEqual(model.toPublic(settings).workspaceNames, { 'd:/work/app': '主 项目' })
+  assert.deepEqual(settings.recentWorkspaces, fresh.recentWorkspaces)
+  // Another spelling of the folder is the same workspace.
+  settings = model.nameWorkspace(settings, 'd:/work/app/', 'Main', windows)
+  assert.deepEqual(settings.workspaceNames, { 'd:/work/app': 'Main' })
+  assert.deepEqual(model.readSettings(JSON.parse(JSON.stringify(settings))), settings, 'kept through a save and a load')
+  assert.equal(model.nameWorkspace(settings, 'D:\\Work\\App', 'x'.repeat(200), windows).workspaceNames?.['d:/work/app'].length, 60)
+
+  // An empty name takes the given one back, and so does the folder's own; nothing is then written down.
+  for (const none of ['', '  \n ', 'App', 7, null, undefined]) {
+    assert.deepEqual(model.nameWorkspace(settings, 'D:\\Work\\App', none, windows), fresh, String(none))
+  }
+  assert.throws(() => model.nameWorkspace(settings, '  ', 'Main', windows), /No folder was named/)
+
+  // Where case tells folders apart, so it does their names.
+  const posix = model.nameWorkspace(model.nameWorkspace(fresh, '/home/me/App', 'One', false), '/home/me/app', 'Two', false)
+  assert.deepEqual(posix.workspaceNames, { '/home/me/App': 'One', '/home/me/app': 'Two' })
+
+  // Forgotten, a folder is no longer among the remembered ones, in whichever spelling it is asked for, and its name goes with it.
+  settings = model.nameWorkspace(settings, 'D:\\Notes', '笔记', windows)
+  const gone = model.forgetWorkspace(settings, 'd:\\work\\app\\', windows)
+  assert.deepEqual(gone.recentWorkspaces, ['D:\\Notes'])
+  assert.deepEqual(gone.workspaceNames, { 'd:/notes': '笔记' })
+  const empty = model.forgetWorkspace(gone, 'D:\\Notes', windows)
+  assert.equal('recentWorkspaces' in empty, false)
+  assert.equal('workspaceNames' in empty, false)
+  assert.deepEqual(empty.providers, fresh.providers, 'nothing else is touched')
+  assert.deepEqual(model.forgetWorkspace(fresh, 'D:\\Elsewhere', windows), fresh, 'a folder that was not remembered changes nothing')
+
+  // A file that holds something else is read as far as it makes sense.
+  const read = model.readSettings(JSON.parse('{"workspaceNames":{"d:/a":" A  1 ","d:/b":"","d:/c":5,"":"x","__proto__":"P"}}'))
+  assert.deepEqual(Object.entries(read.workspaceNames ?? {}), [
+    ['d:/a', 'A 1'],
+    // A folder like any other, not the object's own workings.
+    ['__proto__', 'P']
+  ])
+  assert.equal(Object.getPrototypeOf(read.workspaceNames), Object.prototype)
+  for (const odd of ['names', ['d:/a'], 5, null, {}]) assert.equal('workspaceNames' in model.readSettings({ workspaceNames: odd }), false, String(odd))
+})

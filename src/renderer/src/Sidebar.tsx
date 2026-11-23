@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
-import type { KeyboardEvent, MouseEvent, PointerEvent, ReactNode } from 'react'
-import { groupByWorkspace } from '../../shared/folders.ts'
+import type { KeyboardEvent, MouseEvent, PointerEvent, ReactNode, RefObject } from 'react'
+import { WORKSPACE_NAME_LIMIT, cleanWorkspaceName, folderName, groupByWorkspace, workspaceName } from '../../shared/folders.ts'
+import type { WorkspaceGroup } from '../../shared/folders.ts'
 import { SHORTCUTS, keysLabel } from '../../shared/shortcuts.ts'
 import { SESSION_ICONS } from '../../shared/types.ts'
 import type { SessionHit, SessionIcon, SessionSummary } from '../../shared/types.ts'
@@ -12,6 +13,7 @@ import {
   MoreIcon,
   PluginIcon,
   PlusIcon,
+  QuillIcon,
   ResetIcon,
   SearchIcon,
   SettingsIcon,
@@ -151,126 +153,80 @@ interface Actions {
   onDelete: (id: string) => Promise<void>
 }
 
+/** What can be done to a workspace as a whole. The folder itself is never touched. */
+interface WorkspaceActions {
+  /** An empty name gives the workspace back the name of its folder. */
+  onRenameWorkspace: (folder: string, name: string) => Promise<void>
+  /** Archives the sessions the list shows under the workspace. */
+  onArchiveWorkspace: (folder: string) => Promise<void>
+  /** Deletes `sessions`, which are the ones the person was shown and said yes to, and takes the workspace out of the list. */
+  onRemoveWorkspace: (folder: string, sessions: string[]) => Promise<void>
+}
+
 /** The size the session menu takes on screen, for keeping it inside the window. `.menu.session-menu` has the width. */
 const MENU = { width: 188, height: 208 }
+/** The menu of a workspace is as wide, and has its three entries without the marks above them. */
+const GROUP_MENU = { width: MENU.width, height: 108 }
 /** How many marks the menu shows in a row; `.icon-grid` has as many columns. */
 const MARK_COLUMNS = 6
 
-/** A piece of a message that a search found, with the words that were looked for set off in it. */
-function Snippet({ text, marks }: NonNullable<SessionHit['snippet']>) {
-  const parts: ReactNode[] = []
-  let at = 0
-  for (const [from, to] of marks) {
-    if (from < at) continue
-    if (from > at) parts.push(text.slice(at, from))
-    parts.push(<mark key={from}>{text.slice(from, to)}</mark>)
-    at = to
-  }
-  if (at < text.length) parts.push(text.slice(at))
-  return <span className="session-snippet">{parts}</span>
-}
-
-/** One session in the list: its mark and its name, and a menu to mark, rename, archive or delete it. */
-function SessionRow({
-  session,
-  active,
-  busy,
-  markSlot,
-  snippet,
-  onError,
-  onOpen,
-  onRename,
-  onArchive,
-  onIcon,
-  onDelete
-}: Actions & {
-  session: SessionSummary
-  active: boolean
-  /** While a turn runs, sessions can be neither switched nor changed. */
-  busy: boolean
-  /** Room for a mark is kept even without one, because a session around this one has a mark: the names stay in line. */
-  markSlot: boolean
-  /** Where in the session a search found its words, when that was in a message and not in the name. */
-  snippet?: SessionHit['snippet']
-  onError: (message: string) => void
-}) {
+/**
+ * The menu of a row of the list: of a session, or of a workspace. It opens under the row's button
+ * for more, or where the row was right-clicked, in window coordinates, so that the scrolling list
+ * cannot cut it off. A press elsewhere closes it, and so does the list scrolling. Both menus end
+ * in an entry that deletes and takes a second press: `confirming` says that the first was made.
+ */
+function useRowMenu(rowRef: RefObject<HTMLElement | null>, moreRef: RefObject<HTMLElement | null>, size: { width: number; height: number }) {
   /** Where the menu is shown, in window coordinates; null while it is closed. */
-  const [menu, setMenu] = useState<{ left: number; top?: number; bottom?: number } | null>(null)
-  /** The new name being typed; null while the row is not being renamed. */
-  const [draft, setDraft] = useState<string | null>(null)
-  /** Deleting takes a second press on the same entry. */
+  const [place, setPlace] = useState<{ left: number; top?: number; bottom?: number } | null>(null)
   const [confirming, setConfirming] = useState(false)
-  const rowRef = useRef<HTMLDivElement>(null)
-  const moreRef = useRef<HTMLButtonElement>(null)
 
-  const closeMenu = (refocus: boolean): void => {
-    setMenu(null)
+  const close = (refocus: boolean): void => {
+    setPlace(null)
     setConfirming(false)
     if (refocus) moreRef.current?.focus()
   }
-  useOutsidePress(menu !== null, rowRef, () => closeMenu(false))
+  useOutsidePress(place !== null, rowRef, () => close(false))
 
   // The menu is placed in window coordinates, so it would stay behind if the list scrolled.
   useEffect(() => {
-    if (!menu) return
-    const onScroll = (): void => closeMenu(false)
+    if (!place) return
+    const onScroll = (): void => close(false)
     window.addEventListener('scroll', onScroll, true)
     return () => window.removeEventListener('scroll', onScroll, true)
   })
 
   useEffect(() => {
-    if (menu) rowRef.current?.querySelector<HTMLElement>('.menu-item')?.focus({ preventScroll: true })
-  }, [menu])
-
-  // Renaming starts with the whole name selected, so typing replaces it.
-  const renaming = draft !== null
-  useEffect(() => {
-    if (!renaming) return
-    const input = rowRef.current?.querySelector<HTMLInputElement>('.session-rename')
-    input?.focus({ preventScroll: true })
-    input?.select()
-  }, [renaming])
+    if (place) rowRef.current?.querySelector<HTMLElement>('.menu-item')?.focus({ preventScroll: true })
+  }, [place, rowRef])
 
   /** Opens the menu at a point, turned upwards when it would run off the bottom of the window. */
-  const openMenuAt = (x: number, top: number, bottomOfAnchor: number): void => {
-    const left = Math.max(8, Math.min(x, window.innerWidth - MENU.width - 8))
+  const openAt = (x: number, top: number, bottomOfAnchor: number): void => {
+    const left = Math.max(8, Math.min(x, window.innerWidth - size.width - 8))
     const roomBelow = window.innerHeight - bottomOfAnchor
     setConfirming(false)
-    setMenu(roomBelow >= MENU.height + 12 ? { left, top: bottomOfAnchor + 4 } : { left, bottom: window.innerHeight - top + 4 })
+    setPlace(roomBelow >= size.height + 12 ? { left, top: bottomOfAnchor + 4 } : { left, bottom: window.innerHeight - top + 4 })
   }
 
-  const onMore = (): void => {
-    if (menu) return closeMenu(false)
+  /** The button for more opens the menu under itself, and closes the open one. */
+  const toggle = (): void => {
+    if (place) return close(false)
     const rect = moreRef.current?.getBoundingClientRect()
-    if (rect) openMenuAt(rect.left, rect.top, rect.bottom)
+    if (rect) openAt(rect.left, rect.top, rect.bottom)
   }
 
-  const onContextMenu = (e: MouseEvent): void => {
-    if (busy || draft !== null) return
+  /** A right-click on the row opens the menu where the pointer is. */
+  const openAtPointer = (e: MouseEvent): void => {
     e.preventDefault()
-    openMenuAt(e.clientX, e.clientY, e.clientY)
+    openAt(e.clientX, e.clientY, e.clientY)
   }
 
-  const run = (action: Promise<void>): void => {
-    action.catch((err) => onError(errorText(err)))
-  }
-
-  const commitRename = (): void => {
-    const title = (draft ?? '').replace(/\s+/g, ' ').trim()
-    setDraft(null)
-    if (title && title !== session.title) run(onRename(session.id, title))
-  }
-
-  const chooseIcon = (icon: SessionIcon | null): void => {
-    closeMenu(false)
-    if (icon !== (session.icon ?? null)) run(onIcon(session.id, icon))
-  }
-
-  const onMenuKeyDown = (e: KeyboardEvent<HTMLDivElement>): void => {
+  /** Escape closes the menu. The arrows move through its entries and, where it has marks, through those as in a grid. */
+  const onKeyDown = (e: KeyboardEvent<HTMLDivElement>): void => {
     if (e.key === 'Escape') {
       e.preventDefault()
       e.stopPropagation()
-      return closeMenu(true)
+      return close(true)
     }
     const marks = Array.from(e.currentTarget.querySelectorAll<HTMLElement>('.icon-choice'))
     const items = Array.from(e.currentTarget.querySelectorAll<HTMLElement>('.menu-item'))
@@ -295,6 +251,88 @@ function SessionRow({
     target.focus()
   }
 
+  return { place, confirming, setConfirming, close, toggle, openAtPointer, onKeyDown }
+}
+
+/** A piece of a message that a search found, with the words that were looked for set off in it. */
+function Snippet({ text, marks }: NonNullable<SessionHit['snippet']>) {
+  const parts: ReactNode[] = []
+  let at = 0
+  for (const [from, to] of marks) {
+    if (from < at) continue
+    if (from > at) parts.push(text.slice(at, from))
+    parts.push(<mark key={from}>{text.slice(from, to)}</mark>)
+    at = to
+  }
+  if (at < text.length) parts.push(text.slice(at))
+  return <span className="session-snippet">{parts}</span>
+}
+
+/** One session in the list: its mark and its name, and a menu to mark, rename, archive or delete it. */
+function SessionRow({
+  session,
+  active,
+  working,
+  busy,
+  markSlot,
+  snippet,
+  place,
+  onError,
+  onOpen,
+  onRename,
+  onArchive,
+  onIcon,
+  onDelete
+}: Actions & {
+  session: SessionSummary
+  active: boolean
+  /** A turn of this session is under way: a ring turns at the left of its row. */
+  working: boolean
+  /** While a turn runs, sessions can be neither switched nor changed. */
+  busy: boolean
+  /** Room for a mark is kept even without one, because a session around this one has a mark: the names stay in line. */
+  markSlot: boolean
+  /** Where in the session a search found its words, when that was in a message and not in the name. */
+  snippet?: SessionHit['snippet']
+  /** The workspace the session ran in, by the name it goes by, for a session that is not listed under it. */
+  place?: string
+  onError: (message: string) => void
+}) {
+  /** The new name being typed; null while the row is not being renamed. */
+  const [draft, setDraft] = useState<string | null>(null)
+  const rowRef = useRef<HTMLDivElement>(null)
+  const moreRef = useRef<HTMLButtonElement>(null)
+  const menu = useRowMenu(rowRef, moreRef, MENU)
+
+  // Renaming starts with the whole name selected, so typing replaces it.
+  const renaming = draft !== null
+  useEffect(() => {
+    if (!renaming) return
+    const input = rowRef.current?.querySelector<HTMLInputElement>('.session-rename')
+    input?.focus({ preventScroll: true })
+    input?.select()
+  }, [renaming])
+
+  const onContextMenu = (e: MouseEvent): void => {
+    if (busy || draft !== null) return
+    menu.openAtPointer(e)
+  }
+
+  const run = (action: Promise<void>): void => {
+    action.catch((err) => onError(errorText(err)))
+  }
+
+  const commitRename = (): void => {
+    const title = (draft ?? '').replace(/\s+/g, ' ').trim()
+    setDraft(null)
+    if (title && title !== session.title) run(onRename(session.id, title))
+  }
+
+  const chooseIcon = (icon: SessionIcon | null): void => {
+    menu.close(false)
+    if (icon !== (session.icon ?? null)) run(onIcon(session.id, icon))
+  }
+
   const mark = (session.icon || markSlot) && (
     <span className="session-icon" aria-hidden="true">
       {session.icon && <SessionMark name={session.icon} />}
@@ -304,14 +342,21 @@ function SessionRow({
   return (
     <div
       ref={rowRef}
-      className={`session ${active ? 'session-active' : ''} ${menu ? 'session-menu-open' : ''}`}
+      className={`session ${active ? 'session-active' : ''} ${menu.place ? 'session-menu-open' : ''}`}
       onContextMenu={onContextMenu}
     >
+      {/* In the margin left of the mark, so that no name moves when it comes and goes. */}
+      {working && <span className="session-working" role="img" aria-label="正在工作" title="正在工作" />}
       {draft === null ? (
         <button className="session-open" disabled={busy} onClick={() => onOpen(session.id)} title={session.title}>
           {mark}
           <span className="session-words">
             <span className="session-title">{session.title}</span>
+            {place && (
+              <span className="session-place" title={`工作区：${session.workspace}`}>
+                {place}
+              </span>
+            )}
             {snippet && <Snippet {...snippet} />}
           </span>
         </button>
@@ -337,16 +382,16 @@ function SessionRow({
           className="session-more"
           disabled={busy}
           aria-haspopup="menu"
-          aria-expanded={menu !== null}
+          aria-expanded={menu.place !== null}
           aria-label={`会话"${session.title}"的更多操作`}
           title="更多操作"
-          onClick={onMore}
+          onClick={menu.toggle}
         >
           <MoreIcon />
         </button>
       )}
-      {menu && (
-        <div className="menu session-menu" role="menu" style={menu} onKeyDown={onMenuKeyDown}>
+      {menu.place && (
+        <div className="menu session-menu" role="menu" style={menu.place} onKeyDown={menu.onKeyDown}>
           {/* The marks, one press away: the first takes the mark off again. */}
           <div className="icon-grid" role="group" aria-label="图标">
             <button
@@ -381,7 +426,7 @@ function SessionRow({
             role="menuitem"
             className="menu-item"
             onClick={() => {
-              closeMenu(false)
+              menu.close(false)
               setDraft(session.title)
             }}
           >
@@ -393,7 +438,7 @@ function SessionRow({
             role="menuitem"
             className="menu-item"
             onClick={() => {
-              closeMenu(false)
+              menu.close(false)
               run(onArchive(session.id, !session.archived))
             }}
           >
@@ -403,15 +448,189 @@ function SessionRow({
           <button
             type="button"
             role="menuitem"
-            className="menu-item menu-item-danger"
+            // The second press is the one that deletes, and is made to look like it.
+            className={`menu-item menu-item-danger${menu.confirming ? ' menu-item-confirm' : ''}`}
             onClick={() => {
-              if (!confirming) return setConfirming(true)
-              closeMenu(false)
+              if (!menu.confirming) return menu.setConfirming(true)
+              menu.close(false)
               run(onDelete(session.id))
             }}
           >
             <TrashIcon />
-            {confirming ? '确认删除？' : '删除'}
+            {menu.confirming ? '确认删除？' : '删除'}
+          </button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+/**
+ * The head of a workspace: its name, which folds its sessions away and back; a menu to give the
+ * workspace another name, to archive its sessions, or to take it out of the list with them; and
+ * a button for a new chat in its folder.
+ */
+function GroupHead({
+  group,
+  open,
+  busy,
+  partial,
+  onToggle,
+  onNewChat,
+  onError,
+  onRenameWorkspace,
+  onArchiveWorkspace,
+  onRemoveWorkspace
+}: WorkspaceActions & {
+  group: WorkspaceGroup
+  /** The sessions of the group are on show. */
+  open: boolean
+  busy: boolean
+  /** The group holds what a search found, not all of its workspace: nothing is then done to the workspace as a whole. */
+  partial: boolean
+  onToggle: () => void
+  onNewChat: (workspace: string) => void
+  onError: (message: string) => void
+}) {
+  /** The new name being typed; null while the workspace is not being renamed. */
+  const [draft, setDraft] = useState<string | null>(null)
+  const headRef = useRef<HTMLDivElement>(null)
+  const moreRef = useRef<HTMLButtonElement>(null)
+  const menu = useRowMenu(headRef, moreRef, GROUP_MENU)
+
+  // Renaming starts with the whole name selected, so typing replaces it.
+  const renaming = draft !== null
+  useEffect(() => {
+    if (!renaming) return
+    const input = headRef.current?.querySelector<HTMLInputElement>('.group-rename')
+    input?.focus({ preventScroll: true })
+    input?.select()
+  }, [renaming])
+
+  const onContextMenu = (e: MouseEvent): void => {
+    if (busy || partial || renaming) return
+    menu.openAtPointer(e)
+  }
+
+  const run = (action: Promise<void>): void => {
+    action.catch((err) => onError(errorText(err)))
+  }
+
+  const commitRename = (): void => {
+    const name = cleanWorkspaceName(draft ?? '')
+    setDraft(null)
+    // An emptied box gives the workspace back the name of its folder.
+    if (name !== group.name) run(onRenameWorkspace(group.workspace, name))
+  }
+
+  return (
+    <div ref={headRef} className={`group-head ${menu.place ? 'group-menu-open' : ''}`} onContextMenu={onContextMenu}>
+      {draft === null ? (
+        <button className="group-toggle" aria-expanded={open} onClick={onToggle} title={group.workspace}>
+          <span className="group-chevron">
+            <ChevronDownIcon />
+          </span>
+          <FolderIcon />
+          <span className="group-name">{group.name}</span>
+        </button>
+      ) : (
+        // The arrow and the folder stay where they are, so that the name is typed where it stands.
+        <div className="group-toggle group-renaming" data-folded={open ? undefined : ''}>
+          <span className="group-chevron">
+            <ChevronDownIcon />
+          </span>
+          <FolderIcon />
+          <input
+            className="group-rename"
+            value={draft}
+            aria-label="工作区名称"
+            // What the workspace is called with the box left empty.
+            placeholder={folderName(group.workspace)}
+            maxLength={WORKSPACE_NAME_LIMIT}
+            spellCheck={false}
+            onChange={(e) => setDraft(e.target.value)}
+            onBlur={commitRename}
+            onKeyDown={(e) => {
+              // While an IME is composing, Enter confirms its candidate, not the name.
+              if (e.nativeEvent.isComposing) return
+              if (e.key === 'Enter') commitRename()
+              if (e.key === 'Escape') setDraft(null)
+            }}
+          />
+        </div>
+      )}
+      {draft === null && !partial && (
+        <button
+          ref={moreRef}
+          className="group-more"
+          disabled={busy}
+          aria-haspopup="menu"
+          aria-expanded={menu.place !== null}
+          aria-label={`工作区"${group.name}"的更多操作`}
+          title="更多操作"
+          onClick={menu.toggle}
+        >
+          <MoreIcon />
+        </button>
+      )}
+      {draft === null && (
+        <button
+          className="group-add"
+          disabled={busy}
+          onClick={() => onNewChat(group.workspace)}
+          aria-label={`在 ${group.name} 里开始新对话`}
+          title="在这个文件夹里开始新对话"
+        >
+          <PlusIcon />
+        </button>
+      )}
+      {menu.place && (
+        <div className="menu session-menu" role="menu" style={menu.place} onKeyDown={menu.onKeyDown}>
+          <button
+            type="button"
+            role="menuitem"
+            className="menu-item"
+            title="只改这里显示的名字，磁盘上的文件夹不改名"
+            onClick={() => {
+              menu.close(false)
+              setDraft(group.name)
+            }}
+          >
+            <ComposeIcon />
+            重命名
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            className="menu-item"
+            title="把这个工作区列出的对话都收进“已归档”"
+            onClick={() => {
+              menu.close(false)
+              run(onArchiveWorkspace(group.workspace))
+            }}
+          >
+            <ArchiveIcon />
+            全部归档
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            // The second press is the one that deletes, and says how much goes.
+            className={`menu-item menu-item-danger${menu.confirming ? ' menu-item-confirm' : ''}`}
+            title="删除这个工作区列出的对话，并把它从列表里拿掉。文件夹和里面的文件不动，已归档的对话保留。"
+            onClick={() => {
+              if (!menu.confirming) return menu.setConfirming(true)
+              menu.close(false)
+              run(
+                onRemoveWorkspace(
+                  group.workspace,
+                  group.sessions.map((s) => s.id)
+                )
+              )
+            }}
+          >
+            <TrashIcon />
+            {menu.confirming ? `确认删除 ${group.sessions.length} 个对话？` : '删除工作区'}
           </button>
         </div>
       )}
@@ -428,18 +647,28 @@ const SEARCH_DELAY_MS = 150
  */
 export function Sidebar({
   sessions,
+  names,
   activeId,
+  workingId,
   busy,
   page,
   onNewChat,
   onSearch,
   onPlugins,
   onSettings,
+  onRenameWorkspace,
+  onArchiveWorkspace,
+  onRemoveWorkspace,
   ...actions
-}: Actions & {
+}: Actions &
+  WorkspaceActions & {
   /** Most recent first. */
   sessions: SessionSummary[]
+  /** The names the person gave workspaces, by the key of the folder. A workspace not in here goes by the name of its folder. */
+  names?: Readonly<Record<string, string>>
   activeId: string | null
+  /** The session whose turn the page itself is running, if any. Of sessions at work elsewhere the list says so (`running`). */
+  workingId: string | null
   busy: boolean
   /** What the main part of the window shows: the conversation, or the plugins. */
   page: 'chat' | 'plugins'
@@ -490,7 +719,8 @@ export function Sidebar({
   const shown = filtered ? sessions.filter((s) => hits.has(s.id)) : sessions
   const groups = groupByWorkspace(
     shown.filter((s) => !s.archived),
-    isWindows
+    isWindows,
+    names
   )
   const archived = shown.filter((s) => s.archived)
 
@@ -527,17 +757,22 @@ export function Sidebar({
     return () => clearTimeout(timer)
   }, [error])
 
-  /** The sessions of one group. When one of them has a mark, all of them keep room for one. */
-  const rows = (list: SessionSummary[]) => {
+  /**
+   * The sessions of one group. When one of them has a mark, all of them keep room for one.
+   * `placed` is for a group that is not a workspace: each session then says which one it ran in.
+   */
+  const rows = (list: SessionSummary[], placed = false) => {
     const markSlot = list.some((s) => s.icon)
     return list.map((session) => (
       <SessionRow
         key={session.id}
         session={session}
         active={session.id === activeId}
+        working={session.running === true || session.id === workingId}
         busy={busy}
         markSlot={markSlot}
         snippet={filtered ? hits.get(session.id)?.snippet : undefined}
+        place={placed ? workspaceName(session.workspace, names, isWindows) : undefined}
         onError={setError}
         {...actions}
       />
@@ -547,7 +782,7 @@ export function Sidebar({
   return (
     <aside className="sidebar">
       <button className="btn btn-primary sidebar-new" onClick={() => onNewChat()} disabled={busy}>
-        <ComposeIcon />
+        <QuillIcon />
         新对话
       </button>
       <div className="sidebar-nav">
@@ -600,24 +835,18 @@ export function Sidebar({
           const open = filtered || !collapsed.includes(group.key)
           return (
             <section key={group.key} className="group">
-              <div className="group-head">
-                <button className="group-toggle" aria-expanded={open} onClick={() => !filtered && toggle(group.key)} title={group.workspace}>
-                  <span className="group-chevron">
-                    <ChevronDownIcon />
-                  </span>
-                  <FolderIcon />
-                  <span className="group-name">{group.name}</span>
-                </button>
-                <button
-                  className="group-add"
-                  disabled={busy}
-                  onClick={() => onNewChat(group.workspace)}
-                  aria-label={`在 ${group.name} 里开始新对话`}
-                  title="在这个文件夹里开始新对话"
-                >
-                  <PlusIcon />
-                </button>
-              </div>
+              <GroupHead
+                group={group}
+                open={open}
+                busy={busy}
+                partial={filtered}
+                onToggle={() => !filtered && toggle(group.key)}
+                onNewChat={onNewChat}
+                onError={setError}
+                onRenameWorkspace={onRenameWorkspace}
+                onArchiveWorkspace={onArchiveWorkspace}
+                onRemoveWorkspace={onRemoveWorkspace}
+              />
               {open && <div className="group-body">{rows(group.sessions)}</div>}
             </section>
           )
@@ -635,7 +864,7 @@ export function Sidebar({
                 <span className="group-count">{archived.length}</span>
               </button>
             </div>
-            {(archivedOpen || filtered) && <div className="group-body">{rows(archived)}</div>}
+            {(archivedOpen || filtered) && <div className="group-body">{rows(archived, true)}</div>}
           </section>
         )}
       </nav>

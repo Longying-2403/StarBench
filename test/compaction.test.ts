@@ -660,3 +660,40 @@ test('of what a reply cost, the next request carries all, but for thinking that 
     assert.deepEqual([wire.reasoning, wire.reasoning_content], [field === 'reasoning' ? message.reasoning_content : undefined, field === 'reasoning_content' ? message.reasoning_content : undefined])
   }
 })
+
+test('the record a summary is made from names the web searches a service did by itself', async () => {
+  const messages = tenTurns()
+  // The second reply was written after a search and a page read of the service's own, the fourth after a search that failed.
+  ;(messages[3] as Assistant).web = [
+    {
+      id: 's1',
+      kind: 'search',
+      queries: ['electron latest', 'electron 45'],
+      status: 'done',
+      sources: [{ url: 'https://example.com/a', title: 'Releases' }, { url: 'https://example.com/b' }]
+    },
+    { id: 'o1', kind: 'open', url: 'https://example.com/a', status: 'done' }
+  ]
+  ;(messages[7] as Assistant).web = [{ id: 's2', kind: 'search', queries: ['q'], status: 'failed', error: 'unavailable' }]
+  // A reply that is nothing but a search is still in the record.
+  messages[5] = { role: 'assistant', content: '', web: [{ id: 'o2', kind: 'open', status: 'done', sources: [{ url: 'https://example.com/c', title: 'Changelog' }] }] }
+  let record = ''
+  await compact(
+    job(messages, {
+      summarize: async (_system, given) => {
+        record = given
+        return 'The gist.'
+      }
+    })
+  )
+  // The searches stand before what was written with them: what was looked for, and what was found.
+  assert.ok(
+    record.includes(
+      '[assistant searched the web for "electron latest", "electron 45"] Pages found: Releases <https://example.com/a>; <https://example.com/b>\n[assistant read the web page https://example.com/a]\n[assistant]\na2 '
+    )
+  )
+  assert.ok(record.includes('[assistant searched the web for "q", which failed]\n[assistant]\na4 '))
+  assert.ok(record.includes('\n\n[assistant read the web page Changelog <https://example.com/c>]\n\n[user]\nu4 '))
+  // A reply without a search is written as it always was.
+  assert.ok(record.startsWith(`<record>\n[user]\n${words(100, 'u1 ')}\n\n[assistant]\n${words(700, 'a1 ')}\n\n[user]\nu2 `))
+})

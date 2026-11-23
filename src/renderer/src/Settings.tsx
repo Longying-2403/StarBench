@@ -28,12 +28,14 @@ type TabId = (typeof TABS)[number]['id']
 const KIND_LABELS: Record<ProviderKind, string> = {
   'openai-chat': 'OpenAI 兼容（Chat Completions）',
   'openai-responses': 'OpenAI（Responses API）',
-  anthropic: 'Anthropic（Messages API）'
+  anthropic: 'Anthropic（Messages API）',
+  gemini: 'Gemini（Gemini API）'
 }
 const KIND_HINTS: Record<ProviderKind, string> = {
   'openai-chat': 'DeepSeek、xAI 和大多数兼容 OpenAI 格式的服务都用这种。',
   'openai-responses': 'OpenAI 自己的新接口，能返回思考摘要。',
-  anthropic: 'Claude 的接口。'
+  anthropic: 'Claude 的接口。',
+  gemini: 'Google 自己的接口，能用 Google 搜索，能返回思考摘要。'
 }
 
 const hostOf = (url: string): string => {

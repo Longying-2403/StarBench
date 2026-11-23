@@ -1,19 +1,63 @@
 // Reading the stored conversation, shared by every provider's request builder.
 
-import type { ChatMessage } from '../../shared/types.ts'
+import { fileBlock, imageNote } from '../../shared/attachments.ts'
+import { VIEW_ONLY_RESULT } from '../../shared/permissions.ts'
+import type { ChatMessage, WebActivity } from '../../shared/types.ts'
 import type { AssistantMessage, Connection } from './types.ts'
+
+/** The most pages of one search that are named in a note of it. */
+const NOTE_SOURCES = 8
+
+/**
+ * What one web search or page read of a reply's own is told as, where it cannot go back in the
+ * service's own form: to another service, or to a request without the search tool. Without a
+ * word of it, a model that saw its earlier answer cite pages it had not visibly looked at took
+ * the answer back as made up (Claude, tried 2026-11-23).
+ */
+export function searchNote(activity: WebActivity): string {
+  // Told only by the pages' titles, the model went on to doubt what it had read in them: what it
+  // read is not here, and the note says so (tried with Claude, 2026-11-23).
+  if (activity.kind === 'open') {
+    return activity.status === 'failed'
+      ? `[Earlier you tried to read the page ${activity.url ?? ''}, and it failed.]`
+      : `[Earlier you read the page ${activity.url ?? ''}; its content is not repeated here.]`
+  }
+  const asked = (activity.queries ?? []).map((q) => `"${q}"`).join(', ')
+  const what = `Earlier you searched the web${asked ? ` for ${asked}` : ''}`
+  if (activity.status === 'failed') return `[${what}, and the search failed.]`
+  const found = (activity.sources ?? [])
+    .slice(0, NOTE_SOURCES)
+    .map((s) => (s.title ? `${s.title} <${s.url}>` : `<${s.url}>`))
+    .join('; ')
+  return `[${what} and read the results; they are not repeated here.${found ? ` Pages found: ${found}` : ''}]`
+}
+
+/** A reply's text with its web searches told in front of it (`searchNote`), as text that goes anywhere. */
+export function withSearchNote(message: AssistantMessage): string {
+  const note = (message.web ?? []).map(searchNote).join('\n')
+  if (!note) return message.content
+  return message.content ? `${note}\n\n${message.content}` : note
+}
 
 /** What stands in for the result of a tool call that never got one. */
 export const INTERRUPTED = 'Error: this tool call was interrupted before it produced a result.'
 
-/** What the model sees of a user message: a picked skill's text goes in front of what was typed. */
-export function userText(message: Extract<ChatMessage, { role: 'user' }>): string {
-  return message.skill ? `${message.skill.prompt}\n\n${message.content}` : message.content
+/**
+ * What the model reads of a user message. A picked skill's text goes in front of what was typed,
+ * and in front of both the text files the person attached, each under its name. Pictures are not
+ * text and go their own way (`userImages` in attachments.ts), except to a model that takes none
+ * (`Connection.noImages`): that one is told here that there was a picture it cannot see.
+ */
+export function userText(message: Extract<ChatMessage, { role: 'user' }>, connection?: Pick<Connection, 'noImages'>): string {
+  const typed = message.skill ? `${message.skill.prompt}\n\n${message.content}` : message.content
+  const files = (message.attachments ?? []).flatMap((file) => (file.kind === 'text' ? [fileBlock(file)] : connection?.noImages ? [imageNote(file)] : []))
+  if (files.length === 0) return typed
+  return typed ? `${files.join('\n\n')}\n\n${typed}` : files.join('\n\n')
 }
 
 /** Whether a stored tool result reports a failure, for the services that want failures marked. */
 export function isErrorResult(result: string): boolean {
-  return result.startsWith('Error:') || result === 'The user denied this tool call.' || result === 'Cancelled by user'
+  return result.startsWith('Error:') || result === 'The user denied this tool call.' || result === 'Cancelled by user' || result === VIEW_ONLY_RESULT
 }
 
 /**

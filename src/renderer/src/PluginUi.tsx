@@ -17,6 +17,7 @@ import type { PluginPlaceProps, PluginSlotName } from '../../shared/plugin-ui.ts
 import type { Settings } from '../../shared/types.ts'
 import { PLUGIN_CONTROLS } from './PluginControls.tsx'
 import { notify, toasts } from './Toasts.tsx'
+import { BugIcon, PluginIcon } from './icons.tsx'
 import { errorText } from './util.ts'
 
 const api = window.harness
@@ -425,6 +426,9 @@ function PluginSlot({ name }: { name: PluginSlotName }) {
   )
 }
 
+/** The plugin that comes with the app for looking into what passes between it and a model (plugins/debug). */
+const DEBUG_PLUGIN = 'debug'
+
 /** The buttons that open and close the panels of plugins: one for each plugin that has a panel, labelled with the panel's title. */
 function PluginPanelButtons() {
   const uis = usePluginUis()
@@ -443,7 +447,9 @@ function PluginPanelButtons() {
             title={`${open === ui.id ? '收起' : '打开'}插件“${ui.name}”的面板：${ui.panel.title}`}
             onClick={() => toggle(ui.id)}
           >
-            {ui.panel.title}
+            {/* The panel that comes with the app for looking into a model's behaviour has a drawing of its own; any other goes by the mark of plugins. */}
+            {ui.id === DEBUG_PLUGIN ? <BugIcon /> : <PluginIcon />}
+            <span className="plugin-panel-title">{ui.panel.title}</span>
           </button>
         ) : null
       )}
@@ -452,9 +458,9 @@ function PluginPanelButtons() {
 }
 
 /**
- * What plugins have in the row under the message box: their components for `composer.actions`,
- * then the buttons of their panels. Nothing at all while no plugin has either. When the row is
- * full these go onto further lines of their own, and the app's controls stay where they are.
+ * What plugins have in the row under the message box, beside the app's own button there: their
+ * components for `composer.actions`, then the buttons of their panels. Nothing at all while no
+ * plugin has either. When the row is full these go onto further lines of their own.
  */
 export function PluginRow() {
   const uis = usePluginUis()

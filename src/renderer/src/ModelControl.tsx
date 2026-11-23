@@ -1,9 +1,20 @@
 import { useEffect, useRef, useState } from 'react'
 import type { KeyboardEvent } from 'react'
 import { startingEffort } from '../../shared/effort-defaults.ts'
-import { REASONING_EFFORTS, effortName, isLocalAddress, offersFastMode, usualEfforts } from '../../shared/types.ts'
-import type { EffortLevel, ModelChoice, ModelInfo, ProviderInfo, ReasoningEffort, Settings } from '../../shared/types.ts'
-import { BoltIcon, CheckIcon, ChevronDownIcon, ChevronLeftIcon, ChevronRightIcon, ResetIcon, SettingsIcon } from './icons.tsx'
+import {
+  REASONING_EFFORTS,
+  effortName,
+  geminiSearchesWithTools,
+  isGemini,
+  isLocalAddress,
+  offersFastMode,
+  routesByConversation,
+  searchWorksAt,
+  usualEfforts,
+  webSearchService
+} from '../../shared/types.ts'
+import type { EffortLevel, ModelChoice, ModelInfo, ProviderInfo, ReasoningEffort, Settings, WebSearchService } from '../../shared/types.ts'
+import { BoltIcon, CheckIcon, ChevronDownIcon, ChevronLeftIcon, ChevronRightIcon, GlobeIcon, ResetIcon, SettingsIcon } from './icons.tsx'
 import { Slider } from './Slider.tsx'
 import { errorText, roomStyle, useOutsidePress, usePopupPlace } from './util.ts'
 
@@ -17,6 +28,32 @@ const levelName = (level: EffortLevel, baseURL: string | undefined): string => (
 
 /** The list gets a search field above this many models. */
 const SEARCH_THRESHOLD = 8
+
+/** Whose search the model uses, in the words of the switch. */
+const SEARCH_BY: Record<WebSearchService, string> = { openai: 'OpenAI', xai: 'xAI', anthropic: 'Anthropic', deepseek: 'DeepSeek', google: 'Google' }
+/**
+ * What a search costs with each service, as their price lists said on 2026-11-23. Google's is for
+ * Gemini 3 and later, billed for each search the model makes; its free tier has no search for them.
+ */
+const SEARCH_COST: Record<WebSearchService, string> = {
+  openai: '每千次搜索 10 美元，另加 Token',
+  xai: '每千次搜索 5 美元，另加 Token',
+  anthropic: '每千次搜索 10 美元，读网页不另收费，都另加 Token',
+  deepseek: '搜索不按次收费，只算 Token',
+  google: '每月前 5,000 次搜索免费，之后每千次 14 美元，读网页不另收费，都另加 Token；免费层级的 API Key 不能用'
+}
+
+/** Why the current model has no search to switch on, where there is more to say than that. */
+function noSearchReason(provider: ProviderInfo | undefined): string {
+  if (provider && isGemini(provider.baseURL)) {
+    // The search is on Gemini's own API, and there only with models that can have it together with the app's tools.
+    if (provider.kind !== 'gemini') return '要用 Gemini 原生接口连接，才能联网搜索'
+    if (provider.model && !geminiSearchesWithTools(provider.model)) return 'Gemini 2.5 及更早的模型不能一边联网搜索一边调用工具'
+  }
+  // xAI has its search in the Responses format only.
+  if (provider && provider.kind === 'openai-chat' && routesByConversation(provider.baseURL)) return '要用 Responses 格式连接 xAI 才能联网搜索'
+  return '当前模型不支持联网搜索'
+}
 
 /**
  * The height that is enough for each pane to open below the button. The slider needs all of its
@@ -62,6 +99,7 @@ export function ModelControl({
   modelInfo,
   onEffortChange,
   onFastChange,
+  onWebSearchChange,
   onSelectModel,
   onOpenSettings
 }: {
@@ -70,6 +108,7 @@ export function ModelControl({
   modelInfo: ModelInfo | null
   onEffortChange: (effort: ReasoningEffort) => void
   onFastChange: (on: boolean) => void
+  onWebSearchChange: (on: boolean) => void
   onSelectModel: (providerId: string, model: string) => void
   onOpenSettings: () => void
 }) {
@@ -114,6 +153,20 @@ export function ModelControl({
     : fastOn
       ? `Fast Mode 已开启：回答更快，${fastCost}。点击关闭`
       : `开启 Fast Mode：回答更快，${fastCost}`
+  /** The service's own web search: a switch for the models whose service has one. */
+  const searchService = active ? webSearchService(active) : undefined
+  // DeepSeek's search cannot go out while thinking is off (`searchWorksAt`): the switch stays as it was, and the search waits.
+  const searchHeld = Boolean(searchService) && !searchWorksAt(searchService, effort)
+  const searchOn = Boolean(searchService) && settings.webSearch && !searchHeld
+  const searchCost = searchService === 'openai' && active?.auth === 'chatgpt' ? '算在 ChatGPT 套餐额度里' : searchService ? SEARCH_COST[searchService] : ''
+  const searchWhat = searchService ? `模型用 ${SEARCH_BY[searchService]} 自带的搜索查网页、读网页，${searchCost}` : ''
+  const searchText = !searchService
+    ? noSearchReason(active)
+    : searchHeld
+      ? `${SEARCH_BY[searchService]} 关闭思考时不能联网搜索${settings.webSearch ? '，打开思考后会照常搜索' : ''}`
+      : searchOn
+        ? `联网搜索已开启：${searchWhat}。点击关闭`
+        : `开启联网搜索：${searchWhat}`
   // Faster answers show as particles streaming through the slider, at every level. Without them,
   // only the top of the scale has particles, and those twinkle where they are.
   const sparks = displayedAt < 0 ? 'none' : fastOn ? 'stream' : fromTop === 0 ? 'still' : 'none'
@@ -196,7 +249,7 @@ export function ModelControl({
 
   const effortPane = (
     <>
-      <div className="effort-head">
+      <div className="effort-head effort-head-switches">
         <button
           type="button"
           className="icon-btn"
@@ -208,6 +261,17 @@ export function ModelControl({
         >
           <BoltIcon />
         </button>
+        <button
+          type="button"
+          className="icon-btn web-toggle"
+          disabled={!searchService || searchHeld}
+          aria-label="联网搜索"
+          aria-pressed={searchService && !searchHeld ? searchOn : undefined}
+          title={searchText}
+          onClick={() => onWebSearchChange(!searchOn)}
+        >
+          <GlobeIcon />
+        </button>
         <div className="effort-heading">
           <div className="effort-level-name">{levelText}</div>
           <button type="button" className="effort-model-name" title={`切换模型（当前：${settings.model}）`} onClick={showModels}>
@@ -215,6 +279,8 @@ export function ModelControl({
             <ChevronRightIcon />
           </button>
         </div>
+        {/* Keeps the heading in the middle, with two switches on the other side. */}
+        <span />
         <button
           type="button"
           className="icon-btn"
@@ -326,10 +392,12 @@ export function ModelControl({
         className="effort-trigger"
         aria-haspopup="dialog"
         aria-expanded={open}
-        aria-label={settings.model ? `模型 ${name}，思考强度 ${levelText}${fastOn ? '，Fast Mode 已开启' : ''}，点击调整` : '选择模型'}
+        aria-label={
+          settings.model ? `模型 ${name}，思考强度 ${levelText}${fastOn ? '，Fast Mode 已开启' : ''}${searchOn ? '，联网搜索已开启' : ''}，点击调整` : '选择模型'
+        }
         title={
           settings.model
-            ? `模型：${settings.model}\n思考强度：${levelText}${fastOn ? '\nFast Mode：已开启' : ''}（从下一条消息开始生效）`
+            ? `模型：${settings.model}\n思考强度：${levelText}${fastOn ? '\nFast Mode：已开启' : ''}${searchOn ? '\n联网搜索：已开启' : ''}（从下一条消息开始生效）`
             : '选择模型'
         }
         onClick={() => {
@@ -345,6 +413,12 @@ export function ModelControl({
         {fastOn && (
           <span className="effort-fast">
             <BoltIcon />
+          </span>
+        )}
+        {/* Seen without opening the card too: the model may search the web, at the service's price. */}
+        {searchOn && (
+          <span className="effort-web">
+            <GlobeIcon />
           </span>
         )}
         <ChevronDownIcon />

@@ -3,13 +3,15 @@
 import type { ProviderKind } from '../../shared/types.ts'
 import { anthropicAdapter } from './anthropic.ts'
 import { chatAdapter } from './chat.ts'
+import { geminiAdapter } from './gemini.ts'
 import { responsesAdapter } from './responses.ts'
 import type { ProviderAdapter } from './types.ts'
 
 const ADAPTERS: Record<ProviderKind, ProviderAdapter> = {
   'openai-chat': chatAdapter,
   'openai-responses': responsesAdapter,
-  anthropic: anthropicAdapter
+  anthropic: anthropicAdapter,
+  gemini: geminiAdapter
 }
 
 export function adapterFor(kind: ProviderKind): ProviderAdapter {

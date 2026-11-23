@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { KeyboardEvent } from 'react'
 import { CheckIcon, ChevronDownIcon, FolderIcon, PlusIcon } from './icons.tsx'
-import { folderKey, folderName } from '../../shared/folders.ts'
+import { folderKey, workspaceName } from '../../shared/folders.ts'
 import { isWindows, roomStyle, useOutsidePress, usePopupPlace } from './util.ts'
 
 const api = window.harness
@@ -10,9 +10,18 @@ const sameFolder = (a: string, b: string): boolean => folderKey(a, isWindows) ==
 
 /**
  * The workspace of a new chat. Pressing it lists the folders used before, with an entry at
- * the bottom that opens the system dialog to add another.
+ * the bottom that opens the system dialog to add another. A folder goes by the name the person
+ * gave its workspace, where `names` holds one; its path stands under it either way.
  */
-export function FolderMenu({ workspace, onChoose }: { workspace: string; onChoose: (dir: string) => void }) {
+export function FolderMenu({
+  workspace,
+  names,
+  onChoose
+}: {
+  workspace: string
+  names?: Readonly<Record<string, string>>
+  onChoose: (dir: string) => void
+}) {
   const [open, setOpen] = useState(false)
   /** Null until the list has been read. */
   const [folders, setFolders] = useState<string[] | null>(null)
@@ -79,7 +88,7 @@ export function FolderMenu({ workspace, onChoose }: { workspace: string; onChoos
         onClick={() => (open ? close(false) : show())}
       >
         <FolderIcon />
-        <span className="folder-name">{workspace ? folderName(workspace) : '选择工作文件夹'}</span>
+        <span className="folder-name">{workspace ? workspaceName(workspace, names, isWindows) : '选择工作文件夹'}</span>
         <ChevronDownIcon />
       </button>
       {open && (
@@ -104,7 +113,7 @@ export function FolderMenu({ workspace, onChoose }: { workspace: string; onChoos
                       }}
                     >
                       <span className="menu-item-text">
-                        <span className="menu-item-name">{folderName(dir)}</span>
+                        <span className="menu-item-name">{workspaceName(dir, names, isWindows)}</span>
                         <span className="menu-item-path">{dir}</span>
                       </span>
                       {current && <CheckIcon />}

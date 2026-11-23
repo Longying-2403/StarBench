@@ -4,6 +4,7 @@
 import { COMPACTION_DEFAULTS, CAP_MAX, CAP_MIN, isCap, readShare } from '../shared/compaction.ts'
 import type { CompactionSettings } from '../shared/compaction.ts'
 import { startingEffort } from '../shared/effort-defaults.ts'
+import { cleanWorkspaceName, folderKey, folderName } from '../shared/folders.ts'
 import { sendsKeySafely } from '../shared/key-address.ts'
 import { CUSTOM_PROMPT_LIMIT, PROVIDER_KINDS, PROVIDER_PRESETS, isLocalAddress, isReasoningEffort } from '../shared/types.ts'
 import type { ChatGptAccount, CustomPrompt, ProviderInfo, ProviderInput, ProviderKind, ReasoningEffort, Settings } from '../shared/types.ts'
@@ -21,6 +22,8 @@ export interface StoredProvider {
   efforts?: Record<string, ReasoningEffort>
   /** The models of this provider for which faster answers were asked for. */
   fast?: string[]
+  /** The models of this provider that may search the web with the service's own search tool. */
+  search?: string[]
   /** The person's own instructions for this provider's models. */
   prompt?: CustomPrompt
   /** How many tokens the context of a model holds, for the models the person typed that in for. */
@@ -38,6 +41,14 @@ export interface StoredSettings {
   activeProviderId: string
   /** Folders picked as a workspace, most recent first. */
   recentWorkspaces?: string[]
+  /** The names the person gave workspaces, by the key of the folder (`folderKey`). The folders keep their own names on the disk. */
+  workspaceNames?: Record<string, string>
+  /**
+   * The folders the person said a model may read, as they were chosen. Absent in a file from
+   * before the app asked: the folders in use by then count as trusted (`trustFolders` is first
+   * called with them), and from then on the list is here, be it empty.
+   */
+  trustedFolders?: string[]
   /** Identifies this installation to the ChatGPT sign-in. Made once; it says nothing about the person. */
   hostId?: string
   /** The note that explains ChatGPT plan usage has been shown; it is shown once. */
@@ -112,6 +123,7 @@ function readProvider(raw: unknown, taken: readonly string[]): StoredProvider | 
     }
   }
   const fast = Array.isArray(raw.fast) ? [...new Set(raw.fast.filter((m): m is string => typeof m === 'string' && m !== ''))] : []
+  const search = Array.isArray(raw.search) ? [...new Set(raw.search.filter((m): m is string => typeof m === 'string' && m !== ''))] : []
   const prompt = readPrompt(raw.prompt)
   const windows: Record<string, number> = {}
   if (isObject(raw.windows)) {
@@ -124,6 +136,7 @@ function readProvider(raw: unknown, taken: readonly string[]): StoredProvider | 
     model: text(raw.model),
     ...(Object.keys(efforts).length ? { efforts } : {}),
     ...(fast.length ? { fast } : {}),
+    ...(search.length ? { search } : {}),
     ...(prompt ? { prompt } : {}),
     ...(Object.keys(windows).length ? { windows } : {})
   }
@@ -182,15 +195,85 @@ export function readSettings(raw: unknown): StoredSettings {
     ? source.recentWorkspaces.filter((dir): dir is string => typeof dir === 'string')
     : []
   const compaction = keptCompaction(isObject(source.compaction) ? source.compaction : {})
+  const names = keptNames(isObject(source.workspaceNames) ? source.workspaceNames : {})
+  // An empty list is kept: it says that the folders from before the app asked have been seen to.
+  const trusted = Array.isArray(source.trustedFolders) ? source.trustedFolders.filter((dir): dir is string => typeof dir === 'string' && dir.trim() !== '') : undefined
   return {
     providers,
     activeProviderId: active.id,
     ...(recent.length ? { recentWorkspaces: recent } : {}),
+    ...(names ? { workspaceNames: names } : {}),
+    ...(trusted ? { trustedFolders: trusted } : {}),
     ...(/^urn:uuid:[0-9a-f-]{36}$/i.test(text(source.hostId)) ? { hostId: text(source.hostId) } : {}),
     ...(source.chatgptWelcomed === true ? { chatgptWelcomed: true } : {}),
     ...(source.stats === false ? { stats: false as const } : {}),
     ...(compaction ? { compaction } : {})
   }
+}
+
+/** The names given to workspaces as they are written down: each as a typed one is kept, none of them empty. Undefined when there is none. */
+function keptNames(raw: Record<string, unknown>): StoredSettings['workspaceNames'] {
+  const names = new Map<string, string>()
+  for (const [key, name] of Object.entries(raw)) {
+    const clean = typeof name === 'string' ? cleanWorkspaceName(name) : ''
+    if (key && clean) names.set(key, clean)
+  }
+  // Made of its entries, so that a key like "__proto__" is a folder like any other.
+  return names.size ? Object.fromEntries(names) : undefined
+}
+
+/**
+ * Gives a workspace a name of the person's own, for the lists of the app: the folder keeps its
+ * name on the disk. An empty name, or the folder's own, takes a given one back. `name` arrives
+ * from the page, and `windows` says how folders are told apart on this computer (`folderKey`).
+ */
+export function nameWorkspace(settings: StoredSettings, folder: string, name: unknown, windows: boolean): StoredSettings {
+  const key = folderKey(folder, windows)
+  if (!key) throw new Error('No folder was named.')
+  const clean = typeof name === 'string' ? cleanWorkspaceName(name) : ''
+  const { workspaceNames: before = {}, ...rest } = settings
+  const names = keptNames({ ...before, [key]: clean === folderName(folder) ? '' : clean })
+  return names ? { ...rest, workspaceNames: names } : rest
+}
+
+/**
+ * Forgets a folder as a workspace: it is no longer among the remembered ones, and the name it was
+ * given goes with it. Used again later, the folder starts as any folder does, by its own name.
+ */
+export function forgetWorkspace(settings: StoredSettings, folder: string, windows: boolean): StoredSettings {
+  const key = folderKey(folder, windows)
+  const { recentWorkspaces: remembered = [], workspaceNames: before = {}, trustedFolders: trusted, ...rest } = settings
+  const recent = remembered.filter((dir) => folderKey(dir, windows) !== key)
+  const names = keptNames({ ...before, [key]: '' })
+  return {
+    ...rest,
+    ...(recent.length ? { recentWorkspaces: recent } : {}),
+    ...(names ? { workspaceNames: names } : {}),
+    // The yes it was given goes too: chosen again, it is asked about like any folder.
+    ...(trusted ? { trustedFolders: trusted.filter((dir) => folderKey(dir, windows) !== key) } : {})
+  }
+}
+
+/** Whether the person said a model may read a folder. `windows` says how folders are told apart on this computer (`folderKey`). */
+export function isTrusted(settings: Pick<StoredSettings, 'trustedFolders'>, folder: string, windows: boolean): boolean {
+  const key = folderKey(folder, windows)
+  return key !== '' && (settings.trustedFolders ?? []).some((dir) => folderKey(dir, windows) === key)
+}
+
+/**
+ * Adds folders to those a model may read, each once, and writes the list down even when it is
+ * empty: from then on it is the list that counts (see `StoredSettings.trustedFolders`).
+ */
+export function trustFolders(settings: StoredSettings, folders: readonly string[], windows: boolean): StoredSettings {
+  const trusted = [...(settings.trustedFolders ?? [])]
+  const keys = new Set(trusted.map((dir) => folderKey(dir, windows)))
+  for (const folder of folders) {
+    const key = typeof folder === 'string' ? folderKey(folder, windows) : ''
+    if (!key || keys.has(key)) continue
+    keys.add(key)
+    trusted.push(folder.trim())
+  }
+  return { ...settings, trustedFolders: trusted }
 }
 
 /** What is written down of the settings of compaction: only what differs from how the app comes. Undefined when nothing does. */
@@ -254,6 +337,11 @@ export function fastOf(provider: StoredProvider): boolean {
   return Boolean(provider.model) && (provider.fast?.includes(provider.model) ?? false)
 }
 
+/** Whether the provider's current model may search the web with the service's own search tool. */
+export function searchOf(provider: StoredProvider): boolean {
+  return Boolean(provider.model) && (provider.search?.includes(provider.model) ?? false)
+}
+
 /**
  * What the page is given: everything but the keys and tokens. `accounts` says, by provider id,
  * what the stored sign-ins hold; a ChatGPT provider that is not in it counts as signed out.
@@ -274,9 +362,12 @@ export function toPublic(settings: StoredSettings, accounts: Readonly<Record<str
     model: active.model,
     reasoningEffort: effortOf(active),
     fastMode: fastOf(active),
+    webSearch: searchOf(active),
     ready: providers.find((p) => p.id === active.id)?.ready ?? false,
     stats: settings.stats !== false,
-    compaction: compactionOf(settings)
+    compaction: compactionOf(settings),
+    workspaceNames: settings.workspaceNames ?? {},
+    trustedFolders: settings.trustedFolders ?? []
   }
 }
 
@@ -430,6 +521,18 @@ export function setFastFor(settings: StoredSettings, providerId: string, model: 
   return { ...settings, providers: settings.providers.map((p) => (p === provider ? next : p)) }
 }
 
+/** Lets one model of one provider search the web with the service's own search tool, or stops it. */
+export function setSearchFor(settings: StoredSettings, providerId: string, model: string, on: boolean): StoredSettings {
+  const provider = settings.providers.find((p) => p.id === providerId)
+  // Like faster answers, the choice belongs to a model: what it costs differs from model to model.
+  if (!provider || !model) return settings
+  const others = (provider.search ?? []).filter((m) => m !== model)
+  const search = on ? [...others, model] : others
+  const { search: _dropped, ...rest } = provider
+  const next: StoredProvider = search.length ? { ...rest, search } : rest
+  return { ...settings, providers: settings.providers.map((p) => (p === provider ? next : p)) }
+}
+
 /** A number of tokens that can be the size of a model's context. */
 const isWindow = (tokens: unknown): tokens is number => typeof tokens === 'number' && Number.isInteger(tokens) && tokens >= 256 && tokens <= 100_000_000
 
@@ -461,4 +564,10 @@ export function setStats(settings: StoredSettings, on: boolean): StoredSettings 
 export function setFast(settings: StoredSettings, on: boolean): StoredSettings {
   const active = activeProvider(settings)
   return setFastFor(settings, active.id, active.model, on)
+}
+
+/** Lets the active provider's current model search the web with the service's own search tool, or stops it. */
+export function setSearch(settings: StoredSettings, on: boolean): StoredSettings {
+  const active = activeProvider(settings)
+  return setSearchFor(settings, active.id, active.model, on)
 }

@@ -5,6 +5,7 @@ import { spawn } from 'node:child_process'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { Worker } from 'node:worker_threads'
+import type { ToolAccess } from '../shared/permissions.ts'
 import { decodeOutput } from './decode.ts'
 import { system32, windowsPowerShell } from './program-path.ts'
 
@@ -468,6 +469,13 @@ interface RegisteredTool {
   needsPermission: boolean
 }
 
+/**
+ * The tools of the app's own that change files of the workspace and do nothing else: what they
+ * write is held to the workspace (`workspacePath`). A conversation set to let files be changed
+ * without asking runs these unasked, and still asks about everything else.
+ */
+const EDITS_WORKSPACE: ReadonlySet<string> = new Set(['write_file', 'edit_file'])
+
 /** Every tool the model can call, whoever provided it. */
 export class ToolRegistry {
   private tools = new Map<string, RegisteredTool>()
@@ -518,6 +526,18 @@ export class ToolRegistry {
   /** Unknown tools need no prompt: running them only reports the error to the model. */
   needsPermission(name: string): boolean {
     return this.tools.get(name)?.needsPermission ?? false
+  }
+
+  /**
+   * What a tool does, as far as the permission modes tell tools apart (shared/permissions.ts). A
+   * tool that never asks only reads; of those that ask, the app's own tools for writing and
+   * editing files are the ones held to the workspace. A plugin's tool of the same name could not
+   * be registered, and one of another name is not taken at its word.
+   */
+  accessOf(name: string): ToolAccess {
+    const tool = this.tools.get(name)
+    if (!tool || !tool.needsPermission) return 'read'
+    return tool.source === 'builtin' && EDITS_WORKSPACE.has(name) ? 'edit' : 'other'
   }
 
   /** Runs a tool and always resolves with text; failures become an error message for the model. */

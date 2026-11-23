@@ -46,6 +46,16 @@ export function BoltIcon() {
   )
 }
 
+/** A globe: the web, which the model searches with its service's own tool. */
+export function GlobeIcon() {
+  return (
+    <svg {...line}>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M3 12h18M12 3c2.5 2.6 3.8 5.6 3.8 9s-1.3 6.4-3.8 9c-2.5-2.6-3.8-5.6-3.8-9s1.3-6.4 3.8-9z" />
+    </svg>
+  )
+}
+
 /** An arrow turning back on itself: "put it back the way it was". */
 export function ResetIcon() {
   return (
@@ -78,6 +88,17 @@ export function ComposeIcon() {
     <svg {...line}>
       <path d="M12 20h9" />
       <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z" />
+    </svg>
+  )
+}
+
+/** A quill writing a line: begin something new. */
+export function QuillIcon() {
+  return (
+    <svg {...line}>
+      <path d="M20.5 3C16 2.5 11.5 4.7 9.7 10.9l2.7 2.7C15.3 12.8 19 9.2 20.5 3z" />
+      <path d="M6.5 16.8 15 8.3" />
+      <path d="M4 20.5h1M9.5 20.5H20" />
     </svg>
   )
 }
@@ -194,6 +215,98 @@ export function ChevronDownIcon() {
   return (
     <svg {...line} width={12} height={12}>
       <path d="m6 9 6 6 6-6" />
+    </svg>
+  )
+}
+
+/** A paper clip: put a file with the message. */
+export function PaperclipIcon() {
+  return (
+    <svg {...line}>
+      <path d="M20.5 11.5 12 20a5 5 0 0 1-7-7l8.5-8.5a3.3 3.3 0 0 1 4.7 4.7L9.7 17.7a1.7 1.7 0 0 1-2.4-2.4L15 7.6" />
+    </svg>
+  )
+}
+
+/** An open book: the skills, which are instructions a model looks up when it needs them. */
+export function BookIcon() {
+  return (
+    <svg {...line}>
+      <path d="M12 6.5C10.5 5.2 8.3 4.5 5 4.5H3v13h2c3.3 0 5.5.7 7 2 1.5-1.3 3.7-2 7-2h2v-13h-2c-3.3 0-5.5.7-7 2z" />
+      <path d="M12 6.5v13" />
+    </svg>
+  )
+}
+
+/** A speech bubble with lines in it: what the model is told every time. */
+export function PromptIcon() {
+  return (
+    <svg {...line}>
+      <path d="M4 5h16a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1h-8l-5 4v-4H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1z" />
+      <path d="M7.5 9.5h9M7.5 13h6" />
+    </svg>
+  )
+}
+
+/** A bug: looking into why something behaves as it does. */
+export function BugIcon() {
+  return (
+    <svg {...line}>
+      <path d="M8 10.5a4 4 0 0 1 8 0V15a4 4 0 0 1-8 0z" />
+      <path d="M9.5 6.8a2.5 2.5 0 0 1 5 0" />
+      <path d="M12 11v8M8 12H4.5M8 16H5M16 12h3.5M16 16h3M9 5 7.5 3.5M15 5l1.5-1.5" />
+    </svg>
+  )
+}
+
+/** An eye: looking, and nothing more. */
+export function EyeIcon() {
+  return (
+    <svg {...line}>
+      <path d="M2.5 12s3.5-6.5 9.5-6.5 9.5 6.5 9.5 6.5-3.5 6.5-9.5 6.5S2.5 12 2.5 12z" />
+      <circle cx="12" cy="12" r="2.8" />
+    </svg>
+  )
+}
+
+/** A raised hand: stop and ask first. */
+export function HandIcon() {
+  return (
+    <svg {...line}>
+      <path d="M8 12.5V6.2a1.4 1.4 0 0 1 2.8 0V11" />
+      <path d="M10.8 11V4.4a1.4 1.4 0 0 1 2.8 0V11" />
+      <path d="M13.6 11V5.4a1.4 1.4 0 0 1 2.8 0v6.1" />
+      <path d="M16.4 11.5V8.2a1.4 1.4 0 0 1 2.8 0v6.3a6.5 6.5 0 0 1-6.5 6.5h-1.3a6 6 0 0 1-4.7-2.3l-3-3.9a1.5 1.5 0 0 1 2.4-1.8L8 14.9" />
+    </svg>
+  )
+}
+
+/** A pencil: changing what is written. */
+export function PencilIcon() {
+  return (
+    <svg {...line}>
+      <path d="M4 20l1-4L16.5 4.5a2.1 2.1 0 0 1 3 3L8 19z" />
+      <path d="m14.5 6.5 3 3" />
+    </svg>
+  )
+}
+
+/** A padlock left open: nothing is held back. */
+export function UnlockIcon() {
+  return (
+    <svg {...line}>
+      <rect x="5" y="11" width="14" height="9" rx="2" />
+      <path d="M8 11V7.5a4 4 0 0 1 7.6-1.7" />
+    </svg>
+  )
+}
+
+/** A sheet of paper with lines: a text file. */
+export function FileIcon() {
+  return (
+    <svg {...line}>
+      <path d="M7 3h7l5 5v12a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z" />
+      <path d="M14 3v5h5M9 13h6M9 17h6" />
     </svg>
   )
 }

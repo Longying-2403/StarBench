@@ -21,7 +21,7 @@ export interface PluginModel {
     id: string
     name: string
     /** 它用哪种接口格式。采样参数目前只对 `openai-chat` 生效。 */
-    kind: 'openai-chat' | 'openai-responses' | 'anthropic'
+    kind: 'openai-chat' | 'openai-responses' | 'anthropic' | 'gemini'
     /** 是不是用户自己运行的模型服务（地址在本机或局域网内）。 */
     local: boolean
   }
@@ -153,7 +153,7 @@ export interface ToolSpec {
 export interface SamplingTarget {
   /** 模型服务在设置里的 id。 */
   provider: string
-  kind: 'openai-chat' | 'openai-responses' | 'anthropic'
+  kind: 'openai-chat' | 'openai-responses' | 'anthropic' | 'gemini'
   baseURL: string
   /** 这个地址是不是在本机或局域网内，也就是用户自己运行的模型服务。 */
   local: boolean
@@ -174,7 +174,7 @@ export interface Exchange {
   provider: {
     id: string
     name: string
-    kind: 'openai-chat' | 'openai-responses' | 'anthropic'
+    kind: 'openai-chat' | 'openai-responses' | 'anthropic' | 'gemini'
     /** 是不是用户自己运行的模型服务。 */
     local: boolean
   }

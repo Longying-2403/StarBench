@@ -1,6 +1,6 @@
 // What the agent loop needs from a model service, whatever format the service speaks.
 
-import type { ChatMessage, CustomPrompt, ErrorHint, ModelChoice, ModelInfo, ProviderKind, ReasoningEffort } from '../../shared/types.ts'
+import type { ChatMessage, CustomPrompt, ErrorHint, ModelChoice, ModelInfo, ProviderKind, ReasoningEffort, WebActivity } from '../../shared/types.ts'
 import type { ToolDefinition } from '../tools.ts'
 import type { WireProbe } from '../trace.ts'
 
@@ -21,6 +21,11 @@ export interface Connection {
   /** Ask the service to write the answer faster, at its higher price. Set only where the model offers that. */
   fast?: boolean
   /**
+   * Let the model search the web, and read pages, with the service's own tool for that, which
+   * runs on the service's side (`webSearchService` in shared/types.ts). Set only where there is one.
+   */
+  webSearch?: boolean
+  /**
    * Set once a server turned out not to stream a reply while tools are offered (LLaMA-Factory's
    * API is one). Replies are then asked for in one piece, and the conversation is kept to strict
    * turns with one tool call at a time, which is all such a server takes.
@@ -34,6 +39,12 @@ export interface Connection {
    * (tool-text.ts), and the results go back as text. Only chat completions knows this.
    */
   textTools?: boolean
+  /**
+   * Set once a model turned out to take no pictures (`ImagesRefused` in attachments.ts). The
+   * pictures the person attached are then left out, and the model is told in words that there
+   * were some (`userText` in history.ts).
+   */
+  noImages?: boolean
   /**
    * Set when requests are paid for by the signed-in person's ChatGPT plan. Its tokens last an
    * hour, so `token` is asked before every request: it resolves with one that is good now, getting
@@ -97,6 +108,11 @@ export interface ModelRequest {
    * `shown` is all of the reply as it stands now; more of it may follow, as before.
    */
   onRewrite?(shown: { text: string; reasoning: string }): void
+  /**
+   * Called when the service began a web search or page read of its own (`Connection.webSearch`),
+   * and again as more of it is known, under the same id. The reply's `web` holds the last word on each.
+   */
+  onWebActivity?(activity: WebActivity): void
   /**
    * Called when the service turned down the faster answers `connection.fast` asked for (not
    * every model or account has them) and the request went out again without.

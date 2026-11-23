@@ -1,27 +1,37 @@
 import { useEffect, useRef, useState } from 'react'
 import type { KeyboardEvent } from 'react'
+import { MAX_ATTACHMENTS, MAX_IMAGE_FILE_BYTES } from '../../shared/attachments.ts'
+import type { Attachment, AttachmentsRead } from '../../shared/attachments.ts'
+import type { PermissionMode } from '../../shared/permissions.ts'
 import type { ModelInfo, ReasoningEffort, Settings, SkillInfo } from '../../shared/types.ts'
+import { AttachmentRow, attachable, problemsText } from './Attachments.tsx'
+import { ModeMenu } from './ModeMenu.tsx'
 import { ModelControl } from './ModelControl.tsx'
-import { PluginRow } from './PluginUi.tsx'
+import { PlusMenu } from './PlusMenu.tsx'
+import { notify } from './Toasts.tsx'
 import { EnterIcon, StopIcon } from './icons.tsx'
-import { roomStyle, usePopupPlace } from './util.ts'
+import { errorText, roomStyle, usePopupPlace } from './util.ts'
 
 const api = window.harness
 
 /**
- * The message box: the text, a menu for picking a skill by button or by typing "/", the button
- * for the person's own prompt, the model with its thinking effort, and the send button.
+ * The message box: the text, with the files put with it above it, and under it a row of what
+ * belongs to the message being written. At the left the "+" for adding files and picking a skill
+ * (typing "/" finds a skill too) and what the model may do without asking; at the right the model
+ * with its thinking effort, and the send button.
  */
 export function Composer({
   blocked,
   running,
   settings,
   modelInfo,
+  mode,
+  onModeChange,
   onEffortChange,
   onFastChange,
+  onWebSearchChange,
   onSelectModel,
   onOpenSettings,
-  onOpenPrompt,
   onSend,
   onStop
 }: {
@@ -32,30 +42,37 @@ export function Composer({
   settings: Settings | null
   /** What the service says about the current model, once known. */
   modelInfo: ModelInfo | null
+  /** What the model may do in this conversation without asking. */
+  mode: PermissionMode
+  onModeChange: (mode: PermissionMode) => void
   onEffortChange: (effort: ReasoningEffort) => void
   onFastChange: (on: boolean) => void
+  onWebSearchChange: (on: boolean) => void
   onSelectModel: (providerId: string, model: string) => void
   onOpenSettings: () => void
-  /** Opens the person's own instructions for the provider in use. */
-  onOpenPrompt: () => void
-  onSend: (text: string, skill?: string) => void
+  onSend: (text: string, skill: string | undefined, attachments: Attachment[]) => void
   onStop: () => void
 }) {
   const [draft, setDraft] = useState('')
   const [skills, setSkills] = useState<SkillInfo[]>([])
   const [picked, setPicked] = useState<string | null>(null)
-  /** Opened with the Skills button; the "/" trigger is derived from the draft instead. */
-  const [menuOpen, setMenuOpen] = useState(false)
+  /** The files put with the message being written. */
+  const [files, setFiles] = useState<Attachment[]>([])
+  /** Files are being held over the box, about to be dropped on it. */
+  const [dropping, setDropping] = useState(false)
   /** The draft for which Escape closed the "/" menu, so it stays closed until the text changes. */
   const [dismissed, setDismissed] = useState<string | null>(null)
   const [active, setActive] = useState(0)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const areaRef = useRef<HTMLDivElement>(null)
+  /** How many files the message holds, for the reading that ends later than the press that began it. */
+  const held = useRef(0)
+  held.current = files.length
 
   // "/name" with nothing after it is a skill search; "/usr/bin is missing" is an ordinary message.
   const slash = /^\/([\w-]*)$/.exec(draft)
   const slashOpen = slash !== null && dismissed !== draft
-  const visible = !blocked && (menuOpen || slashOpen)
+  const visible = !blocked && slashOpen
   const filter = slashOpen ? slash[1].toLowerCase() : ''
   const matches = visible ? skills.filter((s) => s.name.toLowerCase().includes(filter)) : []
   const activeIndex = Math.min(active, Math.max(matches.length - 1, 0))
@@ -64,27 +81,10 @@ export function Composer({
   // it once it is at the bottom. `.skill-menu` is 300px at its tallest and sits 6px from the box.
   const menuPlace = usePopupPlace(visible, areaRef, 300, 6)
 
-  /** What the person wrote for the models of the provider in use, if anything. */
-  const prompt = settings?.providers.find((p) => p.id === settings.activeProviderId)?.prompt
-  const promptText = !prompt
-    ? '提示词：给当前模型服务写一段固定的要求'
-    : prompt.replace
-      ? '提示词：已设置，替换了内置提示'
-      : '提示词：已设置，加在内置提示后面'
-
   // Read the list each time the menu opens: skills can be added while the app is running.
   useEffect(() => {
     if (visible) api.listSkills().then(setSkills, () => setSkills([]))
   }, [visible])
-
-  useEffect(() => {
-    if (!menuOpen) return
-    const onDown = (e: MouseEvent): void => {
-      if (!areaRef.current?.contains(e.target as Node)) setMenuOpen(false)
-    }
-    document.addEventListener('mousedown', onDown)
-    return () => document.removeEventListener('mousedown', onDown)
-  }, [menuOpen])
 
   useEffect(() => {
     if (visible) areaRef.current?.querySelector('.skill-option-active')?.scrollIntoView({ block: 'nearest' })
@@ -93,17 +93,48 @@ export function Composer({
   const pick = (name: string): void => {
     setPicked(name)
     if (slashOpen) setDraft('')
-    setMenuOpen(false)
     inputRef.current?.focus()
   }
 
+  /** Puts files that were read with the message, as far as they can go with one, and says of the others why not. */
+  const attach = async (reading: Promise<AttachmentsRead>): Promise<void> => {
+    try {
+      const { files: more, problems } = await attachable(await reading, MAX_ATTACHMENTS - held.current)
+      if (more.length) setFiles((now) => [...now, ...more].slice(0, MAX_ATTACHMENTS))
+      if (problems.length) notify({ kind: 'error', title: problems.length > 1 ? `${problems.length} 个文件没有添加` : '有一个文件没有添加', text: problemsText(problems) })
+    } catch (err) {
+      notify({ kind: 'error', title: '添加文件没有成功', text: errorText(err) })
+    }
+    inputRef.current?.focus()
+  }
+
+  /** Files dropped on the box or pasted into it: handed to the main process as their bytes, to be read the way picked ones are. */
+  const attachDropped = (dropped: File[]): Promise<void> =>
+    attach(
+      (async (): Promise<AttachmentsRead> => {
+        const problems: AttachmentsRead['problems'] = []
+        const given: { name: string; data: ArrayBuffer }[] = []
+        for (const file of dropped) {
+          try {
+            // One too large to be anything that is sent is not read at all. A folder cannot be read, and says so here.
+            if (file.size > MAX_IMAGE_FILE_BYTES) problems.push({ name: file.name, reason: 'too-large' })
+            else given.push({ name: file.name, data: await file.arrayBuffer() })
+          } catch {
+            problems.push({ name: file.name, reason: 'unreadable' })
+          }
+        }
+        const read = given.length ? await api.readAttachments(given) : { files: [], problems: [] }
+        return { files: read.files, problems: [...problems, ...read.problems] }
+      })()
+    )
+
   const submit = (): void => {
     const text = draft.trim()
-    if (!text || running || blocked) return
-    onSend(text, picked ?? undefined)
+    if ((!text && files.length === 0) || running || blocked) return
+    onSend(text, picked ?? undefined, files)
     setDraft('')
     setPicked(null)
-    setMenuOpen(false)
+    setFiles([])
   }
 
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>): void => {
@@ -112,7 +143,6 @@ export function Composer({
     if (visible) {
       if (e.key === 'Escape') {
         e.preventDefault()
-        setMenuOpen(false)
         if (slashOpen) setDismissed(draft)
         return
       }
@@ -140,11 +170,28 @@ export function Composer({
     <div
       className="composer"
       ref={areaRef}
+      data-dropping={dropping ? '' : undefined}
       // The whole card is the text box: a click on its padding puts the cursor in the text.
       onMouseDown={(e) => {
         if (e.target !== e.currentTarget) return
         e.preventDefault()
         inputRef.current?.focus()
+      }}
+      // Files can be dropped anywhere on the card. Only files: text that is dragged goes where text goes.
+      onDragOver={(e) => {
+        if (blocked || !e.dataTransfer.types.includes('Files')) return
+        e.preventDefault()
+        e.dataTransfer.dropEffect = 'copy'
+        setDropping(true)
+      }}
+      onDragLeave={(e) => {
+        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDropping(false)
+      }}
+      onDrop={(e) => {
+        setDropping(false)
+        if (blocked || e.dataTransfer.files.length === 0) return
+        e.preventDefault()
+        void attachDropped([...e.dataTransfer.files])
       }}
     >
       {visible && (
@@ -175,6 +222,7 @@ export function Composer({
           )}
         </div>
       )}
+      <AttachmentRow files={files} onRemove={(index) => setFiles((now) => now.filter((_, i) => i !== index))} />
       <textarea
         ref={inputRef}
         value={draft}
@@ -183,6 +231,12 @@ export function Composer({
           setActive(0)
         }}
         onKeyDown={onKeyDown}
+        // A picture copied from somewhere, or files copied in the file manager, are put with the message. Text is pasted as text.
+        onPaste={(e) => {
+          if (e.clipboardData.files.length === 0) return
+          e.preventDefault()
+          void attachDropped([...e.clipboardData.files])
+        }}
         placeholder={blocked || '输入消息，Shift+Enter 换行，输入 / 选择 Skill'}
         disabled={Boolean(blocked)}
         rows={1}
@@ -190,34 +244,9 @@ export function Composer({
         aria-controls={visible ? 'skill-menu' : undefined}
       />
       <div className="composer-bar">
-        <button
-          type="button"
-          className="btn btn-small"
-          aria-haspopup="listbox"
-          aria-expanded={visible}
-          disabled={Boolean(blocked)}
-          onClick={() => {
-            setActive(0)
-            setMenuOpen((open) => !open)
-            inputRef.current?.focus()
-          }}
-        >
-          Skills
-        </button>
-        {/* Does not wait for a folder or a model: what it sets counts from the next message, whenever that is. */}
-        <button
-          type="button"
-          className="btn btn-small"
-          aria-haspopup="dialog"
-          aria-label={promptText}
-          title={promptText}
-          data-set={prompt ? '' : undefined}
-          disabled={!settings}
-          onClick={onOpenPrompt}
-        >
-          提示词
-        </button>
-        <PluginRow />
+        <PlusMenu disabled={Boolean(blocked)} onAddFiles={() => void attach(api.pickAttachments())} onPickSkill={pick} />
+        {/* Does not wait for a folder or a model: it is about the conversation, whenever its next message goes out. */}
+        <ModeMenu mode={mode} onChange={onModeChange} />
         {picked && (
           <span className="chip">
             {picked}
@@ -232,6 +261,7 @@ export function Composer({
             modelInfo={modelInfo}
             onEffortChange={onEffortChange}
             onFastChange={onFastChange}
+            onWebSearchChange={onWebSearchChange}
             onSelectModel={onSelectModel}
             onOpenSettings={onOpenSettings}
           />
@@ -245,7 +275,7 @@ export function Composer({
             type="button"
             className="send"
             onClick={submit}
-            disabled={Boolean(blocked) || !draft.trim()}
+            disabled={Boolean(blocked) || (!draft.trim() && files.length === 0)}
             aria-label="发送"
             title="发送（Enter）"
           >

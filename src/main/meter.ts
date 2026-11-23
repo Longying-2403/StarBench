@@ -4,6 +4,7 @@
 // full record of a request, and only while a plugin watches.)
 // Nothing in this file depends on Electron.
 
+import { IMAGE_TOKENS } from '../shared/attachments.ts'
 import { SUMMARY_CLOSE, SUMMARY_OPEN } from '../shared/compaction.ts'
 import { estimateTokens, normalizeUsage } from '../shared/stats.ts'
 import type { ContextParts, StepMeasure } from '../shared/stats.ts'
@@ -41,7 +42,9 @@ export function messageWeight(message: ChatMessage): { said: number; summary: nu
     const tools = (message.tool_calls ?? []).reduce((sum, call) => sum + estimateTokens(call.name) + estimateTokens(call.arguments), 0)
     return { said: estimateTokens(message.content), summary: 0, tools }
   }
-  const skill = message.skill ? estimateTokens(message.skill.prompt) : 0
+  // What goes in front of what was typed: the text of a picked skill, and of the files put with the message. A picture weighs about the same whatever it shows.
+  const files = (message.attachments ?? []).reduce((sum, file) => sum + (file.kind === 'text' ? estimateTokens(file.text) : IMAGE_TOKENS), 0)
+  const skill = (message.skill ? estimateTokens(message.skill.prompt) : 0) + files
   // The summary itself never holds the closing tag (it is taken out when the summary is put together).
   const end = message.content.startsWith(SUMMARY_OPEN) ? message.content.indexOf(SUMMARY_CLOSE) : -1
   if (end < 0) return { said: estimateTokens(message.content) + skill, summary: 0, tools: 0 }

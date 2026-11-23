@@ -1,7 +1,11 @@
 import { Fragment, useCallback, useEffect, useReducer, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { ABOUT } from '../../shared/about.ts'
+import type { Attachment } from '../../shared/attachments.ts'
+import { folderKey } from '../../shared/folders.ts'
 import { hasHidden, revealHidden } from '../../shared/hidden-chars.ts'
+import { DEFAULT_PERMISSION_MODE, VIEW_ONLY_RESULT } from '../../shared/permissions.ts'
+import type { PermissionMode } from '../../shared/permissions.ts'
 import { formatShare, formatTokens } from '../../shared/stats.ts'
 import type { SessionStats } from '../../shared/stats.ts'
 import { CHATGPT_USAGE_URL, isLocalAddress } from '../../shared/types.ts'
@@ -16,19 +20,22 @@ import type {
   ToolCall
 } from '../../shared/types.ts'
 import { AnswerText } from './AnswerText.tsx'
+import { AttachmentRow } from './Attachments.tsx'
 import { Composer } from './Composer.tsx'
 import { FolderMenu } from './FolderMenu.tsx'
+import { PromptIcon, WarningIcon } from './icons.tsx'
 import { itemsFromMessages, itemsReducer, lastSummaryAt } from './items.ts'
 import type { Item } from './items.ts'
 import { Notice } from './Notice.tsx'
-import { PluginPanel, useAnnouncePlace } from './PluginUi.tsx'
+import { PluginPanel, PluginRow, useAnnouncePlace } from './PluginUi.tsx'
 import { PluginsPage } from './PluginsPage.tsx'
 import { PromptDialog } from './PromptDialog.tsx'
 import { SettingsDialog } from './Settings.tsx'
 import { Sidebar } from './Sidebar.tsx'
 import { StatusRow } from './StatusRow.tsx'
 import { ToastStack, notify, toasts } from './Toasts.tsx'
-import { errorText } from './util.ts'
+import { TrustDialog } from './TrustDialog.tsx'
+import { errorText, isWindows } from './util.ts'
 
 const api = window.harness
 const LAST_WORKSPACE_KEY = 'lastWorkspace'
@@ -130,21 +137,28 @@ function ToolDetails({ call }: { call: ToolCall }) {
   )
 }
 
-/** How a tool call ended, judged from the result text the agent loop recorded for it. */
-function toolStatus(output: string | undefined): { label: string; failed: boolean } {
-  if (output === undefined) return { label: '运行中…', failed: false }
-  if (output === 'The user denied this tool call.') return { label: '已拒绝', failed: true }
+/**
+ * How a tool call ended, judged from the result text the agent loop recorded for it. `held`: it
+ * was kept from running, or stopped, by the person: their no, their stop, or the conversation
+ * being set to view-only. That is their decision at work and not a failure, so it is shown as a
+ * warning and not as an error.
+ */
+function toolStatus(output: string | undefined): { label: string; how: 'fine' | 'held' | 'failed' } {
+  if (output === undefined) return { label: '运行中…', how: 'fine' }
+  if (output === 'The user denied this tool call.') return { label: '存取被拒', how: 'held' }
+  // Not run, and nobody was asked: the conversation is set to view-only.
+  if (output === VIEW_ONLY_RESULT) return { label: '存取被拒（仅可查看）', how: 'held' }
   // A command stopped part-way keeps the output it had and ends with the reason in brackets.
-  if (output === 'Cancelled by user' || output.endsWith('[Cancelled by user]')) return { label: '已取消', failed: true }
-  if (/\[Timed out after \d+s\]$/.test(output)) return { label: '超时', failed: true }
-  if (output.startsWith('Error:')) return { label: '失败', failed: true }
-  return { label: '完成', failed: false }
+  if (output === 'Cancelled by user' || output.endsWith('[Cancelled by user]')) return { label: '已取消', how: 'held' }
+  if (/\[Timed out after \d+s\]$/.test(output)) return { label: '超时', how: 'failed' }
+  if (output.startsWith('Error:')) return { label: '失败', how: 'failed' }
+  return { label: '完成', how: 'fine' }
 }
 
 function ToolCard({ item, faded }: { item: Extract<Item, { kind: 'tool' }>; faded: boolean }) {
-  const { label: status, failed } = toolStatus(item.output)
+  const { label: status, how } = toolStatus(item.output)
   return (
-    <details className={`tool${failed ? ' tool-failed' : ''}${faded ? ' faded' : ''}`}>
+    <details className={`tool${how === 'failed' ? ' tool-failed' : how === 'held' ? ' tool-held' : ''}${faded ? ' faded' : ''}`}>
       <summary>
         <span className="tool-name">{TOOL_LABELS[item.call.name] ?? item.call.name}</span>
         <span className="tool-summary">
@@ -152,7 +166,10 @@ function ToolCard({ item, faded }: { item: Extract<Item, { kind: 'tool' }>; fade
         </span>
         {/* Still shown here in full; the model is sent a line in its place. */}
         {item.cleared && <span className="tool-cleared">结果已清理</span>}
-        <span className="tool-status">{status}</span>
+        <span className="tool-status">
+          {how === 'held' && <WarningIcon />}
+          {status}
+        </span>
       </summary>
       <ToolDetails call={item.call} />
       {item.output !== undefined && (
@@ -163,6 +180,77 @@ function ToolCard({ item, faded }: { item: Extract<Item, { kind: 'tool' }>; fade
         </div>
       )}
     </details>
+  )
+}
+
+/** What the services' error codes for a search or page read mean; one not listed is shown as it came. */
+const WEB_ERRORS: Record<string, string> = {
+  max_uses_exceeded: '这一步能用的搜索次数用完了',
+  too_many_requests: '请求太频繁，服务暂时拒绝了',
+  query_too_long: '搜索词太长',
+  invalid_input: '服务认为输入无效',
+  invalid_tool_input: '服务认为输入无效',
+  unavailable: '搜索服务暂时不可用',
+  url_not_accessible: '打不开这个网址',
+  url_not_allowed: '这个网址不允许读取',
+  url_too_long: '网址太长',
+  unsupported_content_type: '不支持这种网页内容'
+}
+
+/** A link in Markdown that shows `title` and leads to `url`, whatever either holds. */
+const linkTo = (title: string, url: string): string => `[${title.replace(/[\\[\]]/g, '\\$&')}](<${url.replace(/[<>\s]/g, encodeURIComponent)}>)`
+
+/**
+ * Google's Search Suggestions for an answer that its search went into: a row of links to the same
+ * searches on Google. Google's terms want them shown with the answer, as they came and with nothing
+ * put between them and where they lead (Gemini API Additional Terms, "Grounding with Google
+ * Search"), so they are not folded away with the search. The HTML is Google's and is drawn
+ * unchanged, in a frame of its own that runs no script and cannot reach the page: all it can do
+ * is ask for a link to be opened, which the app does in the browser. It follows the system's
+ * light or dark look, as the page does.
+ */
+function SearchSuggestions({ html, faded }: { html: string; faded: boolean }) {
+  const page = `<!doctype html><html><head><meta charset="utf-8"><meta name="color-scheme" content="light dark"><base target="_blank"><style>html,body{margin:0;padding:1px;background:transparent;overflow:hidden}</style></head><body>${html}</body></html>`
+  return <iframe className={`search-suggestions${faded ? ' faded' : ''}`} title="Google 搜索建议" sandbox="allow-popups" srcDoc={page} />
+}
+
+/**
+ * A web search or page read that the model's service did by itself. Nothing ran on this
+ * computer and nothing was asked: it says what the service told, and links the pages it found.
+ */
+function WebCard({ item, faded, workspace }: { item: Extract<Item, { kind: 'web' }>; faded: boolean; workspace: string }) {
+  const { activity } = item
+  const reading = activity.kind === 'open'
+  const sources = activity.sources ?? []
+  const status = activity.status === 'running' ? (reading ? '读取中…' : '搜索中…') : activity.status === 'failed' ? '失败' : '完成'
+  const summary = reading ? (activity.url ?? activity.queries?.join(' · ') ?? '') : (activity.queries?.join(' · ') ?? '')
+  return (
+    <>
+      <details className={`tool tool-web${activity.status === 'failed' ? ' tool-failed' : ''}${faded ? ' faded' : ''}`}>
+        <summary>
+          <span className="tool-name">{reading ? '读取网页' : '搜索网页'}</span>
+          <span className="tool-summary">
+            <Shown text={summary} />
+          </span>
+          <span className="tool-status">{status}</span>
+        </summary>
+        {activity.error && (
+          <div className="arg">
+            <div className="arg-name">原因</div>
+            <div className="hint">{WEB_ERRORS[activity.error] ?? activity.error}</div>
+          </div>
+        )}
+        {sources.length > 0 && (
+          <div className="arg web-sources">
+            <div className="arg-name">{reading ? '读到的网页' : `找到 ${sources.length} 个网页`}</div>
+            <AnswerText text={sources.map((s) => `1. ${linkTo(s.title ?? s.url, s.url)}`).join('\n')} workspace={workspace} />
+          </div>
+        )}
+        {activity.status !== 'running' && sources.length === 0 && !activity.error && <div className="hint">服务没有列出找到的网页。</div>}
+      </details>
+      {/* Not folded away with the search: Google wants these seen with the answer. */}
+      {activity.suggestions && <SearchSuggestions html={activity.suggestions} faded={faded} />}
+    </>
   )
 }
 
@@ -242,6 +330,7 @@ function Transcript({ items, workspace, onOpenSettings }: { items: Item[]; works
           return (
             <div key={index} className={`msg msg-user${pale}`}>
               {item.skill && <span className="chip chip-block">Skill · {item.skill}</span>}
+              {item.attachments && <AttachmentRow files={item.attachments} sent />}
               {item.text}
             </div>
           )
@@ -260,6 +349,7 @@ function Transcript({ items, workspace, onOpenSettings }: { items: Item[]; works
           )
         }
         if (item.kind === 'tool') return <ToolCard key={index} item={item} faded={faded} />
+        if (item.kind === 'web') return <WebCard key={index} item={item} faded={faded} workspace={workspace} />
         if (item.kind === 'notice') {
           return (
             <Notice key={index} className={`msg${pale}`} role="status">
@@ -339,6 +429,24 @@ function PermissionBar({
   )
 }
 
+/**
+ * The button for the person's own prompt, under the message box: it is about every message to
+ * the models of the provider in use, not about the one being written. Lit when a prompt is set,
+ * which changes every answer.
+ */
+function PromptButton({ settings, onOpen }: { settings: Settings | null; onOpen: () => void }) {
+  /** What the person wrote for the models of the provider in use, if anything. */
+  const prompt = settings?.providers.find((p) => p.id === settings.activeProviderId)?.prompt
+  const text = !prompt ? '提示词：给当前模型服务写一段固定的要求' : prompt.replace ? '提示词：已设置，替换了内置提示' : '提示词：已设置，加在内置提示后面'
+  return (
+    // Does not wait for a folder or a model: what it sets counts from the next message, whenever that is.
+    <button type="button" className="btn btn-small" aria-haspopup="dialog" aria-label={text} title={text} data-set={prompt ? '' : undefined} disabled={!settings} onClick={onOpen}>
+      <PromptIcon />
+      <span>提示词</span>
+    </button>
+  )
+}
+
 export function App() {
   const [settings, setSettings] = useState<Settings | null>(null)
   const [modelInfo, setModelInfo] = useState<ModelInfo | null>(null)
@@ -354,6 +462,14 @@ export function App() {
   const [sessions, setSessions] = useState<SessionSummary[]>([])
   const [sessionId, setSessionId] = useState<string | null>(null)
   const [workspace, setWorkspace] = useState(readLastWorkspace)
+  /** What the model may do without asking in the conversation on the page. A new chat starts by asking. */
+  const [mode, setMode] = useState<PermissionMode>(DEFAULT_PERMISSION_MODE)
+  /**
+   * The folder a new chat is about to be in that the app has not been in before, while the person
+   * is asked whether a model may read it. `entered`: the chat is in it already (it was the folder
+   * used last), so a no has to take the chat out of it again.
+   */
+  const [trust, setTrust] = useState<{ folder: string; entered?: true } | null>(null)
   const [items, dispatch] = useReducer(itemsReducer, [])
   const [running, setRunning] = useState(false)
   /**
@@ -373,6 +489,8 @@ export function App() {
 
   // The event listener is registered once, so it reads the current session through a ref.
   const sessionRef = useRef<string | null>(null)
+  /** The sessions other than the one on the page that were heard to be at work, until their turn ends. */
+  const elsewhere = useRef(new Set<string>())
   const scrollRef = useRef<HTMLDivElement>(null)
   const stickToBottom = useRef(true)
   /** Where the conversation was scrolled to when last looked at, to tell the person moving up from the conversation growing. */
@@ -419,6 +537,17 @@ export function App() {
       if (event.type === 'turn_end') {
         setPrompts(({ [id]: _ended, ...rest }) => rest)
         toasts.dismissKey(`permission:${id}`)
+      }
+      // A session at work elsewhere than on this page is shown as such in the list, which is
+      // asked for anew when the first word of its turn comes and when the turn ends.
+      if (id !== sessionRef.current) {
+        if (event.type === 'turn_end') {
+          elsewhere.current.delete(id)
+          refreshSessions()
+        } else if (!elsewhere.current.has(id)) {
+          elsewhere.current.add(id)
+          refreshSessions()
+        }
       }
       if (id !== sessionRef.current) return
       if (event.type === 'stats') return setStats(event.stats)
@@ -475,13 +604,18 @@ export function App() {
     setSessionId(id)
     setStats(session.stats ?? null)
     setWorkspace(session.workspace)
+    setMode(session.permissionMode ?? DEFAULT_PERMISSION_MODE)
     stickToBottom.current = true
     // Where the conversation before this one was scrolled to says nothing about this one.
     lastTop.current = 0
     dispatch({ type: 'reset', items: itemsFromMessages(session.messages) })
   }
 
-  const chooseWorkspace = (dir: string): void => {
+  /** Whether the person said a model may read a folder. Unknown, and taken for yes, until the settings have been read. */
+  const trusted = (dir: string): boolean => !settings || settings.trustedFolders.some((known) => folderKey(known, isWindows) === folderKey(dir, isWindows))
+
+  /** Makes a folder the one the chat on the page is in, and the one a new chat starts in. */
+  const enterWorkspace = (dir: string): void => {
     setWorkspace(dir)
     try {
       localStorage.setItem(LAST_WORKSPACE_KEY, dir)
@@ -490,14 +624,56 @@ export function App() {
     }
   }
 
+  /** A folder was chosen for a new chat. One the app has not been in before is asked about first. */
+  const chooseWorkspace = (dir: string): void => {
+    if (trusted(dir)) enterWorkspace(dir)
+    else setTrust({ folder: dir })
+  }
+
+  // A new chat starts in the folder used last. Should that be one the person never said yes to
+  // (the settings were changed by hand, or the workspace was taken out of the app), it is asked
+  // about like any other, and a no leaves the chat without a folder.
+  const unasked = !sessionId && Boolean(workspace) && !trust && !trusted(workspace)
+  useEffect(() => {
+    if (unasked) setTrust({ folder: workspace, entered: true })
+  }, [unasked, workspace])
+
+  /** The person's yes to the folder they are asked about. */
+  const trustFolder = async (): Promise<void> => {
+    if (!trust) return
+    const saved = await api.trustFolder(trust.folder)
+    setSettings(saved)
+    enterWorkspace(trust.folder)
+    setTrust(null)
+  }
+
+  /** Their no. A chat that was already in the folder is taken out of it; otherwise it stays where it was. */
+  const distrustFolder = (): void => {
+    if (trust?.entered) {
+      setWorkspace('')
+      try {
+        localStorage.removeItem(LAST_WORKSPACE_KEY)
+      } catch {
+        // Nothing else depends on it.
+      }
+    }
+    setTrust(null)
+  }
+
   /** Starts an empty chat: in the given folder, or else in the one used last. */
   const newChat = (dir?: string): void => {
     sessionRef.current = null
     setPage('chat')
     setSessionId(null)
     setStats(null)
-    if (dir) chooseWorkspace(dir)
-    else setWorkspace(readLastWorkspace())
+    // What a conversation was allowed is not carried over to the next one.
+    setMode(DEFAULT_PERMISSION_MODE)
+    if (dir && trusted(dir)) enterWorkspace(dir)
+    else {
+      // Not the folder of the conversation that was on the page: a new chat is in the one used last, until another is said yes to.
+      setWorkspace(readLastWorkspace())
+      if (dir) setTrust({ folder: dir })
+    }
     dispatch({ type: 'reset', items: [] })
   }
 
@@ -524,19 +700,59 @@ export function App() {
     refreshSessions()
   }
 
+  const renameWorkspace = async (folder: string, name: string): Promise<void> => {
+    setSettings(await api.renameWorkspace(folder, name))
+  }
+
+  const archiveWorkspace = async (folder: string): Promise<void> => {
+    try {
+      const archived = await api.archiveWorkspace(folder)
+      if (sessionId && archived.includes(sessionId)) newChat()
+    } finally {
+      // Also when it failed: the list then shows how far it came.
+      refreshSessions()
+    }
+  }
+
+  /** Deletes the sessions the person was shown under a workspace, and takes the workspace out of the list and out of the folders on offer. */
+  const removeWorkspace = async (folder: string, ids: string[]): Promise<void> => {
+    try {
+      setSettings(await api.removeWorkspace(folder, ids))
+      const same = (dir: string): boolean => folderKey(dir, isWindows) === folderKey(folder, isWindows)
+      // A new chat no longer starts in the folder by itself.
+      if (same(readLastWorkspace())) {
+        try {
+          localStorage.removeItem(LAST_WORKSPACE_KEY)
+        } catch {
+          // Without it the folder is remembered until another one is used; nothing else depends on it.
+        }
+      }
+      if (sessionId ? ids.includes(sessionId) : same(workspace)) newChat()
+    } finally {
+      refreshSessions()
+    }
+  }
+
   const pickWorkspace = async (): Promise<void> => {
     const picked = await api.pickWorkspace()
     if (picked) chooseWorkspace(picked)
   }
 
-  const send = async (text: string, skill?: string): Promise<void> => {
+  /** Sets what the model may do without asking in the conversation on the page. A saved one keeps it; in one at work it counts from the next tool call. */
+  const changeMode = (next: PermissionMode): void => {
+    setMode(next)
+    if (!sessionId) return
+    api.setPermissionMode(sessionId, next).catch((err: unknown) => notify({ kind: 'error', title: '权限设置没有保存', text: errorText(err) }))
+  }
+
+  const send = async (text: string, skill: string | undefined, attachments: Attachment[]): Promise<void> => {
     if (running || !workspace) return
     setRunning(true)
     stickToBottom.current = true
     lastTop.current = 0
-    dispatch({ type: 'user', text, skill })
+    dispatch({ type: 'user', text, skill, attachments })
     try {
-      const id = await api.send(sessionId, workspace, text, skill)
+      const id = await api.send(sessionId, workspace, text, skill, { mode, ...(attachments.length ? { attachments } : {}) })
       sessionRef.current = id
       setSessionId(id)
       refreshSessions()
@@ -561,6 +777,15 @@ export function App() {
     // Shown at once, like the effort; the saved settings replace it when they come back.
     setSettings((s) => (s ? { ...s, fastMode: on } : s))
     api.setFastMode(on).then(setSettings, (err) => {
+      dispatch({ type: 'event', event: { type: 'error', message: errorText(err) } })
+      void api.getSettings().then(setSettings)
+    })
+  }
+
+  const changeWebSearch = (on: boolean): void => {
+    // Like Fast Mode: shown at once, replaced by the saved settings when they come back.
+    setSettings((s) => (s ? { ...s, webSearch: on } : s))
+    api.setWebSearch(on).then(setSettings, (err) => {
       dispatch({ type: 'event', event: { type: 'error', message: errorText(err) } })
       void api.getSettings().then(setSettings)
     })
@@ -647,9 +872,12 @@ export function App() {
     <div className="app">
       <Sidebar
         sessions={sessions}
+        names={settings?.workspaceNames}
         // While another page lies over the conversation, the list points at none of them.
         activeId={page === 'chat' ? sessionId : null}
         busy={running}
+        // The page knows of its own session at once; of the others the list says so.
+        workingId={running ? sessionId : null}
         page={page}
         onNewChat={newChat}
         onOpen={(id) => void openSession(id)}
@@ -657,6 +885,9 @@ export function App() {
         onArchive={archiveSession}
         onIcon={markSession}
         onDelete={removeSession}
+        onRenameWorkspace={renameWorkspace}
+        onArchiveWorkspace={archiveWorkspace}
+        onRemoveWorkspace={removeWorkspace}
         onSearch={api.searchSessions}
         onPlugins={() => setPage((now) => (now === 'plugins' ? 'chat' : 'plugins'))}
         onSettings={() => setShowSettings(true)}
@@ -712,32 +943,41 @@ export function App() {
 
           <div className="dock">
             {/* Before the first message the folder is chosen right above the box it applies to. */}
-            {empty && <FolderMenu workspace={workspace} onChoose={chooseWorkspace} />}
+            {empty && <FolderMenu workspace={workspace} names={settings?.workspaceNames} onChoose={chooseWorkspace} />}
             <Composer
               blocked={blocked}
               running={running}
               settings={settings}
               modelInfo={modelInfo}
+              mode={mode}
+              onModeChange={changeMode}
               onEffortChange={changeEffort}
               onFastChange={changeFast}
+              onWebSearchChange={changeWebSearch}
               onSelectModel={selectModel}
               onOpenSettings={() => setShowSettings(true)}
-              onOpenPrompt={() => setShowPrompt(true)}
-              onSend={(text, skill) => void send(text, skill)}
+              onSend={(text, skill, attachments) => void send(text, skill, attachments)}
               onStop={() => sessionId && void api.stop(sessionId)}
             />
-            {/* What the conversation has cost, once there is a reply to count. */}
-            {settings?.stats && stats && stats.steps > 0 && !empty && (
-              <StatusRow
-                stats={stats}
-                modelInfo={modelInfo}
-                local={Boolean(active && isLocalAddress(active.baseURL))}
-                compaction={settings.compaction}
-                busy={running}
-                onSetWindow={setContextWindow}
-                onCompact={() => void compactNow()}
-              />
-            )}
+            {/* Under the box: at the left what is not about the message being written (the person's own prompt, what plugins add), in the middle what the conversation has cost. */}
+            <div className="dock-row">
+              <div className="dock-tools">
+                <PromptButton settings={settings} onOpen={() => setShowPrompt(true)} />
+                <PluginRow />
+              </div>
+              {/* Once there is a reply to count. */}
+              {settings?.stats && stats && stats.steps > 0 && !empty && (
+                <StatusRow
+                  stats={stats}
+                  modelInfo={modelInfo}
+                  local={Boolean(active && isLocalAddress(active.baseURL))}
+                  compaction={settings.compaction}
+                  busy={running}
+                  onSetWindow={setContextWindow}
+                  onCompact={() => void compactNow()}
+                />
+              )}
+            </div>
           </div>
         </main>
         {page === 'plugins' && (
@@ -765,6 +1005,9 @@ export function App() {
       )}
 
       {showPrompt && active && <PromptDialog provider={active} onClose={() => setShowPrompt(false)} onSaved={setSettings} />}
+
+      {/* Asked anew for each folder: what was typed into the one before is not left in it. */}
+      {trust && <TrustDialog key={trust.folder} folder={trust.folder} onTrust={trustFolder} onCancel={distrustFolder} />}
 
       {welcome && (
         <div className="overlay">

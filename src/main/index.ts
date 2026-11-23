@@ -16,11 +16,16 @@ import type {
   SignInResult
 } from '../shared/types.ts'
 import { PLUGIN_UI_SCHEME, parsePluginUiUrl, pluginUiType } from '../shared/plugin-ui.ts'
+import { MAX_ATTACHMENTS, readAttachments } from '../shared/attachments.ts'
+import type { AttachmentsRead } from '../shared/attachments.ts'
 import { knownContextWindow } from '../shared/context-windows.ts'
+import { DEFAULT_PERMISSION_MODE, isPermissionMode } from '../shared/permissions.ts'
+import type { PermissionMode } from '../shared/permissions.ts'
 import { addCompaction, addStep, addToolTime, addTurn, emptyStats } from '../shared/stats.ts'
 import { isSessionIcon } from '../shared/types.ts'
 import { builtinPrompt, compactConversation, runTurn } from './agent.ts'
 import type { RoomOptions } from './agent.ts'
+import { attachData, attachFiles } from './attachments.ts'
 import { conversationName } from './conversation-name.ts'
 import { SignInError, startAttempt } from './chatgpt/login.ts'
 import type { Attempt } from './chatgpt/login.ts'
@@ -160,6 +165,8 @@ interface ActiveRun {
   provider: string
   /** Permission prompts of this run that are still waiting for the user. */
   pending: Set<string>
+  /** What the model may do in the conversation without asking. The person can change it while the run goes on; it is read before every tool call. */
+  mode: PermissionMode
 }
 const activeRuns = new Map<string, ActiveRun>()
 const permissionResolvers = new Map<string, (decision: PermissionDecision) => void>()
@@ -177,12 +184,18 @@ const textTools = new Map<string, string>()
  * same way. Later messages ask for whole replies at once, instead of failing first every time.
  */
 const wholeReplies = new Map<string, string>()
+/**
+ * Sessions in which the model turned out to take no pictures, kept the same way. Later messages
+ * tell it of the pictures in words at once (`Connection.noImages`), instead of being refused first.
+ */
+const noImages = new Map<string, string>()
 const modelKey = (connection: { provider: string; model: string }): string => `${connection.provider}\n${connection.model}`
 /** The connection, with what a session has found out about its server. */
 const asLearned = (sessionId: string, connection: Connection): Connection => ({
   ...connection,
   ...(wholeReplies.get(sessionId) === modelKey(connection) ? { wholeReplies: true } : {}),
-  ...(textTools.get(sessionId) === modelKey(connection) ? { textTools: true } : {})
+  ...(textTools.get(sessionId) === modelKey(connection) ? { textTools: true } : {}),
+  ...(noImages.get(sessionId) === modelKey(connection) ? { noImages: true } : {})
 })
 
 /** The folder the page and its own scripts are in. */
@@ -294,6 +307,7 @@ function registerIpc(): void {
   ipcMain.handle('app:info', () => ({ version: app.getVersion() }))
   ipcMain.handle('settings:setEffort', (_e, effort: unknown) => store.setReasoningEffort(effort))
   ipcMain.handle('settings:setFast', (_e, on: unknown) => store.setFastMode(on))
+  ipcMain.handle('settings:setWebSearch', (_e, on: unknown) => store.setWebSearch(on))
   ipcMain.handle('settings:setWindow', (_e, providerId: unknown, model: unknown, tokens: unknown) => store.setContextWindow(providerId, model, tokens))
   ipcMain.handle('settings:setStats', (_e, on: unknown) => store.setStats(on))
   ipcMain.handle('settings:setCompaction', (_e, change: unknown) => store.setCompaction(change))
@@ -427,10 +441,30 @@ function registerIpc(): void {
     if (!mainWindow) return null
     const result = await dialog.showOpenDialog(mainWindow, { properties: ['openDirectory', 'createDirectory'] })
     if (result.canceled || !result.filePaths[0]) return null
-    await store.rememberWorkspace(result.filePaths[0])
+    // Not remembered yet: a folder the app has not been in before is asked about first, and a no leaves no trace of it.
     return result.filePaths[0]
   })
+  // The person's yes to that question, which also remembers the folder.
+  ipcMain.handle('workspace:trust', (_e, folder: unknown) => store.trustFolder(folder))
   ipcMain.handle('workspace:list', () => store.listWorkspaces())
+
+  // Files to put with a message: picked in the system dialog, or dropped on the message box or
+  // pasted into it. Either way they are read and judged here (attachments.ts).
+  ipcMain.handle('attachments:pick', async (): Promise<AttachmentsRead> => {
+    if (!mainWindow) return { files: [], problems: [] }
+    const result = await dialog.showOpenDialog(mainWindow, { properties: ['openFile', 'multiSelections'] })
+    if (result.canceled) return { files: [], problems: [] }
+    return attachFiles(result.filePaths)
+  })
+  ipcMain.handle('attachments:read', (_e, files: unknown): AttachmentsRead => {
+    const given = Array.isArray(files) ? files : []
+    return attachData(
+      given.flatMap((file: unknown) => {
+        const { name, data } = typeof file === 'object' && file !== null ? (file as { name?: unknown; data?: unknown }) : {}
+        return data instanceof ArrayBuffer || ArrayBuffer.isView(data) ? [{ name: String(name ?? ''), data: data instanceof ArrayBuffer ? new Uint8Array(data) : new Uint8Array(data.buffer, data.byteOffset, data.byteLength) }] : []
+      })
+    )
+  })
 
   // The files an answer points to. What is read or opened lies in the folder of the conversation.
   ipcMain.handle('files:image', (_e, workspace: unknown, address: unknown) => readImage(String(workspace ?? ''), String(address ?? '')))
@@ -499,7 +533,8 @@ function registerIpc(): void {
     if (error) throw new Error(error)
   })
 
-  ipcMain.handle('sessions:list', () => store.listSessions())
+  // With which of them are at work just now, so that the list can show it.
+  ipcMain.handle('sessions:list', async () => (await store.listSessions()).map((s) => (activeRuns.has(s.id) ? { ...s, running: true as const } : s)))
   // What is typed into the search box of the sidebar. Longer than a search someone types is not one.
   ipcMain.handle('sessions:search', (_e, query: unknown) => (typeof query === 'string' ? store.searchSessions(query.slice(0, 400)) : []))
   ipcMain.handle('sessions:load', (_e, id: string) => store.loadSession(id))
@@ -522,15 +557,46 @@ function registerIpc(): void {
     if (icon !== null && !isSessionIcon(icon)) throw new Error('This is not one of the icons a session can have.')
     await store.updateSession(id, { icon })
   })
-  ipcMain.handle('sessions:delete', async (_e, id: string) => {
+  /** Deletes a saved session, and with it what is kept of it for as long as the app runs. */
+  const dropSession = async (id: string): Promise<void> => {
     activeRuns.get(id)?.controller.abort()
     alwaysAllowed.delete(id)
     textTools.delete(id)
     wholeReplies.delete(id)
+    noImages.delete(id)
     await store.deleteSession(id)
+  }
+  ipcMain.handle('sessions:delete', (_e, id: string) => dropSession(id))
+
+  // A workspace is known by its folder. What is asked of one is asked of the sessions the list
+  // shows under it, which are those not archived; nothing in the folder itself is touched.
+  ipcMain.handle('workspace:rename', (_e, folder: unknown, name: unknown) => store.nameWorkspace(String(folder ?? ''), name))
+  /** All of them or none: a workspace half put away, or half deleted, would have to be explained. */
+  const noneRunning = (sessions: readonly { id: string }[]): void => {
+    if (sessions.some((s) => activeRuns.has(s.id))) throw new Error('A session of this workspace is running. Try again when it has finished.')
+  }
+  ipcMain.handle('workspace:archive', async (_e, folder: unknown): Promise<string[]> => {
+    const shown = (await store.sessionsIn(String(folder ?? ''))).filter((s) => !s.archived)
+    noneRunning(shown)
+    for (const { id } of shown) await store.updateSession(id, { archived: true })
+    return shown.map((s) => s.id)
+  })
+  ipcMain.handle('workspace:remove', async (_e, folder: unknown, named: unknown): Promise<Settings> => {
+    const dir = String(folder ?? '')
+    const asked = new Set(Array.isArray(named) ? named.filter((id): id is string => typeof id === 'string') : [])
+    const all = await store.sessionsIn(dir)
+    // Deleted is what the person was shown and said yes to, and of that only what is of this
+    // workspace and in the list: not a session that came since, and none that is archived.
+    const going = all.filter((s) => !s.archived && asked.has(s.id))
+    noneRunning(going)
+    for (const { id } of going) await dropSession(id)
+    // A session that came since keeps the workspace in the list, and its folder is then still one to offer.
+    if (all.some((s) => !s.archived && !going.includes(s))) return store.getSettings()
+    // What is archived of it stays, and says from then on which folder it ran in.
+    return store.forgetWorkspace(dir)
   })
 
-  ipcMain.handle('agent:send', async (_e, sessionId: string | null, workspace: string, text: string, skill?: string) => {
+  ipcMain.handle('agent:send', async (_e, sessionId: string | null, workspace: string, text: string, skill?: string, extras?: unknown) => {
     const connection = await store.getConnection()
     if (!connection) throw new Error('The model service in use has no API key or sign-in yet. Open Settings to add one.')
     if (!connection.model) throw new Error('No model chosen yet. Pick one next to the message box.')
@@ -538,18 +604,25 @@ function registerIpc(): void {
     // Loaded before anything is saved, so a skill that vanished fails the send instead of the turn.
     const pickedSkill = skill ? { name: skill, prompt: selectedSkillPrompt(skill, await skills.load(skill)) } : undefined
     const systemExtra = skillsPrompt(await skills.list())
+    // What goes with the message arrives from the page, and is checked like everything that does.
+    const { mode: askedMode, attachments: given } = typeof extras === 'object' && extras !== null ? (extras as { mode?: unknown; attachments?: unknown }) : {}
+    const attachments = readAttachments(given)
+    if (typeof text !== 'string' || (!text.trim() && attachments.length === 0)) throw new Error('There is nothing to send.')
 
     let session: Session | null = sessionId ? await store.loadSession(sessionId) : null
     if (!session) {
       session = {
         id: randomUUID(),
-        title: text.trim().replace(/\s+/g, ' ').slice(0, 60) || 'New chat',
+        // A message that is files and no words is named after the first of them.
+        title: text.trim().replace(/\s+/g, ' ').slice(0, 60) || attachments[0]?.name.slice(0, 60) || 'New chat',
         workspace,
         updatedAt: Date.now(),
         messages: []
       }
     }
     const current = session
+    // What the page shows as the mode of the conversation at this moment is what counts; where it says nothing, what the conversation had.
+    const mode: PermissionMode = isPermissionMode(askedMode) ? askedMode : (current.permissionMode ?? DEFAULT_PERMISSION_MODE)
     // Writing in an archived session brings it back to the list.
     delete current.archived
     // Counted from the first message sent while the counting is on. A conversation that was
@@ -558,9 +631,9 @@ function registerIpc(): void {
     if (counting) current.stats = addTurn(current.stats ?? emptyStats(current.messages.length > 0))
     // Keeps the folder list in order of use. Not worth failing the message over.
     store.rememberWorkspace(current.workspace).catch((err) => console.error('[store] could not remember the folder:', err))
-    current.messages.push({ role: 'user', content: text, ...(pickedSkill ? { skill: pickedSkill } : {}) })
+    current.messages.push({ role: 'user', content: text, ...(pickedSkill ? { skill: pickedSkill } : {}), ...(attachments.length ? { attachments } : {}) })
 
-    const run: ActiveRun = { controller: new AbortController(), provider: connection.provider, pending: new Set() }
+    const run: ActiveRun = { controller: new AbortController(), provider: connection.provider, pending: new Set(), mode }
     activeRuns.set(current.id, run)
     let allowed = alwaysAllowed.get(current.id)
     if (!allowed) alwaysAllowed.set(current.id, (allowed = new Set()))
@@ -569,6 +642,9 @@ function registerIpc(): void {
     let saving: Promise<void> = Promise.resolve()
     const checkpoint = (): void => {
       current.updatedAt = Date.now()
+      // The mode as it is now: the person may have changed it while the turn ran. The one a conversation starts with is not written down.
+      if (run.mode === DEFAULT_PERMISSION_MODE) delete current.permissionMode
+      else current.permissionMode = run.mode
       const snapshot = structuredClone(current)
       saving = saving.then(() => store.saveSession(snapshot)).catch((err) => console.error('save failed', err))
     }
@@ -592,6 +668,7 @@ function registerIpc(): void {
         record: (exchange) => trace.emit(exchange, current.id)
       },
       alwaysAllowed: allowed,
+      permissionMode: () => run.mode,
       emit: (event) => send({ sessionId: current.id, event }),
       checkpoint,
       // The numbers are kept with the conversation, so the next checkpoint saves them; the page is told at once.
@@ -616,6 +693,7 @@ function registerIpc(): void {
       },
       onToolsRefused: () => textTools.set(current.id, modelKey(connection)),
       onStreamRefused: () => wholeReplies.set(current.id, modelKey(connection)),
+      onImagesRefused: () => noImages.set(current.id, modelKey(connection)),
       requestPermission: (call) =>
         new Promise<PermissionDecision>((resolve) => {
           const id = randomUUID()
@@ -642,7 +720,8 @@ function registerIpc(): void {
     if (!connection.model) throw new Error('No model chosen yet. Pick one next to the message box.')
     const session = await store.loadSession(id)
     if (!session) throw new Error('This session no longer exists.')
-    const run: ActiveRun = { controller: new AbortController(), provider: connection.provider, pending: new Set() }
+    // No tool runs while a conversation is compacted, so its mode has nothing to say here; it is kept as the session has it.
+    const run: ActiveRun = { controller: new AbortController(), provider: connection.provider, pending: new Set(), mode: session.permissionMode ?? DEFAULT_PERMISSION_MODE }
     activeRuns.set(id, run)
     try {
       const counting = await store.countsStats()
@@ -700,6 +779,17 @@ function registerIpc(): void {
 
   ipcMain.handle('permission:respond', (_e, id: string, decision: PermissionDecision) => {
     permissionResolvers.get(id)?.(decision)
+  })
+
+  // What the model may do in a conversation without asking. In one that is at work it counts from
+  // the next tool call, and is saved with the conversation at its next step: written into the
+  // file now, it would be undone by that save. A question that already waits still waits.
+  ipcMain.handle('permission:setMode', async (_e, sessionId: unknown, mode: unknown) => {
+    if (!isPermissionMode(mode)) throw new Error('This is not one of the permission modes.')
+    const id = String(sessionId ?? '')
+    const run = activeRuns.get(id)
+    if (run) run.mode = mode
+    else await store.updateSession(id, { permissionMode: mode })
   })
 }
 
