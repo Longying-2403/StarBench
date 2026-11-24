@@ -1,0 +1,236 @@
+/* The usage section of the settings (UsagePage.tsx), and DeepSeek's balance in the row under the
+   message box (Balance.tsx). A balance below the person's line reads in the warning's yellow, one
+   that takes no more calls in the red of an error, as the cards of a refused or a failed tool do. */
+
+/* One DeepSeek account: its balance, and the line below which the person is told. */
+.usage-balance {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  flex-shrink: 0;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+}
+.usage-balance.usage-warn,
+.usage-balance.usage-danger {
+  /* The bar takes four pixels more than the border it replaces; the words stay where they were. */
+  padding-left: 10px;
+}
+.usage-balance.usage-warn {
+  border-color: color-mix(in srgb, var(--warn) 40%, transparent);
+  border-left: 5px solid var(--warn);
+  background: color-mix(in srgb, var(--warn) 12%, var(--panel));
+}
+.usage-balance.usage-danger {
+  border-color: color-mix(in srgb, var(--danger) 40%, transparent);
+  border-left: 5px solid var(--danger);
+  background: color-mix(in srgb, var(--danger) 10%, var(--panel));
+}
+.usage-balance-main {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.usage-balance-words {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.usage-label,
+.usage-sub {
+  color: var(--muted);
+  font-size: 12px;
+}
+.usage-amount {
+  font-size: 22px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.usage-warn .usage-amount,
+.usage-tone-warn {
+  color: var(--warn);
+}
+.usage-danger .usage-amount,
+.usage-tone-danger {
+  color: var(--danger);
+}
+.usage-state {
+  margin-top: 2px;
+  font-size: 12.5px;
+}
+.usage-problem {
+  color: var(--danger);
+  font-size: 12px;
+}
+.usage-actions {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 12px;
+}
+.usage-refresh {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.usage-refresh svg,
+.usage-link svg {
+  flex-shrink: 0;
+  width: 13px;
+  height: 13px;
+}
+.usage-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--accent);
+  font-size: 12px;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.usage-link:hover {
+  text-decoration: underline;
+}
+
+/* The line: "余额低于 ¥[ 5 ] 时在右上角提醒一次", with its buttons. */
+.usage-alert {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 12.5px;
+}
+.settings-pane label.usage-alert-words {
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+}
+.usage-alert-box {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--text);
+}
+/* styles.css comes after this file in the bundle, so its rule for the inputs of the settings
+   would win one as specific as this; hence the extra class. */
+.settings-pane .usage-alert .usage-alert-box input {
+  width: 76px;
+  padding: 2px 8px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.settings-pane .usage-alert .usage-alert-box input:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+
+/* Today, this month, the last thirty days. */
+.usage-ranges {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-self: flex-start;
+  gap: 2px;
+  margin-top: 4px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.usage-ranges button {
+  padding: 3px 12px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.usage-ranges button:hover {
+  color: var(--text);
+}
+.usage-ranges button[aria-pressed='true'] {
+  background: var(--raised);
+  color: var(--text);
+}
+
+/* What was asked of each model, one line each. */
+.usage-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+}
+.usage-table th {
+  padding: 0 10px 6px 0;
+  border-bottom: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 400;
+  text-align: left;
+  white-space: nowrap;
+}
+.usage-table td {
+  padding: 7px 10px 7px 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+  white-space: nowrap;
+}
+.usage-table td.usage-cell-name {
+  width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.usage-table td.usage-cell-link {
+  padding-right: 0;
+  text-align: right;
+}
+.usage-model {
+  color: var(--muted);
+}
+.usage-untold {
+  margin-left: 2px;
+  color: var(--muted);
+}
+.usage-foot {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  flex-shrink: 0;
+}
+.usage-foot .hint {
+  margin: 0;
+}
+.usage-foot .btn {
+  flex-shrink: 0;
+  margin-right: 0;
+}
+/* Said to a screen reader, not shown. */
+.usage-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* The balance in the row under the message box: in its colour also while its card is open. */
+.status-row .status-chip.usage-chip-warn {
+  color: var(--warn);
+}
+.status-row .status-chip.usage-chip-danger {
+  color: var(--danger);
+}
+.usage-card-buttons {
+  display: inline-flex;
+  flex-shrink: 0;
+  gap: 6px;
+}

@@ -5,8 +5,8 @@
 import { timingSafeEqual } from 'node:crypto'
 import http from 'node:http'
 import type { AddressInfo } from 'node:net'
-import { REGISTRATION_CLIENT, authorizeUrl, exchangeCode, pkce, randomValue, verifyIdToken } from './oauth.ts'
-import type { AuthService, LoginRecord } from './oauth.ts'
+import { OAuthError, REGISTRATION_CLIENT, authorizeUrl, exchangeCode, pkce, randomValue, verifyIdToken } from './oauth.ts'
+import type { AuthService, LoginRecord, TokenSet } from './oauth.ts'
 
 /** Why a sign-in did not complete. `detail` is for the curious; the reason is what the page words. */
 export type SignInFailure = 'cancelled' | 'denied' | 'timeout' | 'failed'
@@ -71,6 +71,20 @@ function page(ok: boolean, title: string, body: string): string {
 </html>`
 }
 
+/**
+ * The service did not take the code it had just handed out (`invalid_grant`). Its documentation
+ * says what to do then: discard the code and ask once more, for the registration the attempt has
+ * by now ("start a fresh authorization with the issued client ID retained for this attempt").
+ * Seen on 2026-11-24 with a real account, on registering a second workspace of the same person.
+ */
+class AskAgain extends Error {
+  readonly clientId: string
+  constructor(clientId: string) {
+    super('The sign-in service did not take the code; asking once more for the same registration.')
+    this.clientId = clientId
+  }
+}
+
 const sameText = (a: string, b: string): boolean => {
   const [x, y] = [Buffer.from(a), Buffer.from(b)]
   return x.length === y.length && timingSafeEqual(x, y)
@@ -93,10 +107,12 @@ function listenOn(server: http.Server, port: number): Promise<number> {
  */
 export async function startAttempt(options: AttemptOptions): Promise<Attempt> {
   const { service, known } = options
-  // Fresh for every attempt, and gone with it.
-  const state = randomValue()
-  const nonce = randomValue()
-  const { verifier, challenge } = pkce()
+  // Fresh for every attempt, and gone with it; made anew for the second round of an attempt (`AskAgain`).
+  let state = randomValue()
+  let nonce = randomValue()
+  let { verifier, challenge } = pkce()
+  /** The registration a second round is for, once the code of the first was not taken. There is no third round. */
+  let again: string | undefined
 
   let redirectUri = ''
   let finished = false
@@ -134,11 +150,13 @@ export async function startAttempt(options: AttemptOptions): Promise<Attempt> {
     if (!code) throw new SignInError('failed', 'The sign-in page came back without a code.')
 
     const given = params.get('client_id')
+    /** The registration this round is for: the one to sign in to again, or the one the first round was given. */
+    const expected = again ?? known?.clientId
     let clientId: string
-    if (known) {
-      // A registration belongs to one account; another one's id must not take its place.
-      if (given && given !== known.clientId) throw new SignInError('failed', 'The sign-in page came back for a different registration.')
-      clientId = known.clientId
+    if (expected) {
+      // A registration belongs to one account and one of its workspaces; another one's id must not take its place.
+      if (given && given !== expected) throw new SignInError('failed', 'The sign-in page came back for a different registration.')
+      clientId = expected
     } else {
       if (!given || given === REGISTRATION_CLIENT || !/^[\w.~-]{1,200}$/.test(given)) {
         throw new SignInError('failed', 'The registration was not completed: no client id came back.')
@@ -146,7 +164,13 @@ export async function startAttempt(options: AttemptOptions): Promise<Attempt> {
       clientId = given
     }
 
-    const tokens = await exchangeCode(service, { clientId, code, verifier, redirectUri })
+    let tokens: TokenSet
+    try {
+      tokens = await exchangeCode(service, { clientId, code, verifier, redirectUri })
+    } catch (err) {
+      if (err instanceof OAuthError && err.code === 'invalid_grant' && again === undefined) throw new AskAgain(clientId)
+      throw err
+    }
     if (!tokens.idToken) throw new SignInError('failed', 'The sign-in service did not say who signed in.')
     const who = await verifyIdToken(service, tokens.idToken, { clientId, nonce })
     if (known && who.subject !== known.subject) {
@@ -171,7 +195,23 @@ export async function startAttempt(options: AttemptOptions): Promise<Attempt> {
     }
   }
 
-  const receive = async (params: URLSearchParams): Promise<string> => {
+  /**
+   * Begins the second round: the same registration is asked for once more, with everything that
+   * is fresh for a round made anew. Resolves with the address the browser goes on to, in the tab
+   * it came back in; on that page the person picks the account again, and no more.
+   */
+  const askAgain = async (clientId: string): Promise<string> => {
+    again = clientId
+    state = randomValue()
+    nonce = randomValue()
+    ;({ verifier, challenge } = pkce())
+    used = false
+    const same = { clientId, ...(known?.idToken ? { idToken: known.idToken } : {}), ...(known?.email ? { email: known.email } : {}) }
+    return authorizeUrl(service, { redirectUri, state, nonce, challenge, hostId: options.hostId, known: same, consent: options.consent })
+  }
+
+  /** What the browser gets when it comes back: a page to read, or an address to go on to. */
+  const receive = async (params: URLSearchParams): Promise<string | { goOn: string }> => {
     // Anything on this computer can call the listener; only the browser that was sent out knows the state.
     if (!sameText(params.get('state') ?? '', state)) {
       return page(false, '这不是当前的登录请求', '请回到 StarBench，从那里重新开始登录。')
@@ -181,7 +221,15 @@ export async function startAttempt(options: AttemptOptions): Promise<Attempt> {
     try {
       finish(await complete(params))
       return page(true, '登录完成', '可以关闭这个页面，回到 StarBench 了。')
-    } catch (err) {
+    } catch (raised) {
+      let err: unknown = raised
+      if (err instanceof AskAgain) {
+        try {
+          return { goOn: await askAgain(err.clientId) }
+        } catch (failed) {
+          err = failed
+        }
+      }
       const failure = err instanceof SignInError ? err : new SignInError('failed', err instanceof Error ? err.message : String(err))
       finish(failure)
       return failure.reason === 'denied'
@@ -209,7 +257,12 @@ export async function startAttempt(options: AttemptOptions): Promise<Attempt> {
       return send(404, page(false, '这里没有内容', '这个地址只用于 StarBench 的登录。'))
     }
     receive(url.searchParams).then(
-      (body) => send(200, body),
+      (answer) => {
+        if (typeof answer === 'string') return send(200, answer)
+        // On to the sign-in service once more, in the same tab. The address is the service's own
+        // (`authorizeUrl` takes it from what the service says of itself), and holds no code.
+        res.writeHead(302, { location: answer.goOn, 'cache-control': 'no-store', 'referrer-policy': 'no-referrer' }).end()
+      },
       () => send(500, page(false, '登录没有完成', '请回到 StarBench 重试。'))
     )
   }

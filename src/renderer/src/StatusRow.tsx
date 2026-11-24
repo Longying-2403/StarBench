@@ -1,8 +1,9 @@
 // The row under the message box that says what the conversation has cost so far: how many
 // requests it took and how fast the model wrote, how many tokens went back and forth, and how
-// full the model's context is. The pointer resting on one of the three shows a word of what it
-// is; a press opens its card with the details, which stays until the next press. The card of the
-// context is also where the conversation is compacted by hand.
+// full the model's context is; and, with a DeepSeek service, what is left on its account
+// (Balance.tsx). The pointer resting on one of them shows a word of what it is; a press opens its
+// card with the details, which stays until the next press. The card of the context is also where
+// the conversation is compacted by hand.
 // What the numbers mean and how they are added up is in shared/stats.ts.
 
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
@@ -24,10 +25,11 @@ import {
 } from '../../shared/stats.ts'
 import type { SessionStats, ShownPart } from '../../shared/stats.ts'
 import type { ModelInfo } from '../../shared/types.ts'
+import { useBalanceView } from './Balance.tsx'
 import { ClockIcon, StackIcon } from './icons.tsx'
 import { errorText, useOutsidePress } from './util.ts'
 
-type Which = 'stats' | 'tokens' | 'context'
+type Which = 'stats' | 'tokens' | 'context' | 'balance'
 
 /** What stands where a service told nothing. Not a nought: nothing is known. */
 const UNKNOWN = '—'
@@ -305,12 +307,13 @@ function Ring({ share }: { share: number | undefined }) {
   )
 }
 
-/** One of the three: what stands in the row, the word shown while the pointer rests on it, and the card a press opens. */
+/** One of them: what stands in the row, the word shown while the pointer rests on it, and the card a press opens. */
 function Widget({
   open,
   tip,
   label,
   chip,
+  tone,
   onPress,
   children
 }: {
@@ -320,6 +323,8 @@ function Widget({
   /** What it is and what it says, for a screen reader. */
   label: string
   chip: ReactNode
+  /** In the colours of a warning or an error: for what needs minding, such as a balance running low. */
+  tone?: 'warn' | 'danger'
   onPress: () => void
   children: ReactNode
 }) {
@@ -337,7 +342,7 @@ function Widget({
   }, [open])
   return (
     <div className="status-widget">
-      <button type="button" className="status-chip" aria-expanded={open} aria-label={label} onClick={onPress}>
+      <button type="button" className={tone ? `status-chip usage-chip-${tone}` : 'status-chip'} aria-expanded={open} aria-label={label} onClick={onPress}>
         {chip}
       </button>
       {/* Said by the label already to whoever cannot see it. Not shown beside the open card, which says more. */}
@@ -365,7 +370,9 @@ export function StatusRow({
   busy,
   onSetWindow,
   onCompact,
-  onOpenMemory
+  onOpenMemory,
+  balance,
+  onOpenUsage
 }: {
   stats: SessionStats
   /** What is known of the model in use, the size of its context among it. */
@@ -382,6 +389,10 @@ export function StatusRow({
   onCompact: () => void
   /** Opens the memory's page, from the memory's part of the context. */
   onOpenMemory?: () => void
+  /** The service in use, where it tells what is left on its account (DeepSeek): its balance stands in the row. */
+  balance?: { provider: string; name: string }
+  /** Opens the usage section of the settings, from the balance's card. */
+  onOpenUsage?: () => void
 }) {
   /** The card that is open. A press opens one and closes it again; so do Escape and a press elsewhere. */
   const [shown, setShown] = useState<Which | null>(null)
@@ -398,6 +409,7 @@ export function StatusRow({
   }, [shown])
 
   const widget = (which: Which) => ({ open: shown === which, onPress: () => setShown((now) => (now === which ? null : which)) })
+  const balanceView = useBalanceView(balance, onOpenUsage ? () => (close(), onOpenUsage()) : undefined)
 
   const speed = speedOf(stats)
   const total = totalTokens(stats.usage)
@@ -459,6 +471,11 @@ export function StatusRow({
           {...(onOpenMemory ? { onOpenMemory: () => (close(), onOpenMemory()) } : {})}
         />
       </Widget>
+      {balanceView && (
+        <Widget {...widget('balance')} tip={balanceView.tip} label={balanceView.label} chip={balanceView.chip} {...(balanceView.tone ? { tone: balanceView.tone } : {})}>
+          {balanceView.card}
+        </Widget>
+      )}
     </div>
   )
 }

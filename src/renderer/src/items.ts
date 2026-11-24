@@ -19,8 +19,8 @@ export type Item =
   | { kind: 'tool'; call: ToolCall; output?: string; cleared?: boolean; at?: number }
   /** A web search or page read that the model's service did by itself, with its own search tool. */
   | { kind: 'web'; activity: WebActivity }
-  /** `hint` marks errors that are shown with a way out instead of as plain text. */
-  | { kind: 'error'; message: string; hint?: ErrorHint }
+  /** `hint` marks errors that are shown with a way out instead of as plain text; `provider` is whose request it was, for those. */
+  | { kind: 'error'; message: string; hint?: ErrorHint; provider?: string }
   /** Something worth knowing that did not stop the turn. */
   | { kind: 'notice'; text: string }
   /** A place where the conversation was compacted: a line across it, which says what was done there. */
@@ -29,6 +29,7 @@ export type Item =
 /** What the notices say, by the code they come with. */
 const NOTICES: Record<Extract<AgentEvent, { type: 'notice' }>['code'], string> = {
   'fast-mode-refused': '这个模型在当前账户下不支持 Fast Mode，已经自动关闭，这条消息按普通速度发送。',
+  'effort-refused': '模型服务不接受给这个模型选的思考档位，所以这条消息没有带档位发出，选的档位也已经取消。',
   'tools-as-text': '这个模型服务不接受工具定义，所以改用文字方式调用工具：工具的说明写进了提示词，模型在回答里写出的调用由应用识别并执行。没有学过工具调用的模型可能用不好。',
   'stream-refused': '这个模型服务在使用工具时不能边生成边显示，所以每次回答会在生成完之后一次出现。中间一段时间没有动静是正常的。',
   'compaction-failed': '上下文快满了，但没能让模型把较早的对话写成摘要，对话按现在的样子继续。',
@@ -38,6 +39,21 @@ const NOTICES: Record<Extract<AgentEvent, { type: 'notice' }>['code'], string> =
 
 /** A moment, as a part of an item that is only there when the moment is known. */
 const timed = (at: number | undefined): { at?: number } => (at !== undefined ? { at } : {})
+
+/**
+ * Where the row of a search or page read stands in the last turn on the page: -1 when it has none
+ * there. An id names one of them within a turn (`WebActivity.id`), and a later step of the turn
+ * may tell more of it: Gemini names a search's pages with the answer that follows the step that
+ * searched.
+ */
+function rowInTurn(items: readonly Item[], id: string): number {
+  for (let at = items.length - 1; at >= 0; at--) {
+    const item = items[at]
+    if (item.kind === 'user') break
+    if (item.kind === 'web' && item.activity.id === id) return at
+  }
+  return -1
+}
 
 export function itemsFromMessages(messages: readonly StoredMessage[]): Item[] {
   const items: Item[] = []
@@ -53,7 +69,12 @@ export function itemsFromMessages(messages: readonly StoredMessage[]): Item[] {
       })
     } else if (message.role === 'assistant') {
       // The service's own searches stand above what it wrote with them, as they did while it wrote.
-      for (const activity of message.web ?? []) items.push({ kind: 'web', activity })
+      // One that a later step of the turn told more of stays where it stood first, as it was told last.
+      for (const activity of message.web ?? []) {
+        const at = rowInTurn(items, activity.id)
+        if (at >= 0) items[at] = { kind: 'web', activity }
+        else items.push({ kind: 'web', activity })
+      }
       if (message.content || message.reasoning_content) {
         items.push({
           kind: 'assistant',
@@ -163,10 +184,9 @@ export function itemsReducer(items: Item[], action: ItemsAction): Item[] {
       return items.map((i) => (i.kind === 'tool' && i.call.id === event.id ? { ...i, output: event.output } : i))
     case 'web_activity': {
       const item: Item = { kind: 'web', activity: event.activity }
-      // Told again as it goes on: the row it has already is brought up to date.
-      if (items.some((i) => i.kind === 'web' && i.activity.id === event.activity.id)) {
-        return items.map((i) => (i.kind === 'web' && i.activity.id === event.activity.id ? item : i))
-      }
+      // Told again as it goes on, in this step or a later one of the turn: the row it has already is brought up to date.
+      const at = rowInTurn(items, event.activity.id)
+      if (at >= 0) return items.map((i, index) => (index === at ? item : i))
       // A new one goes above the reply being written, where it stands once the reply is kept.
       const last = items.at(-1)
       return last?.kind === 'assistant' && last.open ? [...items.slice(0, -1), item, last] : [...items, item]
@@ -184,7 +204,7 @@ export function itemsReducer(items: Item[], action: ItemsAction): Item[] {
         return { kind: 'mark', mark: { ...mark, after: event.after } }
       })
     case 'error':
-      return [...items, { kind: 'error', message: event.message, ...(event.hint ? { hint: event.hint } : {}) }]
+      return [...items, { kind: 'error', message: event.message, ...(event.hint ? { hint: event.hint, ...(event.provider ? { provider: event.provider } : {}) } : {}) }]
     case 'notice': {
       const text = NOTICES[event.code] ?? event.message
       return [...items, { kind: 'notice', text: event.detail ? `${text}（服务返回：${event.detail}）` : text }]

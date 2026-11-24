@@ -1,10 +1,19 @@
-import { createContext, memo, useContext, useEffect, useState } from 'react'
+import { Children, createContext, isValidElement, memo, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import type { ComponentProps, MouseEvent, ReactNode } from 'react'
+import dockerfile from 'highlight.js/lib/languages/dockerfile'
+import dos from 'highlight.js/lib/languages/dos'
+import powershell from 'highlight.js/lib/languages/powershell'
+import { common } from 'lowlight'
 import Markdown, { defaultUrlTransform } from 'react-markdown'
-import type { Components } from 'react-markdown'
+import type { Components, Options } from 'react-markdown'
+import rehypeHighlight from 'rehype-highlight'
 import remarkGfm from 'remark-gfm'
-import { fetchablePicture, namesFile, webAddress, writtenAddress } from '../../shared/links.ts'
+import { githubCommit, isCommitHash, linkGitHubRefs, onGitHub } from '../../shared/github.ts'
+import type { GitHubRepo, MarkdownNode } from '../../shared/github.ts'
+import { fetchablePicture, namesFile, webAddress, webPlace, writtenAddress } from '../../shared/links.ts'
 import type { ImagePreview, OpenOutcome } from '../../shared/types.ts'
+import { CheckIcon, CopyIcon, GitHubIcon } from './icons.tsx'
+import { openWebLink } from './LinkAsk.tsx'
 
 const api = window.harness
 
@@ -72,13 +81,124 @@ function AnswerLink({ href, title, children }: ComponentProps<'a'>) {
     )
   }
   const address = href ? webAddress(href) : undefined
-  // The window has no status bar to show where a link leads, and the words of an answer can say
-  // anything: pointing at a link shows its whole address, to be judged before the press.
+  const place = address ? webPlace(address) : null
+  // An address that is no page on the web (mail, and the like) stays as it was: the window goes
+  // nowhere, and the main process opens nothing but pages.
+  if (!place) {
+    return (
+      <a href={address} data-tip={title && address ? `${title}\n${address}` : (address ?? title)} target="_blank" rel="noreferrer">
+        {children}
+      </a>
+    )
+  }
+  // A page on the web. The window has no status bar to show where a link leads, and the words of
+  // an answer can say anything: pointing at a link shows its whole address, and pressing it asks
+  // before the browser goes there (LinkAsk.tsx). It has no href, so that nothing follows it but
+  // that question: not a press of the wheel, and not a press with a key held down.
+  const follow = (): void => openWebLink(place.address)
+  const toGitHub = onGitHub(place.address)
+  // The hash of a commit, as GitHub itself shows one: small, in the letters of code, in a frame.
+  const hash = toGitHub && githubCommit(place.address) !== null && isCommitHash(wordsOf(children).trim())
   return (
-    <a href={address} data-tip={title && address ? `${title}\n${address}` : (address ?? title)} target="_blank" rel="noreferrer">
+    <a
+      className={toGitHub ? (hash ? 'web-link github-link github-commit' : 'web-link github-link') : 'web-link'}
+      role="link"
+      tabIndex={0}
+      data-tip={title ? `${title}\n${place.address}` : place.address}
+      onClick={follow}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') follow()
+      }}
+    >
+      {toGitHub && <GitHubIcon />}
       {children}
     </a>
   )
+}
+
+/** The words that something drawn is made of, without what they are dressed in. */
+function wordsOf(node: ReactNode): string {
+  if (typeof node === 'string' || typeof node === 'number') return String(node)
+  if (Array.isArray(node)) return node.map(wordsOf).join('')
+  return isValidElement<{ children?: ReactNode }>(node) ? wordsOf(node.props.children) : ''
+}
+
+/** The languages code is coloured in: the usual ones, and three more that commands for this computer come in. */
+const LANGUAGES = { ...common, dockerfile, dos, powershell }
+
+/** The name of the language a block of code was said to be in ("```bash"), as it was written; undefined where none was said. */
+function languageOf(children: ReactNode): string | undefined {
+  for (const child of Children.toArray(children)) {
+    if (!isValidElement<{ className?: string }>(child)) continue
+    const named = /(?:^|\s)language-(\S+)/.exec(child.props.className ?? '')
+    if (named) return named[1]
+  }
+  return undefined
+}
+
+/**
+ * Code that an answer sets apart, a command to run or a piece of a file: in a frame of its own
+ * with the name of its language on top and a button that copies it, coloured by what each word is
+ * (rehype-highlight; the colours are the app's, in styles.css). A long line is scrolled sideways,
+ * not broken: a command is copied as it stands.
+ */
+function CodeWindow({ children, node: _node, ...rest }: ComponentProps<'pre'> & { node?: unknown }) {
+  const body = useRef<HTMLPreElement>(null)
+  const [copied, setCopied] = useState(false)
+  useEffect(() => {
+    if (!copied) return
+    const timer = window.setTimeout(() => setCopied(false), 1500)
+    return () => window.clearTimeout(timer)
+  }, [copied])
+  const copy = (): void => {
+    // As it reads on the page, without the line end the block closes with.
+    const text = (body.current?.textContent ?? '').replace(/\n$/, '')
+    navigator.clipboard.writeText(text).then(
+      () => setCopied(true),
+      () => setCopied(false)
+    )
+  }
+  return (
+    <div className="code-window">
+      <div className="code-head">
+        <span className="code-language">{languageOf(children) ?? '代码'}</span>
+        <button type="button" className="code-copy" onClick={copy}>
+          {copied ? <CheckIcon /> : <CopyIcon />}
+          {copied ? '已复制' : '复制'}
+        </button>
+      </div>
+      <pre ref={body} {...rest}>
+        {children}
+      </pre>
+    </div>
+  )
+}
+
+/** The repository on GitHub each workspace is a clone of, as the main process told it: asked once for a folder, by however many answers. */
+const repos = new Map<string, Promise<GitHubRepo | null>>()
+
+function useGitHubRepo(workspace: string): GitHubRepo | null {
+  const [repo, setRepo] = useState<GitHubRepo | null>(null)
+  useEffect(() => {
+    let current = true
+    setRepo(null)
+    if (!workspace) return
+    let told = repos.get(workspace)
+    if (!told) {
+      told = api.githubRepo(workspace).catch(() => null)
+      repos.set(workspace, told)
+    }
+    void told.then((found) => current && setRepo(found))
+    return () => {
+      current = false
+    }
+  }, [workspace])
+  return repo
+}
+
+/** For the Markdown reader: makes links of the words that name something on GitHub (shared/github.ts). */
+function remarkGitHubRefs(repo: GitHubRepo | null) {
+  return (tree: MarkdownNode): void => linkGitHubRefs(tree, repo)
 }
 
 /**
@@ -178,18 +298,24 @@ function AnswerImage({ src, alt, title }: ComponentProps<'img'>) {
 
 // Kept from one drawing to the next: with new ones every time, each picture would be read again
 // at every word of an answer that is still being written.
-const COMPONENTS: Components = { a: AnswerLink, img: AnswerImage }
-const PLUGINS = [remarkGfm]
+const COMPONENTS: Components = { a: AnswerLink, img: AnswerImage, pre: CodeWindow }
+// Code is coloured only in the language it says it is in: a guess at an unnamed one colours plain text.
+const COLOURS: Options['rehypePlugins'] = [[rehypeHighlight, { languages: LANGUAGES }]]
 
 /**
  * The text of an answer, as Markdown. Pictures and links that name a file in `workspace` show
- * and open that file. An answer that has not changed is not read again when another one grows.
+ * and open that file; a link to the web asks before it is followed; words that name a pull
+ * request or a commit of the repository the workspace is a clone of become links to it. An
+ * answer that has not changed is not read again when another one grows.
  */
 export const AnswerText = memo(function AnswerText({ text, workspace }: { text: string; workspace: string }) {
+  const repo = useGitHubRepo(workspace)
+  // After the reader has made links of the addresses written out, which are then left alone.
+  const plugins = useMemo((): Options['remarkPlugins'] => [remarkGfm, [remarkGitHubRefs, repo]], [repo])
   return (
     <div className="markdown">
       <Workspace.Provider value={workspace}>
-        <Markdown remarkPlugins={PLUGINS} urlTransform={keepFiles} components={COMPONENTS}>
+        <Markdown remarkPlugins={plugins} rehypePlugins={COLOURS} urlTransform={keepFiles} components={COMPONENTS}>
           {text}
         </Markdown>
       </Workspace.Provider>

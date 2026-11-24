@@ -33,6 +33,10 @@ export function ChatGptButton({ onClick, disabled }: { onClick: () => void; disa
 function failureText(result: Extract<SignInResult, { ok: false }>): string {
   if (result.reason === 'denied') return '你在登录页面上选择了不授权，所以没有登录。'
   if (result.reason === 'timeout') return '十分钟内没有等到登录完成，已经停止等待。可以重新开始。'
+  // OpenAI did not take what the sign-in page handed out, also when asked once more.
+  if (/^invalid_grant\b/.test(result.detail)) {
+    return '登录没有完成：OpenAI 没有接受这次登录（invalid_grant），自动再试一次之后仍然如此。请再点一次登录；如果还是不行，到 ChatGPT 的设置里断开 StarBench，然后重新登录。'
+  }
   return `登录没有完成：${result.detail}`
 }
 
@@ -64,10 +68,14 @@ export function ChatGptPane({
   const [id, setId] = useState(providerId)
   const provider = settings.providers.find((p) => p.id === id && p.auth === 'chatgpt')
   const account = provider?.account
+  /** How many other accounts are signed in at the moment: several can be, each as a provider of its own. */
+  const others = settings.providers.filter((p) => p.auth === 'chatgpt' && p.id !== id && p.account?.signedIn).length
   const [phase, setPhase] = useState<Phase>({ step: 'idle' })
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [model, setModel] = useState(provider?.model ?? '')
+  /** What the person calls this sign-in. Two of them can be of one address, and are told apart by this. */
+  const [name, setName] = useState(provider?.name ?? '')
   const [models, setModels] = useState<ModelChoice[]>([])
   const [busy, setBusy] = useState(false)
   /** Removing takes a second press. */
@@ -78,6 +86,7 @@ export function ChatGptPane({
 
   // The model is chosen for the person right after signing in; the field follows.
   useEffect(() => setModel(provider?.model ?? ''), [provider?.model])
+  useEffect(() => setName(provider?.name ?? ''), [provider?.name])
   // What the plan offers depends on the account, so the list is asked again when that changes.
   useEffect(() => {
     setModels([])
@@ -101,8 +110,11 @@ export function ChatGptPane({
       }
       if (mine !== attempt.current) return
       setPhase({ step: 'idle' })
-      if (result.ok) setId(result.providerId)
-      else if (result.reason !== 'cancelled') setError(failureText(result))
+      if (result.ok) {
+        // The provider the sign-in is with: another one than this pane was opened for, where the list held that registration already.
+        setId(result.providerId)
+        if (result.already) setNotice('这个账号的这个工作空间已经在列表里了，没有重复添加，这次登录记在了它那一项上。下面显示的就是它。')
+      } else if (result.reason !== 'cancelled') setError(failureText(result))
     } catch (err) {
       if (mine !== attempt.current) return
       setPhase({ step: 'idle' })
@@ -151,7 +163,7 @@ export function ChatGptPane({
     e.preventDefault()
     if (!provider) return
     void act(async () => {
-      onChanged(await api.saveProvider({ id: provider.id, name: provider.name, kind: provider.kind, baseURL: provider.baseURL, model }))
+      onChanged(await api.saveProvider({ id: provider.id, name: name.trim() || provider.name, kind: provider.kind, baseURL: provider.baseURL, model }))
       onBack()
     })
   }
@@ -233,6 +245,12 @@ export function ChatGptPane({
             不会看到你的密码。
           </p>
           {account?.email && <p className="hint">上次登录的账号：{account.email}</p>}
+          {/* Adding an account beside those that are signed in already. */}
+          {!provider && others > 0 && (
+            <p className="hint">
+              已经登录了 {others} 个账号，它们不受影响。这里可以登录另一个账号，也可以登录同一个账号的另一个工作空间（比如个人套餐和 Team），在 OpenAI 的登录页面上选。
+            </p>
+          )}
           <div className="toolbar toolbar-wrap">
             <ChatGptButton onClick={() => void signIn()} disabled={busy} />
             {/* A registration belongs to one account; another account needs a new one. */}
@@ -287,6 +305,13 @@ export function ChatGptPane({
           </>
         )}
       </div>
+      {account.planUsage && (
+        <label>
+          名称
+          <input value={name} onChange={(e) => setName(e.target.value)} maxLength={60} placeholder={provider?.name} />
+          <span className="hint">显示在模型列表里。同一个邮箱下的个人套餐和 Team 工作空间各是一项，邮箱一样，起个名字方便区分。</span>
+        </label>
+      )}
       {account.planUsage && (
         <label>
           模型

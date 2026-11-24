@@ -5,7 +5,7 @@ description: 为 StarBench 写插件：给模型添加工具，或者在 StarBen
 
 # 为 StarBench 写插件
 
-StarBench 的插件是一个文件夹，里面有 `package.json` 和一个 JavaScript 模块。它能给模型添加工具、调整发给模型的采样参数、保存自己的设置、旁观每一次请求和回应，还能在窗口里加界面：输入框上面那条栏里的一个按钮或一段读数，或者对话右侧的一个面板。接口是 StarBench 自己的，不要照别的软件的插件写法去猜。
+StarBench 的插件是一个文件夹，里面有 `package.json` 和一个 JavaScript 模块。它能给模型添加工具、调整发给模型的采样参数、让消息以纯对话发出（不带任何工具）、保存自己的设置、旁观每一次请求和回应，还能在窗口里加界面：输入框上面那条栏里的一个按钮或一段读数，或者对话右侧的一个面板。接口是 StarBench 自己的，不要照别的软件的插件写法去猜。
 
 ## 先看该不该写插件
 
@@ -19,7 +19,7 @@ StarBench 的插件是一个文件夹，里面有 `package.json` 和一个 JavaS
 
 | 文件 | 什么时候读 |
 |---|---|
-| `reference/plugins.md` | 除了工具，还要用设置（config）、采样参数（sampling）、旁观请求（trace）、清理（effect）或者第三方依赖时 |
+| `reference/plugins.md` | 除了工具，还要用设置（config）、采样参数或纯对话（sampling）、旁观请求（trace）、清理（effect）或者第三方依赖时 |
 | `reference/plugin-ui.md` | 插件要有界面时 |
 | `reference/starbench-plugin.d.ts` | 要确认某个字段的确切名字和类型时；也可以原样写进插件文件夹，给编辑器做补全 |
 

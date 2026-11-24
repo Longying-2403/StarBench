@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { KeyboardEvent } from 'react'
 import { startingEffort } from '../../shared/effort-defaults.ts'
+import { providerLabel } from '../../shared/provider-choices.ts'
 import {
   REASONING_EFFORTS,
   effortName,
@@ -322,8 +323,9 @@ export function ModelControl({
           const list = lists[provider.id]
           const choices = choicesOf(provider)
           return (
-            <div key={provider.id} role="group" aria-label={provider.name}>
-              <div className="model-group">{provider.name}</div>
+            <div key={provider.id} role="group" aria-label={providerLabel(provider, settings.providers)}>
+              {/* Several sign-ins with an OpenAI account come with the same name: each says whose it is. */}
+              <div className="model-group">{providerLabel(provider, settings.providers)}</div>
               {!provider.ready && (
                 <div className="model-note">
                   {provider.auth !== 'chatgpt' ? '还没有填写 API Key' : provider.account?.signedIn ? '还没有启用套餐额度' : '还没有登录'}

@@ -13,6 +13,8 @@ import type { ChatGptAccount, ProviderInput, ReasoningEffort, Session, SessionHi
 import { isReasoningEffort, isSessionIcon, offersFastMode, searchWorksAt, webSearchService } from '../shared/types.ts'
 import { OPENAI, canUsePlan, clientIsGone, newHostId, readRecord, refreshed, renewalDue, revoke, tokensAreDead } from './chatgpt/oauth.ts'
 import type { AuthService, LoginRecord } from './chatgpt/oauth.ts'
+import { placeForSignIn } from './chatgpt/accounts.ts'
+import type { HeldAccount } from './chatgpt/accounts.ts'
 import { readJson, writeJson, writeJsonText } from './json-file.ts'
 import type { Connection } from './providers/index.ts'
 import { ServiceError } from './providers/types.ts'
@@ -98,6 +100,9 @@ function mutate(apply: (settings: StoredSettings) => StoredSettings | Promise<St
 
 export async function getSettings(): Promise<Settings> {
   await seedTrust()
+  // A change that is being written down counts: settings asked for right after one come with it
+  // (the page asks when it hears that the app itself changed something, in the middle of a turn).
+  await lastChange
   return visible(await loadStored())
 }
 
@@ -231,6 +236,21 @@ export function setSessionTimes(on: unknown): Promise<Settings> {
   return mutate((settings) => model.setSessionTimes(settings, on === true))
 }
 
+/** Whether the links of a site open without the question first (`WebPlace.site`). */
+export async function trustsSite(site: string): Promise<boolean> {
+  return model.trustsSite(await loadStored(), site)
+}
+
+/** Keeps the person's "do not ask again" for a site. It arrives over IPC; the settings model checks it. */
+export function trustSite(site: unknown): Promise<Settings> {
+  return mutate((settings) => model.trustSite(settings, site))
+}
+
+/** Takes that back: the links of the site ask again. */
+export function forgetSite(site: unknown): Promise<Settings> {
+  return mutate((settings) => model.forgetSite(settings, site))
+}
+
 /** Changes whether, and from where on, conversations are compacted by themselves. The change arrives over IPC; the settings model checks it. */
 export function setCompaction(change: unknown): Promise<Settings> {
   return mutate((settings) => model.setCompaction(settings, change))
@@ -244,6 +264,11 @@ export async function compactionSettings(): Promise<CompactionSettings> {
 /** Takes the choice back for a model the service turned out not to give faster answers. */
 export function dropFastMode(providerId: string, modelId: string): Promise<Settings> {
   return mutate((settings) => model.setFastFor(settings, providerId, modelId, false))
+}
+
+/** Takes back the level of thinking chosen for a model whose service turned it down. */
+export function dropEffort(providerId: string, modelId: string): Promise<Settings> {
+  return mutate((settings) => model.dropEffortFor(settings, providerId, modelId))
 }
 
 /** Moves a folder to the front of the remembered ones. */
@@ -462,20 +487,31 @@ export async function signInOf(providerId: string): Promise<LoginRecord | null> 
 
 /**
  * Stores a completed sign-in. `welcome` is true the first time one that may use the plan is
- * stored: the moment to tell the person what that means, once.
+ * stored: the moment to tell the person what that means, once. `providerId` in the answer is the
+ * provider the sign-in is with from now on, which is not the one asked for where another provider
+ * held that registration already; `already` says so: the sign-in went to the provider that was there.
  */
 export async function saveSignIn(
   providerId: string | undefined,
   record: LoginRecord
-): Promise<{ settings: Settings; providerId: string; welcome: boolean }> {
-  const kept = await (providerId ? inTurn(providerId, () => keepLogin(providerId, record)) : keepLogin(undefined, record))
-  if (!canUsePlan(record)) return { ...kept, welcome: false }
+): Promise<{ settings: Settings; providerId: string; welcome: boolean; already: boolean }> {
+  // Several registrations can be signed in, each with a provider of its own, and each once. A
+  // registration is one person and one of their workspaces (chatgpt/accounts.ts).
+  const held: HeldAccount[] = []
+  for (const provider of (await loadStored()).providers) {
+    const known = await loginOf(provider)
+    if (known) held.push({ providerId: provider.id, clientId: known.clientId })
+  }
+  const place = placeForSignIn(held, providerId, record.clientId)
+  const target = place.providerId
+  const kept = await (target ? inTurn(target, () => keepLogin(target, record)) : keepLogin(undefined, record))
+  if (!canUsePlan(record)) return { ...kept, welcome: false, already: place.moved }
   let welcome = false
   const settings = await mutate((stored) => {
     welcome = !stored.chatgptWelcomed
     return { ...stored, chatgptWelcomed: true }
   })
-  return { settings, providerId: kept.providerId, welcome }
+  return { settings, providerId: kept.providerId, welcome, already: place.moved }
 }
 
 /**

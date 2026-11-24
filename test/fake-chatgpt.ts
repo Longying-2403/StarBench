@@ -21,8 +21,18 @@ export interface Seen {
 
 /** What a test can change about how the stand-in behaves. */
 export interface Knobs {
-  /** Who signs in when the sign-in page is opened. */
-  account: { sub: string; email: string }
+  /**
+   * Who signs in when the sign-in page is opened. With a `workspace`, a registration is of that
+   * person and that workspace, as OpenAI's are, and registering it again gives the id it has;
+   * without one, every registration gets an id of its own.
+   */
+  account: { sub: string; email: string; workspace?: string }
+  /**
+   * What becomes of a code brought to the token endpoint. `refuse-first`: the first one is not
+   * taken (`invalid_grant`, as the real service did on 2026-11-24 for a second workspace of one
+   * person) and later ones are; `refuse`: none is.
+   */
+  codeExchange: 'ok' | 'refuse-first' | 'refuse'
   /** The scopes the account grants; null grants what was asked for. */
   grant: string | null
   /** The person says no on the sign-in page. */
@@ -62,6 +72,7 @@ export async function startFakeChatGpt(port = 0): Promise<FakeChatGpt> {
 
   const knobs: Knobs = {
     account: { sub: 'user-1', email: 'person@example.com' },
+    codeExchange: 'ok',
     grant: null,
     deny: false,
     accessLifetime: 3600,
@@ -72,8 +83,11 @@ export async function startFakeChatGpt(port = 0): Promise<FakeChatGpt> {
   const seen: Seen[] = []
   /** Registrations by the client id each was given. */
   const clients = new Map<string, { sub: string }>()
+  /** The registrations of a person's workspaces, by person and workspace. */
+  const registered = new Map<string, string>()
+  let refusedCodes = 0
   const codes = new Map<string, { clientId: string; challenge: string; redirectUri: string; nonce: string; scope: string; account: Knobs['account'] }>()
-  const refreshTokens = new Map<string, { clientId: string; scope: string; state: 'live' | 'used' | 'dead' }>()
+  const refreshTokens = new Map<string, { clientId: string; scope: string; state: 'live' | 'used' | 'dead'; account: Knobs['account'] }>()
   const accessTokens = new Map<string, number>()
   let rejectedOnce = false
   let origin = ''
@@ -86,7 +100,7 @@ export async function startFakeChatGpt(port = 0): Promise<FakeChatGpt> {
     const access = `at_${random()}`
     const refresh = `rt_${random()}`
     accessTokens.set(access, Date.now() + knobs.accessLifetime * 1000)
-    refreshTokens.set(refresh, { clientId, scope, state: 'live' })
+    refreshTokens.set(refresh, { clientId, scope, state: 'live', account: { ...account } })
     const tokens: Record<string, unknown> = { access_token: access, refresh_token: refresh, token_type: 'Bearer', expires_in: knobs.accessLifetime, scope }
     if (nonce !== undefined) {
       tokens.id_token = await new SignJWT({ nonce: knobs.tamper === 'nonce' ? 'someone-elses' : nonce, email: account.email, email_verified: true })
@@ -112,7 +126,9 @@ export async function startFakeChatGpt(port = 0): Promise<FakeChatGpt> {
     const registering = clientId === 'dynamic_agent_client'
     if (registering) {
       if (!query.get('agent_name_hint') || !query.get('ext_agent_host_id')) return json(res, 400, { error: 'invalid_request' })
-      clientId = `oaiapp_${random()}`
+      const key = knobs.account.workspace === undefined ? undefined : `${knobs.account.sub}/${knobs.account.workspace}`
+      clientId = (key && registered.get(key)) || `oaiapp_${random()}`
+      if (key) registered.set(key, clientId)
       clients.set(clientId, { sub: knobs.account.sub })
     } else if (!clients.has(clientId)) {
       return json(res, 400, { error: 'invalid_client' })
@@ -139,6 +155,10 @@ export async function startFakeChatGpt(port = 0): Promise<FakeChatGpt> {
     if (form.grant_type === 'authorization_code') {
       const pending = codes.get(form.code)
       codes.delete(form.code)
+      if (knobs.codeExchange === 'refuse' || (knobs.codeExchange === 'refuse-first' && refusedCodes === 0)) {
+        refusedCodes++
+        return json(res, 400, { error: 'invalid_grant' })
+      }
       const challenge = createHash('sha256').update(form.code_verifier ?? '').digest('base64url')
       if (!pending || pending.clientId !== form.client_id || pending.redirectUri !== form.redirect_uri || pending.challenge !== challenge) {
         return json(res, 400, { error: 'invalid_grant', error_description: 'The code is not valid for this request.' })
@@ -152,7 +172,8 @@ export async function startFakeChatGpt(port = 0): Promise<FakeChatGpt> {
       // OpenAI's own shape of an error, as the refresh codes come in it.
       if (known.state === 'used') return json(res, 401, { error: { code: 'refresh_token_reused', message: 'This refresh token was already used.' } })
       known.state = 'used'
-      return json(res, 200, await issue(known.clientId, known.scope, knobs.account))
+      // A token is renewed for the account it was given to, whichever account signs in next: several can be signed in at once.
+      return json(res, 200, await issue(known.clientId, known.scope, known.account))
     }
     json(res, 400, { error: 'unsupported_grant_type' })
   }

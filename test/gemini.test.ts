@@ -17,8 +17,10 @@ import type { Part } from '../src/main/providers/gemini.ts'
 import { searchNote } from '../src/main/providers/history.ts'
 import type { Connection, ModelRequest } from '../src/main/providers/index.ts'
 import { adapterFor } from '../src/main/providers/index.ts'
-import { geminiActivity, geminiGrounding, geminiPagesRead } from '../src/main/providers/web-search.ts'
+import { geminiActivity, geminiEarlierSearch, geminiGrounding, geminiPagesRead, geminiWithPages } from '../src/main/providers/web-search.ts'
 import { ToolRegistry, registerBuiltinTools } from '../src/main/tools.ts'
+import { itemsFromMessages, itemsReducer } from '../src/renderer/src/items.ts'
+import type { Item } from '../src/renderer/src/items.ts'
 import { COMPACTION_DEFAULTS, SUMMARY_OPEN } from '../src/shared/compaction.ts'
 import { normalizeUsage } from '../src/shared/stats.ts'
 import { PROVIDER_PRESETS, geminiSearchesWithTools, webSearchService } from '../src/shared/types.ts'
@@ -367,6 +369,96 @@ test('a search told only at the end of the reply is one search of its own, with 
   const [kept] = (elsewhere[1] as Assistant).web!
   assert.equal(kept.suggestions, undefined)
   assert.deepEqual(kept.sources, [{ url: REDIRECT, title: 'electronjs.org' }])
+})
+
+test('pages named with the answer, a step after a search that ended in a call, go to that search: one row on the page, as the turn goes by and once it is kept', async () => {
+  // The shapes of 3.5 Flash-Lite's replies (2026-11-24, raw responses read twice): the step that
+  // searched and called a tool ends with the search's suggestions and no pages; the answer comes
+  // next, asks for no search of its own, and names one of the queries and the page it rests on.
+  const queries = ['Electron releases github', 'Electron latest stable version']
+  const service = await fakeGemini((_seen, count) => ({
+    body:
+      count === 1
+        ? geminiSse([
+            piece([
+              { functionCall: { name: 'read_file', args: { path: 'a.txt' }, id: 'call_3882' }, thoughtSignature: 'S1' },
+              { toolCall: { toolType: 'GOOGLE_SEARCH_WEB', args: { queries }, id: 'call_2461' }, thoughtSignature: 'S2' }
+            ]),
+            piece([{ toolResponse: { toolType: 'GOOGLE_SEARCH_WEB', response: { search_suggestions: '<div>two chips</div>' }, id: 'call_2461' }, thoughtSignature: 'S3' }], {
+              finishReason: 'STOP'
+            })
+          ])
+        : geminiSse([
+            piece([{ text: 'It says hello; Electron is at 45.4.1.' }]),
+            piece([{ text: '', thoughtSignature: 'S4' }], { finishReason: 'STOP', groundingMetadata: { ...GROUNDING, webSearchQueries: [queries[1]] } })
+          ])
+  }))
+  const messages: ChatMessage[] = [{ role: 'user', content: 'read a.txt, and look up electron' }]
+  const out = await asGoogle(service, () => turn(connection({ webSearch: true, model: 'gemini-3.5-flash-lite' }, OFFICIAL), messages))
+  assert.deepEqual(out.errors, [])
+  assert.deepEqual(out.toolResults, ['1\thello from the file'])
+
+  // The step that searched keeps what it was told; the answer tells the same search with its pages,
+  // and with what the search said itself: both queries, and the suggestions that came with it.
+  const searched: WebActivity = { id: 'call_2461', kind: 'search', queries, status: 'done', suggestions: '<div>two chips</div>' }
+  const withPages: WebActivity = { ...searched, sources: [{ url: REDIRECT, title: 'electronjs.org' }] }
+  assert.deepEqual((messages[1] as Assistant).web, [searched])
+  assert.deepEqual((messages[3] as Assistant).web, [withPages])
+  assert.deepEqual(
+    out.activity.map((a) => [a.id, a.status, a.sources?.length ?? 0]),
+    [
+      ['call_2461', 'running', 0],
+      ['call_2461', 'done', 0],
+      ['call_2461', 'done', 1]
+    ]
+  )
+
+  // One row with the pages, above the call: on the page as the turn went by, and in the conversation as it was kept.
+  let live: Item[] = [{ kind: 'user', text: 'read a.txt, and look up electron' }]
+  for (const event of out.events) live = itemsReducer(live, { type: 'event', event })
+  for (const items of [live, itemsFromMessages(messages)]) {
+    assert.deepEqual(
+      items.map((item) => item.kind),
+      ['user', 'web', 'tool', 'assistant']
+    )
+    assert.deepEqual(items[1], { kind: 'web', activity: withPages })
+  }
+})
+
+test('the search an answer names pages for: the last of the turn that asked for them, not one that failed, and none of an earlier turn', () => {
+  const search = (id: string, asked: string[], more: Partial<WebActivity> = {}): WebActivity => ({ id, kind: 'search', queries: asked, status: 'done', ...more })
+  const said = (...web: WebActivity[]): ChatMessage => ({ role: 'assistant', content: '', web })
+  // The answer's pages, as `geminiGrounding` reads them: asked for "electron latest".
+  const found = geminiGrounding(GROUNDING, 'g-search')!
+  const before: ChatMessage[] = [{ role: 'user', content: 'first' }, said(search('old', ['electron latest'])), { role: 'user', content: 'second' }]
+  assert.equal(geminiEarlierSearch(before, found), undefined, "an earlier turn's search is not this turn's")
+
+  const turn: ChatMessage[] = [
+    ...before,
+    said(search('a', ['electron releases', 'electron latest']), search('b', ['typescript'])),
+    { role: 'tool', tool_call_id: 'c1', content: 'x' },
+    said(search('c', ['electron latest'], { status: 'failed' }))
+  ]
+  assert.equal(geminiEarlierSearch(turn, found)?.id, 'a')
+  assert.equal(geminiEarlierSearch(turn, { ...found, queries: ['rust'] }), undefined, 'pages named for a query no search of the turn asked for are a search of their own')
+  const { queries: _none, ...unasked } = found
+  assert.equal(geminiEarlierSearch(turn, unasked)?.id, 'b', 'naming no query, the last search of the turn that did not fail')
+
+  // Told again in a later step, a search is taken as it was told last.
+  const again = [...turn, said(search('a', ['electron releases', 'electron latest'], { sources: [{ url: 'https://a.example' }] }))]
+  assert.deepEqual(geminiEarlierSearch(again, found)?.sources, [{ url: 'https://a.example' }])
+
+  // With the pages named now, the search keeps what it said itself and lists its pages first, each once.
+  const listed = [{ url: 'https://a.example' }, { url: REDIRECT, title: 'electronjs.org' }]
+  assert.deepEqual(geminiWithPages(search('a', ['electron releases', 'electron latest'], { sources: listed, suggestions: '<div/>' }), found), {
+    id: 'a',
+    kind: 'search',
+    queries: ['electron releases', 'electron latest'],
+    status: 'done',
+    sources: listed,
+    suggestions: '<div/>'
+  })
+  assert.deepEqual(geminiWithPages(search('a', ['electron latest']), found).sources, [{ url: REDIRECT, title: 'electronjs.org' }])
 })
 
 test('a request sent on to another address is not followed there with the key', async () => {

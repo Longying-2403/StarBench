@@ -6,6 +6,8 @@ import type { CompactionSettings } from '../shared/compaction.ts'
 import { startingEffort } from '../shared/effort-defaults.ts'
 import { cleanWorkspaceName, folderKey, folderName } from '../shared/folders.ts'
 import { sendsKeySafely } from '../shared/key-address.ts'
+import { isSite } from '../shared/links.ts'
+import { freeName } from '../shared/provider-choices.ts'
 import { DEFAULT_THEME, isTheme } from '../shared/theme.ts'
 import type { Theme } from '../shared/theme.ts'
 import { CUSTOM_PROMPT_LIMIT, PROVIDER_KINDS, PROVIDER_PRESETS, isLocalAddress, isReasoningEffort } from '../shared/types.ts'
@@ -65,6 +67,12 @@ export interface StoredSettings {
   titles?: false
   /** Set, to false, when the list of conversations no longer says under each when it was last gone on with. Absent, it does. */
   sessionTimes?: false
+  /**
+   * The sites whose links in an answer open without the question first (`WebPlace.site` in
+   * shared/links.ts): each one the person said "do not ask again" for, the latest first. Absent
+   * when there is none.
+   */
+  trustedSites?: string[]
 }
 
 /** What a ChatGPT sign-in is added as. */
@@ -218,7 +226,8 @@ export function readSettings(raw: unknown): StoredSettings {
     ...(compaction ? { compaction } : {}),
     ...keptTheme(source.theme),
     ...(source.titles === false ? { titles: false as const } : {}),
-    ...(source.sessionTimes === false ? { sessionTimes: false as const } : {})
+    ...(source.sessionTimes === false ? { sessionTimes: false as const } : {}),
+    ...keptSites(source.trustedSites)
   }
 }
 
@@ -381,7 +390,8 @@ export function toPublic(settings: StoredSettings, accounts: Readonly<Record<str
     trustedFolders: settings.trustedFolders ?? [],
     theme: themeOf(settings),
     titles: settings.titles !== false,
-    sessionTimes: settings.sessionTimes !== false
+    sessionTimes: settings.sessionTimes !== false,
+    trustedSites: settings.trustedSites ?? []
   }
 }
 
@@ -442,7 +452,8 @@ export function saveLogin(
   if (providerId !== undefined && existing?.auth !== 'chatgpt') throw new Error('This provider no longer exists.')
   const base: StoredProvider = existing ?? {
     id: freshId(CHATGPT.name, settings.providers.map((p) => p.id)),
-    name: CHATGPT.name,
+    // Each sign-in under a name of its own ("ChatGPT", "ChatGPT 2"): two of them may be of one address, the personal plan and a Team workspace, and are then told apart by nothing else until the person names them.
+    name: freeName(CHATGPT.name, settings.providers),
     kind: CHATGPT.kind,
     baseURL: login.baseURL,
     model: '',
@@ -523,6 +534,19 @@ export function setEffort(settings: StoredSettings, effort: ReasoningEffort): St
   return { ...settings, providers: settings.providers.map((p) => (p === active ? next : p)) }
 }
 
+/**
+ * Takes back the level chosen for one model of one provider: the service turned it down. The
+ * model is then where it starts (`effortOf`): for most that is "nothing chosen", and nothing is sent.
+ */
+export function dropEffortFor(settings: StoredSettings, providerId: string, model: string): StoredSettings {
+  const provider = settings.providers.find((p) => p.id === providerId)
+  if (!provider?.efforts || !Object.hasOwn(provider.efforts, model)) return settings
+  const { [model]: _refused, ...efforts } = provider.efforts
+  const { efforts: _dropped, ...rest } = provider
+  const next: StoredProvider = Object.keys(efforts).length ? { ...rest, efforts } : rest
+  return { ...settings, providers: settings.providers.map((p) => (p === provider ? next : p)) }
+}
+
 /** Turns faster answers on or off for one model of one provider. */
 export function setFastFor(settings: StoredSettings, providerId: string, model: string, on: boolean): StoredSettings {
   const provider = settings.providers.find((p) => p.id === providerId)
@@ -592,6 +616,33 @@ export function setTitles(settings: StoredSettings, on: boolean): StoredSettings
 export function setSessionTimes(settings: StoredSettings, on: boolean): StoredSettings {
   const { sessionTimes: _dropped, ...rest } = settings
   return on ? rest : { ...rest, sessionTimes: false }
+}
+
+/** At most this many sites are kept: a list a person looks through and prunes by hand. The oldest give way. */
+export const SITES_MAX = 200
+
+/** The sites as they are written down: each a site and nothing more (`isSite`), each once. Left out when there is none. */
+function keptSites(value: unknown): Pick<StoredSettings, 'trustedSites'> {
+  const sites = [...new Set((Array.isArray(value) ? value : []).filter(isSite))].slice(0, SITES_MAX)
+  return sites.length ? { trustedSites: sites } : {}
+}
+
+/** Whether the links of a site open without the question first. */
+export function trustsSite(settings: Pick<StoredSettings, 'trustedSites'>, site: string): boolean {
+  return (settings.trustedSites ?? []).includes(site)
+}
+
+/** Keeps the person's "do not ask again" for a site: its links open without the question from now on. `site` arrives over IPC and is checked here. */
+export function trustSite(settings: StoredSettings, site: unknown): StoredSettings {
+  if (!isSite(site)) throw new Error('This is not the address of a site.')
+  const { trustedSites: before, ...rest } = settings
+  return { ...rest, ...keptSites([site, ...(before ?? [])]) }
+}
+
+/** Takes that back: the links of the site ask again. A site that was not kept changes nothing. */
+export function forgetSite(settings: StoredSettings, site: unknown): StoredSettings {
+  const { trustedSites: before, ...rest } = settings
+  return { ...rest, ...keptSites((before ?? []).filter((kept) => kept !== site)) }
 }
 
 /** Chooses the look of the app: dark, light, or as the system is set. `theme` is checked here, since it arrives over IPC. */

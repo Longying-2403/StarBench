@@ -9,13 +9,13 @@ import type { CompactionChange } from '../../shared/compaction.ts'
 import { formatTokens, readWindow } from '../../shared/stats.ts'
 import { THEMES } from '../../shared/theme.ts'
 import type { Theme } from '../../shared/theme.ts'
-import { signInOffer } from '../../shared/provider-choices.ts'
 import { AddProviderMenu } from './AddProviderMenu.tsx'
 import type { AddChoice } from './AddProviderMenu.tsx'
 import { ChatGptButton, ChatGptPane } from './ChatGptPane.tsx'
 import { CheckIcon, ChevronLeftIcon, MonitorIcon, MoonIcon, SunIcon } from './icons.tsx'
 import { Notice } from './Notice.tsx'
 import { AutoUpdateRow, UpdateButton, UpdateStatus, useUpdates } from './UpdateCheck.tsx'
+import { UsageTab } from './UsagePage.tsx'
 import { errorText } from './util.ts'
 
 const api = window.harness
@@ -25,6 +25,7 @@ const MOST = Math.round(SHARE_MAX * 100)
 
 const TABS = [
   { id: 'model', label: '模型' },
+  { id: 'usage', label: '用量' },
   { id: 'skills', label: 'Skills' },
   { id: 'mcp', label: 'MCP' },
   { id: 'general', label: '通用' },
@@ -330,9 +331,8 @@ function ProvidersTab({
 
   const add = (choice: AddChoice): void => {
     if (choice.type !== 'signin') return setEditing(adding(choice))
-    // There is one sign-in with an OpenAI account at most: where a provider is one, its own page is where to go on.
-    const { providerId } = signInOffer(settings.providers)
-    setEditing({ type: 'chatgpt', ...(providerId ? { providerId } : {}) })
+    // One more account: each signs in as a provider of its own. The ones that are there are reached from their rows.
+    setEditing({ type: 'chatgpt' })
   }
   return (
     <div className="tab-body">
@@ -637,7 +637,7 @@ function GeneralTab({ settings, onChanged }: { settings: Settings; onChanged: (s
           <span className="setting-name">统计用量和上下文</span>
           <span className="hint">
             在输入框下面显示当前对话的请求次数、用时、token 用量和上下文占用，数字随对话保存。为此每次请求都会向模型服务要一份用量统计：发给 OpenAI
-            兼容服务的流式请求里会多一个 stream_options 字段，服务拒绝它时自动去掉重发。关掉后不再统计，也不再多发这个字段。
+            兼容服务的流式请求里会多一个 stream_options 字段，服务拒绝它时自动去掉重发。这些数字也会按天记进“用量”页。关掉后不再统计，也不再多发这个字段。
           </span>
         </span>
         <input type="checkbox" role="switch" className="switch" checked={settings.stats} onChange={(e) => count(e.target.checked)} />
@@ -646,7 +646,7 @@ function GeneralTab({ settings, onChanged }: { settings: Settings; onChanged: (s
         <span className="setting-words">
           <span className="setting-name">自动给对话起标题</span>
           <span className="hint">
-            第一轮对话结束后，让当前模型根据你的第一条消息和回答的开头起一个简短的标题，代替侧栏里原来截取的开头几个字。每个对话只起一次：为此多发一个很小的请求，不带工具、不联网，也不计入对话的用量统计。你自己改过名的对话不会被覆盖。关掉后，标题就是第一条消息的开头。
+            第一轮对话结束后，让当前模型根据你的第一条消息和回答的开头起一个简短的标题，代替侧栏里原来截取的开头几个字。每个对话只起一次：为此多发一个很小的请求，不带工具、不联网，也不计入对话的用量统计，只记进“用量”页。你自己改过名的对话不会被覆盖。关掉后，标题就是第一条消息的开头。
           </span>
         </span>
         <input
@@ -719,6 +719,35 @@ function GeneralTab({ settings, onChanged }: { settings: Settings; onChanged: (s
             onSave={(cap) => compact({ cap })}
           />
         </span>
+      </div>
+      <div className="setting-block">
+        <span className="setting-words">
+          <span className="setting-name">不再询问的网站</span>
+          <span className="hint">
+            点回答里的网页链接时，应用会先让你看清网址，确认之后才在浏览器里打开。在那里勾选过“不再询问”的网站列在这里，它们的链接点了就直接打开；移除之后会重新询问。
+          </span>
+        </span>
+        {settings.trustedSites.length === 0 ? (
+          <div className="hint">还没有。</div>
+        ) : (
+          <ul className="site-list">
+            {settings.trustedSites.map((site) => (
+              <li key={site} className="site-row">
+                <span className="site-name">{site}</span>
+                <button
+                  type="button"
+                  className="btn btn-small"
+                  onClick={() => {
+                    setError('')
+                    api.forgetSite(site).then(onChanged, (err) => setError(errorText(err)))
+                  }}
+                >
+                  移除
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
       </div>
       {error && (
         <div className="msg-error" role="alert">
@@ -931,6 +960,7 @@ export function SettingsPage({
         </div>
         <div className="settings-pane" role="tabpanel" aria-labelledby={`settings-tab-${tab}`}>
           {tab === 'model' && <ProvidersTab settings={settings} onChanged={onSaved} onWelcome={onWelcome} />}
+          {tab === 'usage' && <UsageTab settings={settings} />}
           {tab === 'skills' && <SkillsTab />}
           {tab === 'mcp' && <McpTab />}
           {tab === 'general' && <GeneralTab settings={settings} onChanged={onSaved} />}

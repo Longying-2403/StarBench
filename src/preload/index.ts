@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer } from 'electron'
 import type { MemoryApi, MemoryEvent } from '../shared/memory.ts'
 import type { HarnessApi, SessionEvent } from '../shared/types.ts'
 import type { UpdateEvent } from '../shared/update.ts'
+import type { UsageApi, UsageEvent } from '../shared/usage.ts'
 
 const api: HarnessApi = {
   getSettings: () => ipcRenderer.invoke('settings:get'),
@@ -65,6 +66,9 @@ const api: HarnessApi = {
   removeWorkspace: (folder, sessions) => ipcRenderer.invoke('workspace:remove', folder, sessions),
   readImage: (workspace, address) => ipcRenderer.invoke('files:image', workspace, address),
   openFile: (workspace, address) => ipcRenderer.invoke('files:open', workspace, address),
+  openWeb: (address, answer) => ipcRenderer.invoke('links:open', address, answer),
+  forgetSite: (site) => ipcRenderer.invoke('links:forget', site),
+  githubRepo: (workspace) => ipcRenderer.invoke('workspace:github', workspace),
   listSessions: () => ipcRenderer.invoke('sessions:list'),
   searchSessions: (query) => ipcRenderer.invoke('sessions:search', query),
   loadSession: (id) => ipcRenderer.invoke('sessions:load', id),
@@ -108,3 +112,20 @@ const memory: MemoryApi = {
 }
 
 contextBridge.exposeInMainWorld('memory', memory)
+
+/** The page's way to the record of what was asked of the services, and to DeepSeek's balance (main/usage.ts). */
+const usage: UsageApi = {
+  summary: (range) => ipcRenderer.invoke('usage:summary', range),
+  clear: () => ipcRenderer.invoke('usage:clear'),
+  balance: (providerId, fresh) => ipcRenderer.invoke('usage:balance', providerId, fresh),
+  setAlert: (providerId, amount) => ipcRenderer.invoke('usage:setAlert', providerId, amount),
+  settings: () => ipcRenderer.invoke('usage:settings'),
+  setBalance: (on) => ipcRenderer.invoke('usage:setBalance', on),
+  onEvent: (listener) => {
+    const handler = (_: unknown, event: UsageEvent): void => listener(event)
+    ipcRenderer.on('usage:event', handler)
+    return () => ipcRenderer.removeListener('usage:event', handler)
+  }
+}
+
+contextBridge.exposeInMainWorld('usage', usage)

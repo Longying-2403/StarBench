@@ -16,6 +16,7 @@ import { routesByConversation } from '../../shared/types.ts'
 import type { ToolCall } from '../../shared/types.ts'
 import { fetchModelInfo, fetchPlanModelInfo, listModels, listPlanModels } from '../models.ts'
 import { ImagesRefused, carriesImages, imageUrl, refusesImages, userImages } from './attachments.ts'
+import { refusesEffort } from './effort.ts'
 import { newReply, replayOf, userText, withSearchNote, withToolResults } from './history.ts'
 import { ServiceError } from './types.ts'
 import type { Connection, ModelReply, ModelRequest, ProviderAdapter } from './types.ts'
@@ -174,7 +175,11 @@ function clientFor(connection: Connection): OpenAI {
   })
 }
 
-async function run(request: ModelRequest, withSummary: boolean): Promise<ModelReply> {
+/**
+ * `levelRefused` is what the service said when it turned down the level of thinking of an earlier
+ * attempt at this request, which is now made without one; the caller is told once it is taken.
+ */
+async function run(request: ModelRequest, withSummary: boolean, levelRefused?: string): Promise<ModelReply> {
   const { connection, signal } = request
   const client = clientFor(connection)
   const message = newReply(connection)
@@ -215,6 +220,9 @@ async function run(request: ModelRequest, withSummary: boolean): Promise<ModelRe
     } satisfies OpenAI.Responses.ResponseCreateParamsStreaming
     request.probe?.sent(wire)
     const stream = await client.responses.create(wire, { signal })
+    // Taken without the level it had turned down: it is known now that the level was all that was wrong.
+    if (levelRefused !== undefined) request.onEffortRefused?.(levelRefused)
+    levelRefused = undefined
 
     for await (const event of stream) {
       switch (event.type) {
@@ -289,11 +297,15 @@ async function run(request: ModelRequest, withSummary: boolean): Promise<ModelRe
     // A stop request keeps whatever text arrived; unfinished tool calls are dropped.
     if (signal.aborted) return { message }
     // Nothing reached the user yet, so the request can simply be made again without the summary.
-    if (withSummary && !streamed && summaryRefused(err)) return run(request, false)
+    if (withSummary && !streamed && summaryRefused(err)) return run(request, false, levelRefused)
     // Likewise without the faster answers, which this model or account turns out not to have.
     if (connection.fast && !streamed && tierRefused(err)) {
       request.onFastRefused?.()
-      return run({ ...request, connection: { ...connection, fast: false } }, withSummary)
+      return run({ ...request, connection: { ...connection, fast: false } }, withSummary, levelRefused)
+    }
+    // And without the level of thinking, where the model turns out to take none, or not that one.
+    if (effort !== 'default' && !streamed && refusesEffort(err)) {
+      return run({ ...request, connection: { ...connection, reasoningEffort: 'default' } }, withSummary, (err as Error).message)
     }
     // The pictures were what the service turned down: the caller can send the message again with those told in words.
     if (!streamed && carriesImages(request) && refusesImages(err)) throw new ImagesRefused((err as Error).message)

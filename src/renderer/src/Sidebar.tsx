@@ -292,7 +292,7 @@ function SessionRow({
   active,
   working,
   waiting,
-  busy,
+  unseen,
   markSlot,
   snippet,
   place,
@@ -310,8 +310,8 @@ function SessionRow({
   working: boolean
   /** That turn waits for the person to allow or refuse a tool call: a hand stands in the place of the ring. */
   waiting: boolean
-  /** While a turn runs, sessions can be neither switched nor changed. */
-  busy: boolean
+  /** A turn of it ended while another conversation was on show, and it has not been looked at since: a dot stands where the ring was. */
+  unseen: boolean
   /** Room for a mark is kept even without one, because a session around this one has a mark: the names stay in line. */
   markSlot: boolean
   /** Where in the session a search found its words, when that was in a message and not in the name. */
@@ -327,6 +327,9 @@ function SessionRow({
   const rowRef = useRef<HTMLDivElement>(null)
   const moreRef = useRef<HTMLButtonElement>(null)
   const menu = useRowMenu(rowRef, moreRef, MENU)
+  // A session at work can be opened like any other, and several can be at work at once. What
+  // changes it (its name, its mark, archiving, deleting) waits until its turn is over.
+  const busy = working || waiting
 
   // Renaming starts with the whole name selected, so typing replaces it.
   const renaming = draft !== null
@@ -376,10 +379,14 @@ function SessionRow({
           <HandIcon />
         </span>
       ) : (
-        working && <span className="session-working" role="img" aria-label="正在工作" data-tip="正在工作" />
+        (working ? (
+          <span className="session-working" role="img" aria-label="正在工作" data-tip="正在工作" />
+        ) : (
+          unseen && <span className="session-unseen" role="img" aria-label="已结束，还没看过" data-tip="这一轮在你看别的对话时结束了，打开看看结果" />
+        ))
       )}
       {draft === null ? (
-        <button className="session-open" disabled={busy} onClick={() => onOpen(session.id)}>
+        <button className="session-open" onClick={() => onOpen(session.id)}>
           {mark}
           <span className="session-words">
             {/* The whole name, for one that is cut short: asked of the name itself, since the row holds more than it. */}
@@ -421,10 +428,10 @@ function SessionRow({
           ref={moreRef}
           className="session-more"
           disabled={busy}
+          {...(busy ? { 'data-tip': '这个对话正在工作，结束后才能改名、归档或删除' } : { 'data-tip': '更多操作' })}
           aria-haspopup="menu"
           aria-expanded={menu.place !== null}
           aria-label={`会话"${session.title}"的更多操作`}
-          data-tip="更多操作"
           onClick={menu.toggle}
         >
           <MoreIcon />
@@ -525,6 +532,7 @@ function GroupHead({
   group: WorkspaceGroup
   /** The sessions of the group are on show. */
   open: boolean
+  /** A session of the workspace is at work: the workspace is not renamed, archived or taken out of the list meanwhile. A new chat can be started in it all the same. */
   busy: boolean
   /** The group holds what a search found, not all of its workspace: nothing is then done to the workspace as a whole. */
   partial: boolean
@@ -616,7 +624,6 @@ function GroupHead({
       {draft === null && (
         <button
           className="group-add"
-          disabled={busy}
           onClick={() => onNewChat(group.workspace)}
           aria-label={`在 ${group.name} 里开始新对话`}
           data-tip="在这个文件夹里开始新对话"
@@ -692,9 +699,9 @@ export function Sidebar({
   sessions,
   names,
   activeId,
-  workingId,
+  workingIds,
   waitingIds,
-  busy,
+  unseenIds,
   page,
   showTimes,
   update,
@@ -715,11 +722,12 @@ export function Sidebar({
   /** The names the person gave workspaces, by the key of the folder. A workspace not in here goes by the name of its folder. */
   names?: Readonly<Record<string, string>>
   activeId: string | null
-  /** The session whose turn the page itself is running, if any. Of sessions at work elsewhere the list says so (`running`). */
-  workingId: string | null
+  /** The sessions the page knows to be at work; several can be at once. Of those it has not heard of, the list says so (`running`). */
+  workingIds: readonly string[]
   /** The sessions that wait for the person to allow or refuse a tool call. */
   waitingIds: readonly string[]
-  busy: boolean
+  /** The sessions in which a turn ended while another one was on show. */
+  unseenIds: readonly string[]
   /** What the main part of the window shows: the conversation, the plugins, the settings, or the memory. */
   page: 'chat' | 'plugins' | 'settings' | 'memory'
   /** Whether each session says, under its name, when it was last gone on with (设置 → 外观). */
@@ -856,6 +864,7 @@ export function Sidebar({
    * The sessions of one group. When one of them has a mark, all of them keep room for one.
    * `placed` is for a group that is not a workspace: each session then says which one it ran in.
    */
+  const atWork = (session: SessionSummary): boolean => session.running === true || workingIds.includes(session.id) || waitingIds.includes(session.id)
   const rows = (list: SessionSummary[], placed = false) => {
     const markSlot = list.some((s) => s.icon)
     return list.map((session) => (
@@ -863,9 +872,9 @@ export function Sidebar({
         key={session.id}
         session={session}
         active={session.id === activeId}
-        working={session.running === true || session.id === workingId}
+        working={atWork(session)}
         waiting={waitingIds.includes(session.id)}
-        busy={busy}
+        unseen={unseenIds.includes(session.id)}
         markSlot={markSlot}
         snippet={filtered ? hits.get(session.id)?.snippet : undefined}
         place={placed ? workspaceName(session.workspace, names, isWindows) : undefined}
@@ -899,7 +908,7 @@ export function Sidebar({
         </button>
       )}
       {/* Without their words on the strip, this button and the one for the settings say what they are when asked. */}
-      <button className="btn btn-primary sidebar-new" onClick={() => onNewChat()} disabled={busy} {...(folded ? { 'aria-label': '新对话', 'data-tip': '新对话' } : {})}>
+      <button className="btn btn-primary sidebar-new" onClick={() => onNewChat()} {...(folded ? { 'aria-label': '新对话', 'data-tip': '新对话' } : {})}>
         <QuillIcon />
         {!folded && '新对话'}
       </button>
@@ -958,7 +967,7 @@ export function Sidebar({
               <GroupHead
                 group={group}
                 open={open}
-                busy={busy}
+                busy={group.sessions.some(atWork)}
                 partial={filtered}
                 onToggle={() => !filtered && toggle(group.key)}
                 onNewChat={onNewChat}

@@ -584,6 +584,18 @@ body {
     animation-duration: 4s;
   }
 }
+/* A turn of the session ended while another conversation was on show, and it has not been looked
+   at since: a dot where the ring was, until the session is opened. */
+.session-unseen {
+  position: absolute;
+  top: 50%;
+  left: -14px;
+  width: 7px;
+  height: 7px;
+  margin-top: -3.5px;
+  border-radius: 50%;
+  background: var(--accent);
+}
 .session:hover,
 .session-active,
 .session-menu-open {
@@ -1012,6 +1024,142 @@ body {
 .markdown .file-link {
   text-decoration: underline;
   cursor: pointer;
+}
+/* A link to a page on the web is followed by the app, after a question (LinkAsk.tsx), and has no
+   address of its own either. */
+.markdown .web-link {
+  text-decoration: underline;
+  cursor: pointer;
+}
+/* A link to GitHub: its mark in front, in the colour of the words, and a line under them only while pointed at. */
+.markdown .github-link {
+  text-decoration: none;
+}
+.markdown .github-link:hover,
+.markdown .github-link:focus-visible {
+  text-decoration: underline;
+}
+.github-mark {
+  margin-right: 4px;
+  vertical-align: -2px;
+}
+/* The hash of a commit, as GitHub shows one: small, in the letters of code, in a frame. */
+.markdown .github-commit {
+  padding: 1px 8px 1px 6px;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 13%, transparent);
+  font-family: var(--mono);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.markdown .github-commit .github-mark {
+  width: 13px;
+  height: 13px;
+}
+.markdown .github-commit code {
+  padding: 0;
+  background: none;
+  font-size: inherit;
+}
+
+/* Code that an answer sets apart (CodeWindow in AnswerText.tsx): a frame with a bar on top, which
+   names the language and holds the button that copies the code. */
+.code-window {
+  margin: 6px 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  overflow: hidden;
+}
+.code-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 3px 6px 3px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--raised);
+  color: var(--muted);
+  font-size: 12px;
+}
+.code-language {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--mono);
+}
+.code-copy {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  padding: 1px 7px;
+  border: 0;
+  border-radius: 5px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.code-copy:hover {
+  background: var(--border);
+  color: var(--text);
+}
+.code-copy svg {
+  width: 13px;
+  height: 13px;
+}
+/* The code itself has the frame of its window, and none of its own. A long line is not broken. */
+.markdown .code-window pre {
+  margin: 0;
+  padding: 10px 12px;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  line-height: 1.55;
+}
+/* What each word of the code is, in the app's own colours, so that they hold in both looks:
+   what a language is written with in the accent, text in green, what stands for a value in the
+   colour of warnings, numbers and fixed values in violet, and remarks pale. */
+.markdown .hljs-keyword,
+.markdown .hljs-built_in,
+.markdown .hljs-name,
+.markdown .hljs-selector-tag,
+.markdown .hljs-attr,
+.markdown .hljs-section,
+.markdown .hljs-title {
+  color: var(--accent);
+}
+.markdown .hljs-string,
+.markdown .hljs-regexp,
+.markdown .hljs-addition {
+  color: var(--ok);
+}
+.markdown .hljs-variable,
+.markdown .hljs-template-variable {
+  color: var(--warn);
+}
+.markdown .hljs-number,
+.markdown .hljs-literal,
+.markdown .hljs-type,
+.markdown .hljs-symbol {
+  color: var(--peak);
+}
+.markdown .hljs-comment,
+.markdown .hljs-quote,
+.markdown .hljs-meta {
+  color: var(--muted);
+}
+.markdown .hljs-deletion {
+  color: var(--danger);
+}
+.markdown .hljs-emphasis {
+  font-style: italic;
+}
+.markdown .hljs-strong {
+  font-weight: 600;
 }
 /* A picture in an answer keeps to the width of the text and to a height that leaves the answer in view. */
 .answer-image {
@@ -3818,4 +3966,153 @@ a.btn {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* The conversation with the rail of its turns (TurnRail.tsx). The rail and its card lie over the
+   left edge of the conversation and stay where they are while it moves. From the second turn on
+   there is a rail, and the conversation keeps clear of it where the window is narrow. */
+.transcript-frame {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.transcript-frame[data-rail] .transcript {
+  padding-left: max(48px, calc((100% - 820px) / 2));
+}
+.turn-rail {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  width: 48px;
+  padding-left: 9px;
+  transform: translateY(-50%);
+}
+/* A tick takes the whole width of the rail to be pressed on, and shows as a short line in it. */
+.turn-tick {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
+}
+/* Where the keyboard is shows by the lengths of the ticks and by the card, as the pointer does. */
+.turn-tick:focus-visible {
+  outline: none;
+}
+.turn-tick span {
+  height: 2px;
+  border-radius: 1px;
+  background: color-mix(in srgb, var(--muted) 45%, var(--bg));
+  /* The lengths follow the pointer gently as it moves along the rail. */
+  transition:
+    width 110ms ease-out,
+    background-color 110ms ease-out;
+}
+/* The tick of the turn in view, and with the pointer on the rail the one under it. */
+.turn-tick[data-stands] span {
+  background: var(--text);
+}
+.turn-card {
+  position: absolute;
+  left: 52px;
+  z-index: 1;
+  width: min(320px, calc(100% - 68px));
+  padding: 9px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--raised);
+  box-shadow: 0 4px 14px rgb(0 0 0 / 25%);
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+.turn-card-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 600;
+}
+.turn-card-text {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+/* The message a tick of the rail went to, for a moment. */
+.msg-flash {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .turn-tick span {
+    transition: none;
+  }
+}
+
+/* The address a link leads to, in the question before it is followed (LinkAsk.tsx): whole,
+   however long, with the site in the colour of text and the rest pale. */
+.link-address {
+  max-height: 132px;
+  overflow-y: auto;
+  color: var(--muted);
+}
+.link-address strong {
+  color: var(--text);
+  font-weight: 600;
+}
+/* Copying the address is neither answer: it stands apart from them, and quiet. */
+.dialog-actions .link-copy {
+  margin-right: auto;
+  padding-right: 6px;
+  padding-left: 6px;
+  border-color: transparent;
+  background: none;
+  color: var(--muted);
+}
+.dialog-actions .link-copy:hover {
+  color: var(--text);
+}
+
+/* A setting that is a list (设置 → 通用): what it is on top, the list under it. */
+.setting-block {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 13px;
+}
+.site-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.site-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 6px 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+}
+.site-name {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-family: var(--mono);
+  font-size: 12.5px;
 }

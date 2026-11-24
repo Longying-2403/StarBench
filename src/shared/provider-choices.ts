@@ -1,6 +1,7 @@
 // What "添加模型" under 设置 → 模型 offers beside a model server of one's own and any other
 // service: the services the app knows by name, and signing in with an OpenAI account. All of
-// them stay on offer whatever is set up already; what is there is told with them.
+// them stay on offer whatever is set up already; what is there is told with them. A service can
+// be added again for another key, and the sign-in again for another account.
 
 import { PROVIDER_PRESETS, serviceHost } from './types.ts'
 import type { ProviderInfo } from './types.ts'
@@ -34,10 +35,20 @@ export function presetOffers(providers: readonly ProviderInfo[]): PresetOffer[] 
 }
 
 /**
- * The sign-in with an OpenAI account as the menu offers it. There is one at most: where a
- * provider is such a sign-in, signed in or out, the entry leads to that one instead of adding another.
+ * The sign-in with an OpenAI account as the menu offers it. Like a service with a key it stays on
+ * offer however many accounts are there: each account signs in as a provider of its own, and the
+ * entry adds one more. `signedIn` is how many accounts are signed in at the moment.
  */
-export function signInOffer(providers: readonly ProviderInfo[]): { providerId?: string; signedIn: boolean } {
-  const provider = providers.find((p) => p.auth === 'chatgpt')
-  return { ...(provider ? { providerId: provider.id } : {}), signedIn: Boolean(provider?.account?.signedIn) }
+export function signInOffer(providers: readonly ProviderInfo[]): { signedIn: number } {
+  return { signedIn: providers.filter((p) => p.auth === 'chatgpt' && p.account?.signedIn).length }
+}
+
+/**
+ * What a provider is called where several are listed together, as in the list of models. Its
+ * name; and for a sign-in with an OpenAI account, where there is more than one of them, the
+ * account as well, since they all come with the same name.
+ */
+export function providerLabel(provider: ProviderInfo, providers: readonly ProviderInfo[]): string {
+  if (provider.auth !== 'chatgpt' || providers.filter((p) => p.auth === 'chatgpt').length < 2) return provider.name
+  return `${provider.name}（${provider.account?.email ?? (provider.account?.signedIn ? '已登录' : '未登录')}）`
 }

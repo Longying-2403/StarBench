@@ -5,6 +5,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type {
   CompactionReport,
+  LinkOutcome,
   ModelInfo,
   OpenOutcome,
   PermissionDecision,
@@ -25,6 +26,7 @@ import type { PermissionMode } from '../shared/permissions.ts'
 import { addCompaction, addStep, addToolTime, addTurn, emptyStats } from '../shared/stats.ts'
 import { ABOUT } from '../shared/about.ts'
 import { DEFAULT_THEME } from '../shared/theme.ts'
+import { webPlace } from '../shared/links.ts'
 import { MEMORY_COMMANDS } from '../shared/memory.ts'
 import { isLocalAddress, isSessionIcon } from '../shared/types.ts'
 import { askAside, builtinPrompt, compactConversation, runTurn } from './agent.ts'
@@ -36,6 +38,7 @@ import { SignInError, startAttempt } from './chatgpt/login.ts'
 import type { Attempt } from './chatgpt/login.ts'
 import { adapterFor } from './providers/index.ts'
 import type { Connection } from './providers/index.ts'
+import { githubRepoOf } from './github.ts'
 import { createKernel } from './kernel.ts'
 import type { Kernel } from './kernel.ts'
 import { languageOf } from './language.ts'
@@ -43,6 +46,7 @@ import { McpManager } from './mcp.ts'
 import { MemoryService, registerMemoryIpc } from './memory.ts'
 import type { MemoryTurn } from './memory.ts'
 import { UpdateChecker, askReleases, registerUpdateIpc } from './update-check.ts'
+import { UsageService, registerUsageIpc } from './usage.ts'
 import { mayGrant, mayNavigate } from './page-guard.ts'
 import { PluginChannel } from './plugin-channel.ts'
 import { PluginManager } from './plugins.ts'
@@ -130,6 +134,17 @@ const updates = new UpdateChecker({
   revision: ABOUT.revision,
   ask: () => askReleases({ agent: `StarBench/${app.getVersion()}`, ...(!app.isPackaged && process.env.STARBENCH_UPDATE_TEST_SERVER ? { url: process.env.STARBENCH_UPDATE_TEST_SERVER } : {}) }),
   emit: (event) => mainWindow?.webContents.send('updates:event', event)
+})
+/**
+ * What was asked of the model services, counted while the app keeps count, and the balance
+ * DeepSeek tells with the key the service is used with (usage.ts): for the usage page of the
+ * settings and the row under the message box.
+ */
+const usage = new UsageService({
+  file: path.join(app.getPath('userData'), 'usage.json'),
+  providers: async () => (await store.getSettings()).providers,
+  keyOf: async (providerId) => (await store.getConnection(providerId))?.apiKey ?? null,
+  emit: (event) => mainWindow?.webContents.send('usage:event', event)
 })
 const mcp = new McpManager({
   configFile: path.join(app.getPath('userData'), 'mcp.json'),
@@ -442,6 +457,8 @@ async function nameConversation(session: Session, connection: Connection): Promi
         system: titlePrompt(languageOf(session.messages)),
         text: record,
         signal: controller.signal,
+        // What it cost is counted with the rest, while the app keeps count.
+        measured: (await store.countsStats()) ? (measure) => usage.record(measure, connection.providerName) : undefined,
         trace: {
           get active() {
             return trace.active
@@ -525,7 +542,7 @@ function registerIpc(): void {
         if (mainWindow?.isMinimized()) mainWindow.restore()
         mainWindow?.show()
         mainWindow?.focus()
-        return { ok: true, settings: withModel ?? saved.settings, providerId: saved.providerId, welcome: saved.welcome }
+        return { ok: true, settings: withModel ?? saved.settings, providerId: saved.providerId, welcome: saved.welcome, ...(saved.already ? { already: true as const } : {}) }
       })
       .catch(
         (err): SignInResult => ({
@@ -658,6 +675,32 @@ function registerIpc(): void {
     return error ? { ok: false, reason: 'failed', detail: error } : { ok: true, how: 'opened' }
   })
 
+  // A page on the web that an answer links to. The words of a link are the model's and may say
+  // anything, so the person is shown where it leads and asked before the browser goes there
+  // (LinkAsk.tsx), except for the sites they said not to ask about again. Whether a site is one
+  // of those is decided here, by the settings as they are kept.
+  ipcMain.handle('links:open', async (_e, address: unknown, answer: unknown): Promise<LinkOutcome> => {
+    const place = webPlace(typeof address === 'string' ? address : '')
+    if (!place) return { opened: false, reason: 'not-web' }
+    const said = typeof answer === 'object' && answer !== null
+    if (!said && !(await store.trustsSite(place.site))) return { opened: false, reason: 'ask' }
+    try {
+      await shell.openExternal(place.address)
+    } catch {
+      return { opened: false, reason: 'failed' }
+    }
+    // A site is kept only once a page of it did open.
+    const settings = said && (answer as { remember?: unknown }).remember === true ? await store.trustSite(place.site) : undefined
+    return { opened: true, ...(settings ? { settings } : {}) }
+  })
+  ipcMain.handle('links:forget', (_e, site: unknown) => store.forgetSite(site))
+  // The repository on GitHub a workspace is a clone of, for the words of an answer that name a
+  // pull request or a commit of it. Looked for only in a folder the person said a model may read.
+  ipcMain.handle('workspace:github', async (_e, workspace: unknown) => {
+    const folder = typeof workspace === 'string' ? workspace : ''
+    return folder && path.isAbsolute(folder) && (await store.trusts(folder)) ? githubRepoOf(folder) : null
+  })
+
   const pluginManager = async (): Promise<PluginManager> => {
     if (!pluginsReady) throw new Error('Plugins are not available yet.')
     return pluginsReady
@@ -728,6 +771,8 @@ function registerIpc(): void {
   })
   // The look for a newer build, for the About page of the settings.
   registerUpdateIpc(ipcMain, updates)
+  // What was asked of the services, and DeepSeek's balance: the usage page, and the row under the message box.
+  registerUsageIpc(ipcMain, usage)
 
   // With which of them are at work just now, so that the list can show it.
   ipcMain.handle('sessions:list', async () => (await store.listSessions()).map((s) => (activeRuns.has(s.id) ? { ...s, running: true as const } : s)))
@@ -895,6 +940,8 @@ function registerIpc(): void {
           console.error('[memory] left out of this turn:', err instanceof Error ? err.message : err)
           return { prompt: undefined, tools }
         })
+    /** Set when the service turned out not to take the level of thinking chosen for the model: what is asked of it after the turn names none either. */
+    let levelRefused = false
 
     void runTurn({
       connection: asLearned(current.id, connection),
@@ -925,6 +972,7 @@ function registerIpc(): void {
             step: (measure) => {
               current.stats = addStep(current.stats ?? emptyStats(), measure)
               send({ sessionId: current.id, event: { type: 'stats', stats: current.stats } })
+              usage.record(measure, connection.providerName)
             },
             tool: (ms) => {
               current.stats = addToolTime(current.stats ?? emptyStats(), ms)
@@ -933,11 +981,16 @@ function registerIpc(): void {
             compacted: (done) => {
               current.stats = addCompaction(current.stats ?? emptyStats(), done)
               send({ sessionId: current.id, event: { type: 'stats', stats: current.stats } })
+              if (done.cost) usage.record(done.cost, connection.providerName)
             }
           }
         : undefined,
       onFastRefused: () => {
         store.dropFastMode(connection.provider, connection.model).catch((err) => console.error('[store] could not switch fast mode off:', err))
+      },
+      onEffortRefused: () => {
+        levelRefused = true
+        store.dropEffort(connection.provider, connection.model).catch((err) => console.error('[store] could not take the level of thinking back:', err))
       },
       onToolsRefused: () => textTools.set(current.id, modelKey(connection)),
       onStreamRefused: () => wholeReplies.set(current.id, modelKey(connection)),
@@ -958,9 +1011,11 @@ function registerIpc(): void {
         activeRuns.delete(current.id)
         liveSessions.delete(current.id)
         keepMode(current.id, run, current.permissionMode, saving)
+        // DeepSeek's balance after what the turn cost, where something shows it or waits on it.
+        void usage.turnEnded(connection.provider, counting)
       })
       // By itself and after the turn: the person can go on with the conversation meanwhile.
-      .then(() => (unnamed ? nameConversation(current, connection) : undefined))
+      .then(() => (unnamed ? nameConversation(current, levelRefused ? { ...connection, reasoningEffort: 'default' } : connection) : undefined))
 
     return { id: current.id, ...(plain ? { plain: true as const } : {}) }
   }
@@ -1044,6 +1099,7 @@ function registerIpc(): void {
               compacted: (done) => {
                 session.stats = addCompaction(session.stats ?? emptyStats(session.messages.length > 0), done)
                 send({ sessionId: id, event: { type: 'stats', stats: session.stats } })
+                if (done.cost) usage.record(done.cost, connection.providerName)
               }
             }
           : undefined,

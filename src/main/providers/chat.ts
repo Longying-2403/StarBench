@@ -6,6 +6,7 @@ import { isGemini, isLocalAddress, routesByConversation } from '../../shared/typ
 import type { ToolCall } from '../../shared/types.ts'
 import { fetchModelInfo, listModels } from '../models.ts'
 import { ImagesRefused, carriesImages, imageUrl, refusesImages, userImages } from './attachments.ts'
+import { refusesEffort } from './effort.ts'
 import { newReply, replayOf, userText, withSearchNote, withToolResults } from './history.ts'
 import { ThinkTags } from './think-tags.ts'
 import type { Split } from './think-tags.ts'
@@ -280,7 +281,10 @@ export const chatAdapter: ProviderAdapter = {
     /** The signatures Gemini put on the calls, by call (see `ChatReplay`). */
     const signatureOf = new Map<ToolCall, string>()
     const web = new WebLog(message, request.onWebActivity)
-    const effort = connection.reasoningEffort
+    /** The level of thinking the request names: the one chosen, until the service turns out not to take it. */
+    let level = connection.reasoningEffort
+    /** What the service said when it turned the level down, kept until it has taken the request without one. */
+    let levelRefused: string | undefined
     // Which conversation this is, for a service that sends a conversation's requests to one
     // server by it. In this format xAI reads it from a header.
     const named = request.conversation && routesByConversation(connection.baseURL) ? { 'x-grok-conv-id': request.conversation } : undefined
@@ -384,7 +388,7 @@ export const chatAdapter: ProviderAdapter = {
       ...(functions.length || search.length ? { tools: [...functions, ...search] } : {}),
       // Left out unless the user chose a level: not every compatible service knows the parameter.
       // The cast is for levels the SDK's list does not have but some services do.
-      ...(effort !== 'default' ? { reasoning_effort: effort as OpenAI.ReasoningEffort } : {})
+      ...(level !== 'default' ? { reasoning_effort: level as OpenAI.ReasoningEffort } : {})
     })
     /** An error from before anything of the reply arrived, turned into what it means where that is known. */
     const explained = (err: unknown): unknown => {
@@ -398,6 +402,23 @@ export const chatAdapter: ProviderAdapter = {
         return new Error(`Could not reach the model server at ${connection.baseURL}. Is it running?`)
       }
       return err
+    }
+    /**
+     * Whether an error from before anything of the reply arrived is the service turning down the
+     * level of thinking. The request is then made again without one: a level the model does not
+     * take must not be what stops the conversation, and nothing but leaving it out puts that right.
+     */
+    const dropsLevel = (err: unknown): boolean => {
+      if (level === 'default' || signal.aborted || !refusesEffort(err)) return false
+      levelRefused = (err as Error).message
+      level = 'default'
+      return true
+    }
+    /** The service took the request. Where it had turned the level down, it is known now that the level was all that was wrong. */
+    const accepted = (): void => {
+      if (levelRefused === undefined) return
+      request.onEffortRefused?.(levelRefused)
+      levelRefused = undefined
     }
 
     /**
@@ -435,6 +456,7 @@ export const chatAdapter: ProviderAdapter = {
             probe?.sent(wire, named)
             const stream = await client.chat.completions.create(wire, { signal, ...routed })
             opened = true
+            accepted()
             for await (const chunk of stream) {
               pieces++
               const choice = chunk.choices[0]
@@ -457,6 +479,8 @@ export const chatAdapter: ProviderAdapter = {
               askCost = false
               continue
             }
+            // Neither must a level of thinking the model does not take: asked again without one.
+            if (dropsLevel(err)) continue
             if (signal.aborted || !wired || !cannotStream(err, opened, connection)) throw explained(err)
             whole = true
           }
@@ -464,11 +488,20 @@ export const chatAdapter: ProviderAdapter = {
         }
       }
       if (whole) {
-        const wire = { ...body(true), stream: false as const }
-        probe?.sent(wire, named)
-        const completion = await client.chat.completions.create(wire, { signal, ...routed }).catch((err: unknown) => {
-          throw explained(err)
-        })
+        const asked = async (): Promise<OpenAI.Chat.ChatCompletion> => {
+          for (;;) {
+            const wire = { ...body(true), stream: false as const }
+            probe?.sent(wire, named)
+            try {
+              return await client.chat.completions.create(wire, { signal, ...routed })
+            } catch (err) {
+              // Once more without the level of thinking, where that is what the server turned down.
+              if (!dropsLevel(err)) throw explained(err)
+            }
+          }
+        }
+        const completion = await asked()
+        accepted()
         // Found out with this very request: said before the reply, which now appears all at once.
         if (!connection.wholeReplies) request.onStreamRefused?.()
         const choice = completion.choices?.[0]

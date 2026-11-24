@@ -15,7 +15,7 @@ export type AddChoice = { type: 'preset'; offer: PresetOffer } | { type: 'signin
  * The way to another model service, at the upper right of 设置 → 模型: a button, and under it
  * everything that can be added, in three groups. Picking an entry leads on to the page where it
  * is set up. What is there already says so and stays on offer: a service can be added again for
- * another key, and the sign-in leads to the one that exists.
+ * another key, and the sign-in again for another account.
  */
 export function AddProviderMenu({ providers, onChoose }: { providers: readonly ProviderInfo[]; onChoose: (choice: AddChoice) => void }) {
   const [open, setOpen] = useState(false)
@@ -83,9 +83,9 @@ export function AddProviderMenu({ providers, onChoose }: { providers: readonly P
             <button type="button" role="menuitem" className="menu-item" onClick={() => choose({ type: 'signin' })}>
               <span className="menu-item-text">
                 <span className="menu-item-name">登录 OpenAI 账户</span>
-                <span className="menu-item-path">用 ChatGPT 套餐的额度，不需要 API Key</span>
+                <span className="menu-item-path">{signIn.signedIn > 0 ? '再登录一个账号，用它的 ChatGPT 套餐额度' : '用 ChatGPT 套餐的额度，不需要 API Key'}</span>
               </span>
-              {signIn.signedIn && <span className="menu-item-tag">已登录</span>}
+              {signIn.signedIn > 0 && <span className="menu-item-tag">{signIn.signedIn > 1 ? `已登录 ${signIn.signedIn} 个` : '已登录'}</span>}
             </button>
           </div>
           <div className="menu-divider" />

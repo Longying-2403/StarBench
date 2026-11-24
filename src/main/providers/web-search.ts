@@ -4,7 +4,7 @@
 // `deepseek_web_search`, xAI's Responses API with `web_search`, and Claude's `web_search_20250305`
 // and `web_fetch_20250910`. OpenAI's Responses API documents the same items as xAI's.
 
-import type { WebActivity } from '../../shared/types.ts'
+import type { ChatMessage, WebActivity } from '../../shared/types.ts'
 import type { AssistantMessage } from './types.ts'
 
 type Bag = Record<string, unknown>
@@ -271,6 +271,39 @@ export function geminiGrounding(metadata: unknown, id: string): WebActivity | nu
   const suggestions = isBag(metadata.searchEntryPoint) ? text(metadata.searchEntryPoint.renderedContent) : undefined
   if (!queries && !sources && !suggestions) return null
   return known({ id, kind: 'search', queries, status: 'done', sources, suggestions })
+}
+
+/**
+ * The search of an earlier step of the turn under way whose pages `found` names, for a reply that
+ * searched for nothing itself. A step that searched and ended in a call of the app's tools names
+ * no pages: Google names them with the answer, one step later, and that step asks for no search of
+ * its own (3.5 Flash-Lite, raw responses read twice on 2026-11-24). It is the last search of the
+ * turn that asked for everything `found` says was asked for and did not fail, as it was told last;
+ * undefined when there is none, and the pages are then those of a search of the reply's own.
+ */
+export function geminiEarlierSearch(messages: readonly ChatMessage[], found: WebActivity): WebActivity | undefined {
+  const searches = new Map<string, WebActivity>()
+  for (const message of messages.slice(messages.findLastIndex((m) => m.role === 'user') + 1)) {
+    if (message.role !== 'assistant') continue
+    for (const activity of message.web ?? []) {
+      if (activity.kind !== 'search') continue
+      // Told again in a later step, a search stands where it was told last.
+      searches.delete(activity.id)
+      searches.set(activity.id, activity)
+    }
+  }
+  const asked = found.queries ?? []
+  return [...searches.values()].filter((search) => search.status !== 'failed' && asked.every((query) => search.queries?.includes(query))).at(-1)
+}
+
+/**
+ * A search with the pages named for it afterwards (`found`, from `geminiGrounding`): it keeps what
+ * it said itself, what it searched for and the suggestions that came with it, and lists the pages
+ * it had and those named now.
+ */
+export function geminiWithPages(search: WebActivity, found: WebActivity): WebActivity {
+  const sources = sourcesOf([...(search.sources ?? []), ...(found.sources ?? [])])
+  return known({ ...found, id: search.id, queries: search.queries ?? found.queries, suggestions: search.suggestions ?? found.suggestions, sources })
 }
 
 /** The pages Gemini read, as it tells them at the end of a reply (`urlContextMetadata`): each a page read of its own, told under `${prefix}-${n}`. */

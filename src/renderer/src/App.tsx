@@ -7,12 +7,12 @@ import { hasHidden, revealHidden } from '../../shared/hidden-chars.ts'
 import { DEFAULT_PERMISSION_MODE, VIEW_ONLY_RESULT, runsOnItsOwnPart } from '../../shared/permissions.ts'
 import type { PermissionMode } from '../../shared/permissions.ts'
 import { formatShare, formatTokens } from '../../shared/stats.ts'
-import type { SessionStats } from '../../shared/stats.ts'
 import { CHATGPT_USAGE_URL, isLocalAddress } from '../../shared/types.ts'
 import type {
   CompactionMark,
   ModelInfo,
   PermissionDecision,
+  ProviderInfo,
   ReasoningEffort,
   SessionIcon,
   SessionSummary,
@@ -25,7 +25,7 @@ import { Composer } from './Composer.tsx'
 import { FolderMenu } from './FolderMenu.tsx'
 import { FolderIcon, PromptIcon, StarIcon, WarningIcon } from './icons.tsx'
 import { whenExact, whenText } from '../../shared/when.ts'
-import { itemsFromMessages, itemsReducer, lastSummaryAt, turnEnds } from './items.ts'
+import { itemsFromMessages, lastSummaryAt, turnEnds } from './items.ts'
 import type { Item } from './items.ts'
 import { MEMORY_DENIED_LABEL, MEMORY_TOOL_LABELS, MemoryNotice, MemorySensitiveBar, isSensitiveMemoryCall, memoryCallSummary } from './MemoryNotice.tsx'
 import { MemoryPage } from './MemoryPage.tsx'
@@ -40,8 +40,13 @@ import { Sidebar } from './Sidebar.tsx'
 import { StatusRow } from './StatusRow.tsx'
 import { TipLayer } from './Tips.tsx'
 import { ToastStack, notify, toasts } from './Toasts.tsx'
+import { BalanceNotices } from './Balance.tsx'
+import { balanceServiceOf } from '../../shared/usage.ts'
 import { newerBuild, useUpdateNotice, useUpdates } from './UpdateCheck.tsx'
+import { LinkAsk } from './LinkAsk.tsx'
 import { TrustDialog } from './TrustDialog.tsx'
+import { TurnRail } from './TurnRail.tsx'
+import { EMPTY_VIEW, draftKey, unseenIds, viewsReducer, workingIds } from './views.ts'
 import { errorText, isWindows, useNow } from './util.ts'
 
 const api = window.harness
@@ -379,12 +384,15 @@ function Transcript({
   items,
   workspace,
   running,
+  providers,
   onOpenSettings
 }: {
   items: Item[]
   workspace: string
   /** A turn is under way: what the model has written of it so far is not finished, and has no time yet. */
   running: boolean
+  /** The model services as they are set up: an error of a ChatGPT sign-in says which account it is of. */
+  providers: readonly ProviderInfo[]
   onOpenSettings: () => void
 }) {
   // What stands above the last summary is no longer sent to the model. It stays, paler, for the person to read.
@@ -400,7 +408,8 @@ function Transcript({
     if (item.kind === 'user') {
       return (
         <>
-          <div className={`msg msg-user${pale}`}>
+          {/* `data-turn`: where a turn begins, for the rail of the turns (TurnRail.tsx). */}
+          <div className={`msg msg-user${pale}`} data-turn="">
             {item.skill && <span className="chip chip-block">Skill · {item.skill}</span>}
             {item.attachments && <AttachmentRow files={item.attachments} sent />}
             {item.text}
@@ -431,9 +440,12 @@ function Transcript({
         </Notice>
       )
     }
+    // Whose request it was: several ChatGPT accounts can be signed in, and the way out is that account's.
+    const account = item.provider ? providers.find((p) => p.id === item.provider)?.account?.email : undefined
+    const whose = account ? `账号 ${account}：` : ''
     if (item.hint === 'chatgpt-usage') {
       return (
-        <ErrorNotice title="ChatGPT 套餐：已达到用量上限" text="请到 ChatGPT 的设置里查看你的套餐用量，或者给这个应用设置的用量上限。" detail={item.message}>
+        <ErrorNotice title="ChatGPT 套餐：已达到用量上限" text={`${whose}请到 ChatGPT 的设置里查看你的套餐用量，或者给这个应用设置的用量上限。`} detail={item.message}>
           <a className="btn btn-primary" href={CHATGPT_USAGE_URL} target="_blank" rel="noreferrer">
             管理用量
           </a>
@@ -442,7 +454,7 @@ function Transcript({
     }
     if (item.hint === 'chatgpt-sign-in') {
       return (
-        <ErrorNotice title="ChatGPT 登录已失效" text="需要重新用 ChatGPT 登录，才能继续使用套餐额度。" detail={item.message}>
+        <ErrorNotice title="ChatGPT 登录已失效" text={`${whose}需要重新用 ChatGPT 登录，才能继续使用套餐额度。`} detail={item.message}>
           <button className="btn btn-primary" onClick={onOpenSettings}>
             打开设置重新登录
           </button>
@@ -565,8 +577,27 @@ export function App() {
    * used last), so a no has to take the chat out of it again.
    */
   const [trust, setTrust] = useState<{ folder: string; entered?: true } | null>(null)
-  const [items, dispatch] = useReducer(itemsReducer, [])
-  const [running, setRunning] = useState(false)
+  /**
+   * What the page holds of each conversation: the one on show, and every other that is at work
+   * (views.ts). Several can be at work at once, and each goes on being followed while another is
+   * on show.
+   */
+  const [views, dispatchViews] = useReducer(viewsReducer, { [draftKey(0)]: EMPTY_VIEW })
+  /** The chat on the page while it has no id yet. Each new chat gets a key of its own, so that one being sent stays apart from the next. */
+  const [draft, setDraft] = useState(draftKey(0))
+  const drafts = useRef(0)
+  /** Which view is on show: that of the session on the page, or of the chat that has no id yet. */
+  const pageKey = sessionId ?? draft
+  const { items, running, compacting, betweenTurns, stats } = views[pageKey] ?? EMPTY_VIEW
+  /** Both again for what runs later than this drawing of the page: an answer of the main process, an event. */
+  const pageKeyRef = useRef(pageKey)
+  pageKeyRef.current = pageKey
+  const viewsRef = useRef(views)
+  viewsRef.current = views
+  /** Says in the conversation on show that something went wrong. */
+  const complain = (message: string): void => dispatchViews({ type: 'event', key: pageKeyRef.current, event: { type: 'error', message }, onPage: true })
+  /** The modes set here for conversations that are at work: their files hold them only once the turn is over. */
+  const modesAtWork = useRef(new Map<string, PermissionMode>())
   /**
    * The questions waiting for an answer, by the session that asked. A question waits with its
    * session whether that is on the page or not: going back to the session shows it again, and a
@@ -574,15 +605,6 @@ export function App() {
    */
   const [prompts, setPrompts] = useState<Record<string, { id: string; call: ToolCall }>>({})
   const permission = sessionId ? (prompts[sessionId] ?? null) : null
-  /** What was measured of the conversation on the page, as far as the app has kept count of it. */
-  const [stats, setStats] = useState<SessionStats | null>(null)
-  /** The model is writing the summary of the conversation, which takes a while and shows nothing. */
-  const [compacting, setCompacting] = useState(false)
-  /**
-   * The app is at work on the conversation without a turn being under way: a compaction the person
-   * asked for. The last turn is over all the same, and keeps the time it was finished at.
-   */
-  const [betweenTurns, setBetweenTurns] = useState(false)
 
   // The components of plugins are told which conversation is on the page, and which model it talks to.
   useAnnouncePlace(sessionId, workspace, running, settings)
@@ -629,6 +651,9 @@ export function App() {
       if (event.type === 'titled') return refreshSessions()
       // The switch was taken back for the model, whichever session found out; the page shows it at once.
       if (event.type === 'notice' && event.code === 'fast-mode-refused') setSettings((s) => (s ? { ...s, fastMode: false } : s))
+      // So was a level of thinking the service would not take. What the model is at now depends on
+      // the model, and it may not be the one in use any more: the settings are read again.
+      if (event.type === 'notice' && event.code === 'effort-refused') void api.getSettings().then(setSettings)
       // A question is kept with the session that asked it, and goes when that session's turn ends.
       if (event.type === 'permission_request') {
         setPrompts((all) => ({ ...all, [id]: { id: event.id, call: event.call } }))
@@ -649,6 +674,7 @@ export function App() {
       if (event.type === 'turn_end') {
         setPrompts(({ [id]: _ended, ...rest }) => rest)
         toasts.dismissKey(`permission:${id}`)
+        modesAtWork.current.delete(id)
       }
       // A session at work elsewhere than on this page is shown as such in the list, which is
       // asked for anew when the first word of its turn comes and when the turn ends.
@@ -661,18 +687,23 @@ export function App() {
           refreshSessions()
         }
       }
-      if (id !== sessionRef.current) return
-      if (event.type === 'stats') return setStats(event.stats)
-      if (event.type === 'compacting') return setCompacting(event.on)
-      if (event.type === 'turn_end') {
-        setRunning(false)
-        setCompacting(false)
+      const onPage = id === sessionRef.current
+      if (event.type === 'turn_end' && onPage) {
         refreshSessions()
+        // A turn the page did not follow from its start may show with gaps: the conversation is
+        // read from its file, now that it is whole there. Not if the person has sent again meanwhile.
+        if (viewsRef.current[id]?.partial) {
+          void api.loadSession(id).then((session) => {
+            if (!session || sessionRef.current !== id || viewsRef.current[id]?.running) return
+            dispatchViews({ type: 'opened', id, items: itemsFromMessages(session.messages), stats: session.stats ?? null, running: false })
+          })
+        }
       }
       // The sign-in was given up behind the page's back; what it shows about it is out of date.
       if (event.type === 'error' && event.hint === 'chatgpt-sign-in') void api.getSettings().then(setSettings)
-      // With the time, for what the event finishes: the conversation says under a reply when it was done.
-      dispatch({ type: 'event', event, at: Date.now() })
+      // Every conversation keeps what happens in it, on show or not (views.ts). With the time, for
+      // what the event finishes: the conversation says under a reply when it was done.
+      dispatchViews({ type: 'event', key: id, event, at: Date.now(), onPage })
     })
   }, [refreshSessions])
 
@@ -707,21 +738,38 @@ export function App() {
 
   useEffect(keepEndInView, [items, permission, keepEndInView])
 
+  /**
+   * Lets go of the conversation on show as another takes its place. One that is at work is kept:
+   * it goes on being followed, and shows as it stands by then when it is gone back to.
+   */
+  const leave = (next: string): void => {
+    const from = pageKeyRef.current
+    if (from !== next && !viewsRef.current[from]?.running) dispatchViews({ type: 'dropped', key: from })
+  }
+
   const openSession = async (id: string): Promise<void> => {
     // A question this session asked is answered on its page, which is about to show.
     toasts.dismissKey(`permission:${id}`)
     const session = await api.loadSession(id)
     if (!session) return refreshSessions()
+    leave(id)
     sessionRef.current = id
     setPage('chat')
     setSessionId(id)
-    setStats(session.stats ?? null)
     setWorkspace(session.workspace)
-    setMode(session.permissionMode ?? DEFAULT_PERMISSION_MODE)
+    setMode(modesAtWork.current.get(id) ?? session.permissionMode ?? DEFAULT_PERMISSION_MODE)
     stickToBottom.current = true
     // Where the conversation before this one was scrolled to says nothing about this one.
     lastTop.current = 0
-    dispatch({ type: 'reset', items: itemsFromMessages(session.messages) })
+    const held = viewsRef.current[id]
+    // A conversation the page has followed since its turn began shows as the page has it. While
+    // the turn runs its file is behind; and a turn that ended while another conversation was on
+    // show may have ended in an error, which no file holds. Any other is shown as its file has it.
+    if (held && !held.partial && (held.running || held.unseen)) dispatchViews({ type: 'seen', key: id })
+    else {
+      const atWork = held?.running ?? sessions.find((s) => s.id === id)?.running === true
+      dispatchViews({ type: 'opened', id, items: itemsFromMessages(session.messages), stats: session.stats ?? null, running: atWork })
+    }
   }
 
   /** Whether the person said a model may read a folder. Unknown, and taken for yes, until the settings have been read. */
@@ -775,10 +823,13 @@ export function App() {
 
   /** Starts an empty chat: in the given folder, or else in the one used last. */
   const newChat = (dir?: string): void => {
+    const key = draftKey(++drafts.current)
+    leave(key)
+    dispatchViews({ type: 'draft', key })
+    setDraft(key)
     sessionRef.current = null
     setPage('chat')
     setSessionId(null)
-    setStats(null)
     // What a conversation was allowed is not carried over to the next one.
     setMode(DEFAULT_PERMISSION_MODE)
     if (dir && trusted(dir)) enterWorkspace(dir)
@@ -787,12 +838,12 @@ export function App() {
       setWorkspace(readLastWorkspace())
       if (dir) setTrust({ folder: dir })
     }
-    dispatch({ type: 'reset', items: [] })
   }
 
   const removeSession = async (id: string): Promise<void> => {
     await api.deleteSession(id)
     if (id === sessionId) newChat()
+    dispatchViews({ type: 'dropped', key: id })
     refreshSessions()
   }
 
@@ -855,33 +906,45 @@ export function App() {
   const changeMode = (next: PermissionMode): void => {
     setMode(next)
     modeRef.current = next
-    if (sessionId) saveMode(sessionId, next)
+    if (!sessionId) return
+    if (running) modesAtWork.current.set(sessionId, next)
+    saveMode(sessionId, next)
   }
   const saveMode = (id: string, next: PermissionMode): void => {
     api.setPermissionMode(id, next).catch((err: unknown) => notify({ kind: 'error', title: '权限设置没有保存', text: errorText(err) }))
   }
 
   const send = async (text: string, skill: string | undefined, attachments: Attachment[]): Promise<void> => {
+    // Of the conversation on show: others may be at work at the same time.
     if (running || !workspace) return
-    setRunning(true)
+    const key = pageKey
     stickToBottom.current = true
     lastTop.current = 0
     const sentAt = Date.now()
-    dispatch({ type: 'user', text, skill, attachments, at: sentAt })
+    dispatchViews({ type: 'user', key, text, skill, attachments, at: sentAt })
     const sentMode = mode
     try {
       const { id, plain } = await api.send(sessionId, workspace, text, skill, { mode: sentMode, ...(attachments.length ? { attachments } : {}) })
+      // The person may have gone to another conversation while the message was on its way: the
+      // page stays where they are, and this one goes on in the list.
+      const onPage = pageKeyRef.current === key
+      // A new chat has its id from here on, and what the page held of it goes by that.
+      if (key !== id) dispatchViews({ type: 'bound', key, id, onPage })
       // Whether it went out as a plain chat is for the main process to say: the message gets its mark from that.
-      if (plain) dispatch({ type: 'plain', at: sentAt })
-      sessionRef.current = id
-      setSessionId(id)
-      // Changed while the message was on its way: a new chat had no id to send the change with
-      // then, and the turn began with the mode it was sent with. It goes by the button from here on.
-      if (modeRef.current !== sentMode) saveMode(id, modeRef.current)
+      if (plain) dispatchViews({ type: 'plain', key: id, at: sentAt })
+      if (onPage) {
+        sessionRef.current = id
+        setSessionId(id)
+        // Changed while the message was on its way: a new chat had no id to send the change with
+        // then, and the turn began with the mode it was sent with. It goes by the button from here on.
+        if (modeRef.current !== sentMode) {
+          modesAtWork.current.set(id, modeRef.current)
+          saveMode(id, modeRef.current)
+        }
+      }
       refreshSessions()
     } catch (err) {
-      setRunning(false)
-      dispatch({ type: 'event', event: { type: 'error', message: errorText(err) } })
+      dispatchViews({ type: 'failed', key, message: errorText(err) })
       // A sign-in that turned out to be over is the usual reason; the page then says so by the message box.
       void api.getSettings().then(setSettings)
     }
@@ -891,7 +954,7 @@ export function App() {
     // Shown at once; the saved settings replace it when they come back.
     setSettings((s) => (s ? { ...s, reasoningEffort: effort } : s))
     api.setReasoningEffort(effort).then(setSettings, (err) => {
-      dispatch({ type: 'event', event: { type: 'error', message: errorText(err) } })
+      complain(errorText(err))
       void api.getSettings().then(setSettings)
     })
   }
@@ -900,7 +963,7 @@ export function App() {
     // Shown at once, like the effort; the saved settings replace it when they come back.
     setSettings((s) => (s ? { ...s, fastMode: on } : s))
     api.setFastMode(on).then(setSettings, (err) => {
-      dispatch({ type: 'event', event: { type: 'error', message: errorText(err) } })
+      complain(errorText(err))
       void api.getSettings().then(setSettings)
     })
   }
@@ -909,14 +972,14 @@ export function App() {
     // Like Fast Mode: shown at once, replaced by the saved settings when they come back.
     setSettings((s) => (s ? { ...s, webSearch: on } : s))
     api.setWebSearch(on).then(setSettings, (err) => {
-      dispatch({ type: 'event', event: { type: 'error', message: errorText(err) } })
+      complain(errorText(err))
       void api.getSettings().then(setSettings)
     })
   }
 
   const selectModel = (providerId: string, modelId: string): void => {
     api.selectModel(providerId, modelId).then(setSettings, (err) => {
-      dispatch({ type: 'event', event: { type: 'error', message: errorText(err) } })
+      complain(errorText(err))
     })
   }
 
@@ -930,10 +993,10 @@ export function App() {
   /** Has the conversation on the page compacted now, and says what came of it where the conversation itself does not show it. */
   const compactNow = async (): Promise<void> => {
     if (!sessionId || running) return
-    setRunning(true)
-    setBetweenTurns(true)
+    const id = sessionId
+    dispatchViews({ type: 'work', key: id, on: true })
     try {
-      const report = await api.compactSession(sessionId)
+      const report = await api.compactSession(id)
       if (report.problem) {
         notify({ kind: 'error', title: '没能写出摘要', text: report.done ? `较早的工具结果已经清理。服务返回：${report.problem}` : `服务返回：${report.problem}` })
       } else if (!report.done) {
@@ -942,9 +1005,7 @@ export function App() {
     } catch (err) {
       notify({ kind: 'error', title: '压缩没有完成', text: errorText(err) })
     } finally {
-      setRunning(false)
-      setBetweenTurns(false)
-      setCompacting(false)
+      dispatchViews({ type: 'work', key: id, on: false })
       refreshSessions()
     }
   }
@@ -1000,9 +1061,10 @@ export function App() {
         names={settings?.workspaceNames}
         // While another page lies over the conversation, the list points at none of them.
         activeId={page === 'chat' ? sessionId : null}
-        busy={running}
-        // The page knows of its own session at once; of the others the list says so.
-        workingId={running ? sessionId : null}
+        // The conversations the page knows to be at work: its own at once, and those it has heard of. Of the rest the list says so.
+        workingIds={workingIds(views)}
+        // Those in which a turn ended while another conversation was on show.
+        unseenIds={unseenIds(views)}
         // The sessions whose turn stands still until the person has answered a question of theirs.
         waitingIds={Object.keys(prompts)}
         page={page}
@@ -1062,32 +1124,36 @@ export function App() {
                 )}
               </header>
 
-              <div
-                className="transcript"
-                ref={scrollRef}
-                onScroll={(e) => {
-                  const el = e.currentTarget
-                  // Only the person moving up, away from the end, lets go of it. A picture that takes
-                  // its room further down leaves the end out of view too, with nobody having moved:
-                  // this is told of only after the room is taken, and must not count as letting go.
-                  if (el.scrollHeight - el.scrollTop - el.clientHeight < 80) stickToBottom.current = true
-                  else if (el.scrollTop < lastTop.current) stickToBottom.current = false
-                  lastTop.current = el.scrollTop
-                }}
-                // A picture takes its room only once it is read, after the answer it belongs to was drawn.
-                onLoadCapture={keepEndInView}
-              >
-                <Transcript items={items} workspace={workspace} running={running && !betweenTurns} onOpenSettings={() => setPage('settings')} />
-                {running && !permission && (
-                  <div className="working">
-                    {/* A slash that turns in four steps, as a terminal shows that it is busy, and the cursor behind it. */}
-                    <span className="working-mark" aria-hidden="true">
-                      <span className="working-slash" />
-                      <span className="working-cursor" />
-                    </span>
-                    {compacting ? '正在压缩上下文…' : '工作中…'}
-                  </div>
-                )}
+              {/* The conversation, and over its left edge the rail of its turns, which stays where it is while the conversation moves. A rail is there from the second turn on, and the conversation leaves it room. */}
+              <div className="transcript-frame" data-rail={items.filter((item) => item.kind === 'user').length >= 2 ? '' : undefined}>
+                <div
+                  className="transcript"
+                  ref={scrollRef}
+                  onScroll={(e) => {
+                    const el = e.currentTarget
+                    // Only the person moving up, away from the end, lets go of it. A picture that takes
+                    // its room further down leaves the end out of view too, with nobody having moved:
+                    // this is told of only after the room is taken, and must not count as letting go.
+                    if (el.scrollHeight - el.scrollTop - el.clientHeight < 80) stickToBottom.current = true
+                    else if (el.scrollTop < lastTop.current) stickToBottom.current = false
+                    lastTop.current = el.scrollTop
+                  }}
+                  // A picture takes its room only once it is read, after the answer it belongs to was drawn.
+                  onLoadCapture={keepEndInView}
+                >
+                  <Transcript items={items} workspace={workspace} running={running && !betweenTurns} providers={settings?.providers ?? []} onOpenSettings={() => setPage('settings')} />
+                  {running && !permission && (
+                    <div className="working">
+                      {/* A slash that turns in four steps, as a terminal shows that it is busy, and the cursor behind it. */}
+                      <span className="working-mark" aria-hidden="true">
+                        <span className="working-slash" />
+                        <span className="working-cursor" />
+                      </span>
+                      {compacting ? '正在压缩上下文…' : '工作中…'}
+                    </div>
+                  )}
+                </div>
+                <TurnRail items={items} scroller={scrollRef} />
               </div>
             </>
           )}
@@ -1153,6 +1219,12 @@ export function App() {
                     setMemoryFocus(null)
                     setPage('memory')
                   }}
+                  // What is left on the account, where the service in use tells it (DeepSeek).
+                  balance={active && active.hasApiKey && balanceServiceOf(active) ? { provider: active.id, name: active.name } : undefined}
+                  onOpenUsage={() => {
+                    setSettingsFocus({ tab: 'usage' })
+                    setPage('settings')
+                  }}
                 />
               </div>
             )}
@@ -1202,6 +1274,8 @@ export function App() {
 
       {/* Asked anew for each folder: what was typed into the one before is not left in it. */}
       {trust && <TrustDialog key={trust.folder} folder={trust.folder} onTrust={trustFolder} onCancel={distrustFolder} />}
+      {/* The question before a link of an answer is followed to the web; a site kept as one not to ask about again shows in the settings at once. */}
+      <LinkAsk onSettings={setSettings} />
 
       {welcome && (
         <div className="overlay">
@@ -1224,6 +1298,7 @@ export function App() {
 
       {/* The notices of the app, in the corner of the window over everything else. */}
       <ToastStack />
+      <BalanceNotices />
       {/* What an element says of itself while the pointer rests on it (`data-tip`), in the app's own look. */}
       <TipLayer />
     </div>

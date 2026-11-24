@@ -2,6 +2,7 @@
 
 import type { Attachment, AttachmentsRead } from './attachments.ts'
 import type { CompactionChange, CompactionSettings } from './compaction.ts'
+import type { GitHubRepo } from './github.ts'
 import type { PermissionMode } from './permissions.ts'
 import type { SessionStats } from './stats.ts'
 import type { Theme } from './theme.ts'
@@ -20,7 +21,11 @@ export interface ToolCall {
  * nothing for it and asks no permission: it shows what the service says was done.
  */
 export interface WebActivity {
-  /** The service's id for it, unique within the reply. */
+  /**
+   * The service's id for it. It names one search or page read within a turn: a later step of the
+   * turn may tell more of it under the same id (Gemini names a search's pages with the answer that
+   * follows the step that searched), and the page shows it once, where it stood first.
+   */
   id: string
   kind: 'search' | 'open'
   /** What was searched for. Some services search for several things at once. */
@@ -464,6 +469,11 @@ export interface Settings {
   titles: boolean
   /** Whether the list of conversations says under each one when it was last gone on with. It takes a line of each row. */
   sessionTimes: boolean
+  /**
+   * The sites whose links in an answer open without the question first, the latest first: each
+   * one the person said "do not ask again" for (`WebPlace.site` in shared/links.ts).
+   */
+  trustedSites: string[]
 }
 
 /** The Claude models that answer faster on request, with nothing to apply for first. */
@@ -568,9 +578,18 @@ export type SignInResult =
   | {
       ok: true
       settings: Settings
+      /**
+       * The provider the sign-in is with. Several accounts can be signed in, each as a provider of
+       * its own and each once. An account here is a registration with OpenAI: one person and one
+       * of their workspaces, so the personal plan and a Team workspace of one address are two.
+       * Where another provider held the registration that signed in, this is that provider, not
+       * the one the sign-in was started for.
+       */
       providerId: string
       /** True the first time a sign-in with plan usage succeeds on this computer: the moment to explain what it means. */
       welcome: boolean
+      /** The registration was in the list already: the sign-in went to the provider that held it, and none was added. */
+      already?: true
     }
   | {
       ok: false
@@ -677,14 +696,15 @@ export type AgentEvent =
   | { type: 'compacted'; messages: StoredMessage[] }
   /** The service has counted the conversation as the compaction made at `at` left it: `after` tokens, in place of the guess. */
   | { type: 'compaction_counted'; at: number; after: number }
-  | { type: 'error'; message: string; hint?: ErrorHint }
+  /** `provider` is whose request failed, where the way out depends on that: which ChatGPT account, of the several that can be signed in. */
+  | { type: 'error'; message: string; hint?: ErrorHint; provider?: string }
   /**
    * Something the person should know that did not stop the turn. `code` is what the page words it
    * by; `detail` is what the service itself said, when that helps to look the matter up.
    */
   | {
       type: 'notice'
-      code: 'fast-mode-refused' | 'tools-as-text' | 'stream-refused' | 'compaction-failed' | 'images-refused' | 'plain-call-dropped'
+      code: 'fast-mode-refused' | 'effort-refused' | 'tools-as-text' | 'stream-refused' | 'compaction-failed' | 'images-refused' | 'plain-call-dropped'
       message: string
       detail?: string
     }
@@ -713,6 +733,14 @@ export type ImagePreview = { ok: true; url: string } | { ok: false; reason: File
  * and not opened, as is done with every kind of file that opening might run.
  */
 export type OpenOutcome = { ok: true; how: 'opened' | 'revealed' } | { ok: false; reason: FileProblem | 'failed'; detail?: string }
+
+/**
+ * What became of a page on the web that an answer links to. Opened, it is in the person's
+ * browser, and `settings` are there when the site was kept as one not to ask about again. Not
+ * opened: `ask` says the person is to be asked first, `not-web` that the address is no page on
+ * the web, `failed` that the system could not open it.
+ */
+export type LinkOutcome = { opened: true; settings?: Settings } | { opened: false; reason: 'ask' | 'not-web' | 'failed' }
 
 export interface HarnessApi {
   getSettings(): Promise<Settings>
@@ -827,6 +855,20 @@ export interface HarnessApi {
   readImage(workspace: string, address: string): Promise<ImagePreview>
   /** Opens a file or folder in the workspace that an answer points to, with the program the system has for it. */
   openFile(workspace: string, address: string): Promise<OpenOutcome>
+  /**
+   * Opens a page on the web that an answer links to, in the person's browser. Without `answer` it
+   * is opened only where the person said not to ask again about its site; otherwise the page is
+   * told to ask them (`LinkOutcome`). With `answer`, their yes to that question, it is opened,
+   * and its site is kept when they said so.
+   */
+  openWeb(address: string, answer?: { remember: boolean }): Promise<LinkOutcome>
+  /** Takes a site off those whose links open without the question first. Resolves with the updated settings. */
+  forgetSite(site: string): Promise<Settings>
+  /**
+   * The repository on GitHub that a workspace is a clone of, by what its own settings name as the
+   * origin. Null when it is none, or when the folder is not one a model may read.
+   */
+  githubRepo(workspace: string): Promise<GitHubRepo | null>
   listSessions(): Promise<SessionSummary[]>
   /** The conversations in which every word of `query` is found, in the name or in what was said. */
   searchSessions(query: string): Promise<SessionHit[]>

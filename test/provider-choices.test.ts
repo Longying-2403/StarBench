@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import * as model from '../src/main/settings-model.ts'
-import { freeName, presetOffers, signInOffer } from '../src/shared/provider-choices.ts'
+import { freeName, presetOffers, providerLabel, signInOffer } from '../src/shared/provider-choices.ts'
 import { PROVIDER_PRESETS } from '../src/shared/types.ts'
 
 /** By the service's id: what one more of it would be called, and whether one is there. */
@@ -58,16 +58,38 @@ test('one more provider of a service is numbered from 2 on, past the numbers tha
   assert.equal(freeName('DeepSeek', called('DeepSeek 2')), 'DeepSeek', 'the plain name comes first where it is free')
 })
 
-test('there is one sign-in with an OpenAI account at most, and it is no key for OpenAI', () => {
-  assert.deepEqual(signInOffer(model.toPublic(model.readSettings(undefined)).providers), { signedIn: false }, 'none yet: the entry adds one')
+test('signing in with an OpenAI account stays on offer for another account, and is no key for OpenAI', () => {
+  assert.deepEqual(signInOffer(model.toPublic(model.readSettings(undefined)).providers), { signedIn: 0 }, 'none yet')
 
-  const stored = model.readSettings({
-    providers: [{ id: 'chatgpt', name: 'ChatGPT', kind: 'openai-responses', baseURL: 'https://api.openai.com/v1', model: '', auth: 'chatgpt', encryptedLogin: 'bG9naW4=', signedIn: true }]
-  })
-  const signedOut = model.toPublic(stored).providers
-  assert.deepEqual(signInOffer(signedOut), { providerId: 'chatgpt', signedIn: false }, 'signed out: the entry leads to the provider that is there')
-  const signedIn = model.toPublic(stored, { chatgpt: { signedIn: true, planUsage: true } }).providers
-  assert.deepEqual(signInOffer(signedIn), { providerId: 'chatgpt', signedIn: true })
+  const account = (id: string) => ({ id, name: 'ChatGPT', kind: 'openai-responses', baseURL: 'https://api.openai.com/v1', model: '', auth: 'chatgpt', encryptedLogin: 'bG9naW4=', signedIn: true })
+  const one = model.readSettings({ providers: [account('chatgpt')] })
+  assert.deepEqual(signInOffer(model.toPublic(one).providers), { signedIn: 0 }, 'signed out: nobody is signed in, and the entry adds an account all the same')
+  const signedIn = model.toPublic(one, { chatgpt: { signedIn: true, planUsage: true } }).providers
+  assert.deepEqual(signInOffer(signedIn), { signedIn: 1 })
   // The sign-in talks to OpenAI's address here, and OpenAI with a key is still not there.
   assert.equal(told(presetOffers(signedIn)).openai, 'OpenAI')
+
+  // Several accounts, each a provider of its own: the entry counts those that are signed in.
+  const two = model.readSettings({ providers: [account('chatgpt'), account('chatgpt-2'), account('chatgpt-3')] })
+  const accounts = { chatgpt: { signedIn: true, planUsage: true, email: 'one@example.com' }, 'chatgpt-2': { signedIn: true, planUsage: false, email: 'two@example.com' }, 'chatgpt-3': { signedIn: false, planUsage: false } }
+  assert.deepEqual(signInOffer(model.toPublic(two, accounts).providers), { signedIn: 2 })
+})
+
+test('sign-ins that come with the same name are told apart by their account, where there is more than one', () => {
+  const account = (id: string) => ({ id, name: 'ChatGPT', kind: 'openai-responses', baseURL: 'https://api.openai.com/v1', model: '', auth: 'chatgpt', encryptedLogin: 'bG9naW4=', signedIn: true })
+  const key = { id: 'deepseek', name: 'DeepSeek', kind: 'openai-chat', baseURL: 'https://api.deepseek.com', model: '' }
+
+  // One sign-in needs no telling apart, with or without an address known for it.
+  const alone = model.toPublic(model.readSettings({ providers: [key, account('chatgpt')] }), { chatgpt: { signedIn: true, planUsage: true, email: 'one@example.com' } }).providers
+  assert.deepEqual(alone.map((p) => providerLabel(p, alone)), ['DeepSeek', 'ChatGPT'])
+
+  const several = model.toPublic(model.readSettings({ providers: [key, account('chatgpt'), account('chatgpt-2'), account('chatgpt-3')] }), {
+    chatgpt: { signedIn: true, planUsage: true, email: 'one@example.com' },
+    'chatgpt-2': { signedIn: true, planUsage: true },
+    'chatgpt-3': { signedIn: false, planUsage: false }
+  }).providers
+  assert.deepEqual(
+    several.map((p) => providerLabel(p, several)),
+    ['DeepSeek', 'ChatGPT（one@example.com）', 'ChatGPT（已登录）', 'ChatGPT（未登录）']
+  )
 })

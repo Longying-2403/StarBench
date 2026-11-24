@@ -119,6 +119,12 @@ export interface ModelRequest {
    */
   onFastRefused?(): void
   /**
+   * Called when the service turned down the level of thinking `connection.reasoningEffort` named
+   * (the model takes none, or not that one) and then took the request without one. `said` is the
+   * service's refusal in its own words. Only the two OpenAI formats find out this way (effort.ts).
+   */
+  onEffortRefused?(said: string): void
+  /**
    * Called when the server would not stream this reply because tools were offered, and the reply
    * was asked for in one piece instead; see `Connection.wholeReplies`.
    */

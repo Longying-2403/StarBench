@@ -98,6 +98,11 @@ export interface TurnOptions {
   /** Called when the service would not give this model the faster answers that were asked for, so the choice can be taken back. */
   onFastRefused?(): void
   /**
+   * Called when the service would not take the level of thinking chosen for this model and the
+   * turn went on without one, so the choice can be taken back.
+   */
+  onEffortRefused?(): void
+  /**
    * Called when the server turned out to take no tool definitions and the turn went on with the
    * tools described in the instructions, so that later turns can start that way (`connection.textTools`).
    */
@@ -333,11 +338,20 @@ async function ask(adapter: ProviderAdapter, request: ModelRequest): Promise<Mod
  * it wrote: the name the conversation is to go by (title.ts). The model is given no tools and no
  * search, and is not asked for faster answers at their price. Nobody reads the reply as it comes,
  * so it is taken whole or not at all (`ModelRequest.unattended`). Rejects when the service
- * refuses, or cut the reply short.
+ * refuses, or cut the reply short. `measured` hears what the request cost, where the app keeps
+ * count of what the services were asked (main/usage.ts).
  */
-export async function askAside(job: { connection: Connection; system: string; text: string; signal: AbortSignal; trace?: TurnOptions['trace'] }): Promise<string> {
+export async function askAside(job: {
+  connection: Connection
+  system: string
+  text: string
+  signal: AbortSignal
+  trace?: TurnOptions['trace']
+  measured?: (measure: StepMeasure) => void
+}): Promise<string> {
   const connection: Connection = { ...job.connection, fast: false, webSearch: false }
   const watch = job.trace?.active ? watchExchange(connection) : undefined
+  const meter = job.measured ? meterStep(connection) : undefined
   const bare: ModelRequest = {
     connection,
     system: job.system,
@@ -348,11 +362,13 @@ export async function askAside(job: { connection: Connection; system: string; te
     onText: () => {},
     onReasoning: () => {}
   }
-  const reply = await ask(adapterFor(connection.kind), watch ? watch.over(bare) : bare).catch((err: unknown) => {
+  const watched = watch ? watch.over(bare) : bare
+  const reply = await ask(adapterFor(connection.kind), meter ? meter.over(watched) : watched).catch((err: unknown) => {
     if (watch) job.trace?.record(watch.failed(err))
     throw err
   })
   if (watch) job.trace?.record(watch.done(reply))
+  if (meter) job.measured?.(meter.done())
   if (reply.stopped) throw new Error(reply.stopped)
   return reply.message.content
 }
@@ -457,6 +473,17 @@ function requestOf(talk: Talk): ModelRequest {
         message: 'The service does not offer Fast Mode for this model here. It was switched off and the message sent at the usual speed.'
       })
       opts.onFastRefused?.()
+    },
+    onEffortRefused: (said) => {
+      // Not named again for the rest of the turn: it would be refused at every step.
+      talk.connection = { ...talk.connection, reasoningEffort: 'default' }
+      opts.emit({
+        type: 'notice',
+        code: 'effort-refused',
+        message: 'The service does not take the level of thinking chosen for this model. The message was sent without one, and the choice was taken back.',
+        detail: said
+      })
+      opts.onEffortRefused?.()
     },
     onStreamRefused: () => {
       // Asked for in one piece from here on: streaming would fail again at every step.
@@ -797,7 +824,8 @@ export async function runTurn(asked: TurnOptions): Promise<void> {
     opts.emit({
       type: 'error',
       message: err instanceof Error ? err.message : String(err),
-      ...(err instanceof ServiceError ? { hint: err.hint } : {})
+      // With whose request it was: several ChatGPT accounts can be signed in, and the way out is that account's.
+      ...(err instanceof ServiceError ? { hint: err.hint, provider: talk.connection.provider } : {})
     })
   } finally {
     opts.checkpoint()

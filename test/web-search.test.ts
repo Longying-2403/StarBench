@@ -9,7 +9,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { after, test } from 'node:test'
 import { itemsFromMessages, itemsReducer } from '../src/renderer/src/items.ts'
-import type { Item } from '../src/renderer/src/items.ts'
+import type { Item, ItemsAction } from '../src/renderer/src/items.ts'
 import { runTurn, systemPrompt } from '../src/main/agent.ts'
 import type { TurnOptions } from '../src/main/agent.ts'
 import { anthropicParams } from '../src/main/providers/anthropic.ts'
@@ -592,4 +592,45 @@ test('the page shows searches above the reply they belong to, while it is writte
     { role: 'assistant', content: 'Found it.', reasoning_content: 'Let me look.', web: [finished] }
   ])
   assert.deepEqual(loaded.slice(1), items.slice(1))
+})
+
+test('a search told again in a later step of the turn keeps its one row, where it stood first; the same id in another turn has a row of its own', () => {
+  const searched: WebActivity = { id: 's1', kind: 'search', queries: ['q', 'r'], status: 'done', suggestions: '<div/>' }
+  // Gemini names a search's pages with the answer that follows the step that searched (gemini.ts).
+  const withPages: WebActivity = { ...searched, sources: [{ url: 'https://a.example' }] }
+  const later: WebActivity = { id: 's1', kind: 'search', queries: ['next'], status: 'done' }
+  const call = { id: 'c1', name: 'read_file', arguments: '{}' }
+  const shown = (items: Item[]) => items.map((item) => (item.kind === 'web' ? item.activity : item.kind))
+  const expected = ['user', withPages, 'tool', 'assistant', 'user', later, 'assistant']
+
+  const loaded = itemsFromMessages([
+    { role: 'user', content: 'q' },
+    { role: 'assistant', content: '', tool_calls: [call], web: [searched] },
+    { role: 'tool', tool_call_id: 'c1', content: 'x' },
+    { role: 'assistant', content: 'Found it.', web: [withPages] },
+    { role: 'user', content: 'and next?' },
+    { role: 'assistant', content: 'Next.', web: [later] }
+  ])
+  assert.deepEqual(shown(loaded), expected)
+
+  // As the page is told it while the turns go by, it looks the same.
+  const told = (activity: WebActivity): ItemsAction => ({ type: 'event', event: { type: 'web_activity', activity } })
+  const steps: ItemsAction[] = [
+    { type: 'user', text: 'q' },
+    told({ id: 's1', kind: 'search', queries: ['q', 'r'], status: 'running' }),
+    told(searched),
+    { type: 'event', event: { type: 'assistant_done' } },
+    { type: 'event', event: { type: 'tool_start', call } },
+    { type: 'event', event: { type: 'tool_result', id: 'c1', output: 'x' } },
+    { type: 'event', event: { type: 'text_delta', text: 'Found it.' } },
+    told(withPages),
+    { type: 'event', event: { type: 'turn_end' } },
+    { type: 'user', text: 'and next?' },
+    told(later),
+    { type: 'event', event: { type: 'text_delta', text: 'Next.' } },
+    { type: 'event', event: { type: 'turn_end' } }
+  ]
+  let live: Item[] = []
+  for (const step of steps) live = itemsReducer(live, step)
+  assert.deepEqual(shown(live), expected)
 })

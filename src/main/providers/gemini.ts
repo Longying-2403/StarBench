@@ -38,7 +38,7 @@ import { ImagesRefused, carriesImages, refusesImages, userImages } from './attac
 import { isErrorResult, newReply, replayOf, searchNote, userText, withSearchNote, withToolResults } from './history.ts'
 import { newCallId } from './tool-text.ts'
 import type { AssistantMessage, Connection, ModelReply, ModelRequest, ProviderAdapter } from './types.ts'
-import { WebLog, geminiActivity, geminiGrounding, geminiPagesRead, geminiTitledReads } from './web-search.ts'
+import { WebLog, geminiActivity, geminiEarlierSearch, geminiGrounding, geminiPagesRead, geminiTitledReads, geminiWithPages } from './web-search.ts'
 
 type Bag = Record<string, unknown>
 const isBag = (value: unknown): value is Bag => typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -524,14 +524,16 @@ async function attempt(request: ModelRequest, message: AssistantMessage): Promis
   /**
    * What the reply rests on. Searches told as they began (the parts of the service's own calls)
    * get the pages with the last of them: the service names the pages of the whole reply, not of
-   * each search. Without such parts, the reply's searching is one search of its own.
+   * each search. A reply without such parts gets them for the search of an earlier step of the
+   * turn that they belong to, told under that search's id so that the page shows the two as one
+   * (`geminiEarlierSearch`). Without either, the reply's searching is one search of its own.
    */
   const grounded = (metadata: unknown): void => {
     const found = geminiGrounding(metadata, `${tag}-search`)
     if (!found) return
-    const last = message.web?.filter((a) => a.kind === 'search' && a.id !== found.id).at(-1)
+    const last = message.web?.filter((a) => a.kind === 'search' && a.id !== found.id).at(-1) ?? geminiEarlierSearch(request.messages, found)
     // A search keeps what it said itself: its queries, and the suggestions that came with it.
-    web.put(told(last ? { ...found, id: last.id, ...(last.queries ? { queries: last.queries } : {}), ...(last.suggestions ? { suggestions: last.suggestions } : {}) } : found))
+    web.put(told(last ? geminiWithPages(last, found) : found))
   }
   /** The pages read, where the parts of the service's own calls did not tell of them already. */
   const pagesRead = (metadata: unknown): void => {
