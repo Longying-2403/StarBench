@@ -13,8 +13,8 @@ body:
     id: version
     attributes:
       label: 版本
-      description: 在"设置 → 关于"里，例如 0.1.0-r11。
-      placeholder: 0.1.0-r11
+      description: 在"设置 → 关于"里，例如 0.1.0-r.11。
+      placeholder: 0.1.0-r.11
     validations:
       required: true
 
