@@ -1,0 +1,23 @@
+name: 功能建议
+description: 想要的新功能，或者现有功能可以改进的地方
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: want
+    attributes:
+      label: 想要什么
+      description: 想让 StarBench 做到什么，或者哪里用起来不顺手。
+    validations:
+      required: true
+
+  - type: textarea
+    id: why
+    attributes:
+      label: 用在哪里
+      description: 你在做什么的时候需要它，现在是怎么将就的。
+
+  - type: textarea
+    id: how
+    attributes:
+      label: 你设想的做法
+      description: 可以不填。别的应用里类似的做法、截图或草图都欢迎。

@@ -412,6 +412,8 @@ npm run dist
 
 ## 安全须知
 
+发现新的安全问题，请用仓库的[私密漏洞报告](https://github.com/Longying-2403/StarBench/security/advisories/new)告诉作者，只有作者看得到；请不要开公开的 issue。
+
 ### 0.1.0-r8 及更早版本的安全问题
 
 下面九个问题影响 0.1.0-r8 及更早的版本，之后的版本已经修复。等级从高到低分为 Critical、High、Medium、Low。还在用这些版本时，最要紧的一点是：不要把来路不明的文件夹（下载的压缩包、别人的仓库）选作工作文件夹。

@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: 报告安全问题
+    url: https://github.com/Longying-2403/StarBench/security/advisories/new
+    about: 安全漏洞请在这里私下报告，只有作者看得到；不要开公开的 issue。
+  - name: 使用说明
+    url: https://github.com/Longying-2403/StarBench#%E4%BD%BF%E7%94%A8%E8%AF%B4%E6%98%8E
+    about: 怎么添加模型服务、用本地模型、联网搜索、权限模式等，README 里都有。
