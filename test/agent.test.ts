@@ -15,6 +15,7 @@ import { ToolRegistry, registerBuiltinTools } from '../src/main/tools.ts'
 import type { ExchangeDraft } from '../src/main/trace.ts'
 import type { StepMeasure } from '../src/shared/stats.ts'
 import type { AgentEvent, ChatMessage, CustomPrompt, ReasoningEffort } from '../src/shared/types.ts'
+import { keptReply } from './kept-reply.ts'
 
 /** A chat-completions provider at the fake server. */
 const connectionTo = (baseURL: string, reasoningEffort: ReasoningEffort = 'default'): Connection => ({
@@ -137,7 +138,7 @@ test('a turn streams, runs tools with permission checks and feeds results back',
   assert.deepEqual(asked, ['write_file', 'run_command', 'edit_file', 'plugin_tool'])
   assert.equal(await readFile(path.join(workspace, 'sub/a.txt'), 'utf8'), 'line1\r\ncost $& $2\r\n', 'edit keeps CRLF and literal $')
 
-  assert.deepEqual(messages.at(-1), {
+  assert.deepEqual(keptReply(messages.at(-1)), {
     role: 'assistant',
     content: 'All done.',
     origin: { provider: 'test', kind: 'openai-chat', model: 'fake' }
@@ -685,7 +686,7 @@ test('thinking that a local server sends as "reasoning" is shown, and handed bac
   const again = model.requests[1].messages[2]
   assert.equal(again.reasoning, 'look first', 'the server gets its thinking back as it named it')
   assert.equal('reasoning_content' in again, false)
-  assert.deepEqual(messages[1], {
+  assert.deepEqual(keptReply(messages[1]), {
     role: 'assistant',
     content: '',
     reasoning_content: 'look first',
@@ -709,7 +710,7 @@ test('thinking inside the answer is taken out of it, and not sent back', async (
   const again = model.requests[1].messages[2]
   assert.deepEqual(Object.keys(again).sort(), ['content', 'role', 'tool_calls'], 'a server without a field for thinking is not sent one')
   assert.equal(again.content, '')
-  assert.deepEqual(messages.at(-1), {
+  assert.deepEqual(keptReply(messages.at(-1)), {
     role: 'assistant',
     content: 'Empty.',
     reasoning_content: 'done',
@@ -849,11 +850,11 @@ test('thinking that comes without its opening tag is taken out of the answer', a
   const first = await plainTurn(model.baseURL, messages)
   assert.deepEqual(first.errors, [])
   assert.deepEqual(rewrites(first.events), [{ type: 'assistant_rewrite', text: '', reasoning: 'The user wants the list.\n' }])
-  assert.deepEqual(messages[1], { role: 'assistant', content: '', reasoning_content: 'The user wants the list.\n', tool_calls: [{ id: 'call_1', name: 'list_dir', arguments: '{}' }], origin })
+  assert.deepEqual(keptReply(messages[1]), { role: 'assistant', content: '', reasoning_content: 'The user wants the list.\n', tool_calls: [{ id: 'call_1', name: 'list_dir', arguments: '{}' }], origin })
   // From then on this model's answers are read as thinking from their first word.
   assert.equal(first.text, 'The user wants the list.\nNothing here.')
   assert.equal(first.reasoning, 'It is empty, so I say so.\n')
-  assert.deepEqual(messages.at(-1), { role: 'assistant', content: 'Nothing here.', reasoning_content: 'It is empty, so I say so.\n', origin })
+  assert.deepEqual(keptReply(messages.at(-1)), { role: 'assistant', content: 'Nothing here.', reasoning_content: 'It is empty, so I say so.\n', origin })
   // The thinking is not sent back: such a server has no field for it.
   const again = model.requests[1].messages[2]
   assert.deepEqual([Object.keys(again).sort(), again.content], [['content', 'role', 'tool_calls'], ''])
@@ -865,7 +866,7 @@ test('thinking that comes without its opening tag is taken out of the answer', a
     second.events.map((e) => (e.type === 'reasoning_delta' || e.type === 'text_delta' ? `${e.type} ${e.text}` : e.type === 'assistant_rewrite' ? `rewrite ${JSON.stringify([e.text, e.reasoning])}` : e.type)),
     ['reasoning_delta Still ', 'reasoning_delta nothing.', 'rewrite ["",""]', 'text_delta Still nothing.', 'assistant_done', 'turn_end']
   )
-  assert.deepEqual(messages.at(-1), { role: 'assistant', content: 'Still nothing.', origin: { provider: 'test', kind: 'openai-chat', model: 'fake' } })
+  assert.deepEqual(keptReply(messages.at(-1)), { role: 'assistant', content: 'Still nothing.', origin: { provider: 'test', kind: 'openai-chat', model: 'fake' } })
 
   // After that, the next one is no longer taken for thinking unasked: it is watched again.
   messages.push({ role: 'user', content: 'and now?' })
@@ -992,7 +993,7 @@ test('an answer that was cut short in the middle of a written call is not acted 
   assert.equal(model.requests.length, 1)
   assert.match(turn.errors[0], /ran out of output space in the middle of a tool call/)
   assert.equal(turn.text, 'Saving. ', 'half a call is not shown')
-  assert.deepEqual(messages[1], { role: 'assistant', content: 'Saving. ', origin: { provider: 'test', kind: 'openai-chat', model: 'fake' } })
+  assert.deepEqual(keptReply(messages[1]), { role: 'assistant', content: 'Saving. ', origin: { provider: 'test', kind: 'openai-chat', model: 'fake' } })
 })
 
 test('for a server without tool definitions the whole conversation is written out', () => {

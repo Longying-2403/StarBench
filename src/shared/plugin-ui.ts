@@ -87,11 +87,11 @@ export const PLUGIN_UI_API = 1
 /**
  * The places in the app's own interface where a plugin can put a component of its own:
  *
- *   composer.actions   in the row of buttons under the message box, after the app's own. Meant for
- *                      a button or a short readout: the row is one line high.
+ *   composer.actions   at the right end of the bar above the message box, after the app's own
+ *                      button there. Meant for a button or a short readout: the bar is one line high.
  *
  * Besides these a plugin can have one panel (`panelOf`): a column of its own to the right of the
- * conversation, which the app opens and closes with a button it adds to that same row.
+ * conversation, which the app opens and closes with a button it adds to that same bar.
  */
 export const PLUGIN_SLOTS = ['composer.actions'] as const
 export type PluginSlotName = (typeof PLUGIN_SLOTS)[number]

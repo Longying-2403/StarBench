@@ -35,6 +35,26 @@ export function useShortcut(id: ShortcutId, run: () => void): void {
   }, [id])
 }
 
+/**
+ * The time, told anew every `every` milliseconds and whenever the window is looked at again:
+ * for what is said by how long ago it was ("3 分钟前"), which goes stale by itself.
+ */
+export function useNow(every: number): number {
+  const [now, setNow] = useState(Date.now)
+  useEffect(() => {
+    const tell = (): void => setNow(Date.now())
+    const timer = setInterval(tell, every)
+    window.addEventListener('focus', tell)
+    document.addEventListener('visibilitychange', tell)
+    return () => {
+      clearInterval(timer)
+      window.removeEventListener('focus', tell)
+      document.removeEventListener('visibilitychange', tell)
+    }
+  }, [every])
+  return now
+}
+
 /** Where a popup opens, and how tall it may be there without reaching past the edge of the window. */
 export interface PopupPlace {
   side: 'up' | 'down'

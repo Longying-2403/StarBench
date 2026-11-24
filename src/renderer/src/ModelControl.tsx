@@ -14,7 +14,7 @@ import {
   webSearchService
 } from '../../shared/types.ts'
 import type { EffortLevel, ModelChoice, ModelInfo, ProviderInfo, ReasoningEffort, Settings, WebSearchService } from '../../shared/types.ts'
-import { BoltIcon, CheckIcon, ChevronDownIcon, ChevronLeftIcon, ChevronRightIcon, GlobeIcon, ResetIcon, SettingsIcon } from './icons.tsx'
+import { BoltIcon, CheckIcon, ChevronDownIcon, ChevronLeftIcon, ChevronRightIcon, GlobeIcon, SettingsIcon } from './icons.tsx'
 import { Slider } from './Slider.tsx'
 import { errorText, roomStyle, useOutsidePress, usePopupPlace } from './util.ts'
 
@@ -134,14 +134,20 @@ export function ModelControl({
   const chosen = effort === 'default' ? undefined : effort
   /** With nothing chosen the service decides; the slider shows its level when that is known. */
   const shown = chosen ?? recommended
-  const index = shown ? levels.indexOf(shown) : -1
+  // Where no level is known that the model starts at, "nothing chosen" is a place on the slider
+  // of its own, the first: there nothing is sent, which is the way back for a model that turns
+  // out not to take the parameter. Where one is known, the level in use is always on the slider.
+  const unset = recommended === undefined
+  const stops: readonly (EffortLevel | 'default')[] = unset ? ['default', ...levels] : levels
+  const index = shown ? stops.indexOf(shown) : unset ? 0 : -1
   const displayedAt = preview ?? index
-  const displayed = levels[displayedAt]
+  const displayed = stops[displayedAt]
   /** The levels are named as the service in use names them. */
   const named = (level: EffortLevel): string => levelName(level, active?.baseURL)
-  const levelText = displayed ? named(displayed) : '默认'
+  const stopName = (stop: EffortLevel | 'default'): string => (stop === 'default' ? '默认' : named(stop))
+  const levelText = displayed ? stopName(displayed) : '默认'
   // The top of the scale gets its own look, and the step below it a little of it.
-  const fromTop = displayed && displayed !== 'none' && levels.length >= 3 ? levels.length - 1 - displayedAt : -1
+  const fromTop = displayed && displayed !== 'default' && displayed !== 'none' && levels.length >= 3 ? stops.length - 1 - displayedAt : -1
 
   const name = settings.model ? (modelInfo?.name ?? settings.model) : '选择模型'
   /** Faster answers for a higher price: a switch of the service's, there for some models only. */
@@ -170,15 +176,6 @@ export function ModelControl({
   // Faster answers show as particles streaming through the slider, at every level. Without them,
   // only the top of the scale has particles, and those twinkle where they are.
   const sparks = displayedAt < 0 ? 'none' : fastOn ? 'stream' : fromTop === 0 ? 'still' : 'none'
-  const canReset = chosen !== undefined && chosen !== recommended
-  // "Recommended" where there is a level to go back to; otherwise it is simply whatever the service does.
-  const resetText = recommended
-    ? canReset
-      ? `重设为推荐值（${named(recommended)}）`
-      : '已经是推荐值'
-    : canReset
-      ? '重设为默认值'
-      : '已经是默认值'
 
   const close = (refocus: boolean): void => {
     setOpen(false)
@@ -256,54 +253,40 @@ export function ModelControl({
           disabled={!fastOffered}
           aria-label="Fast Mode"
           aria-pressed={fastOffered ? fastOn : undefined}
-          title={fastText}
+          data-tip={fastText}
           onClick={() => onFastChange(!fastOn)}
         >
           <BoltIcon />
         </button>
+        <div className="effort-heading">
+          <div className="effort-level-name">{levelText}</div>
+          <button type="button" className="effort-model-name" data-tip={`切换模型（当前：${settings.model}）`} onClick={showModels}>
+            <span>{name}</span>
+            <ChevronRightIcon />
+          </button>
+        </div>
+        {/* One switch on each side of the heading, so that the name of the model has the room between them. */}
         <button
           type="button"
           className="icon-btn web-toggle"
           disabled={!searchService || searchHeld}
           aria-label="联网搜索"
           aria-pressed={searchService && !searchHeld ? searchOn : undefined}
-          title={searchText}
+          data-tip={searchText}
           onClick={() => onWebSearchChange(!searchOn)}
         >
           <GlobeIcon />
         </button>
-        <div className="effort-heading">
-          <div className="effort-level-name">{levelText}</div>
-          <button type="button" className="effort-model-name" title={`切换模型（当前：${settings.model}）`} onClick={showModels}>
-            <span>{name}</span>
-            <ChevronRightIcon />
-          </button>
-        </div>
-        {/* Keeps the heading in the middle, with two switches on the other side. */}
-        <span />
-        <button
-          type="button"
-          className="icon-btn"
-          disabled={!canReset}
-          aria-label={resetText}
-          title={resetText}
-          onClick={() => {
-            onEffortChange('default')
-            // The button disables itself once the default is back; the keyboard stays in the card.
-            rootRef.current?.querySelector<HTMLElement>('[role="slider"]')?.focus({ preventScroll: true })
-          }}
-        >
-          <ResetIcon />
-        </button>
       </div>
       <Slider
-        stops={levels.map(named)}
+        stops={stops.map(stopName)}
         index={index}
         label="思考强度"
         emptyText="默认"
         sparks={sparks}
         onPreview={setPreview}
-        onCommit={(at) => levels[at] !== shown && onEffortChange(levels[at])}
+        // The stop the slider stands on is the one in force; any other is a choice, "nothing chosen" among them.
+        onCommit={(at) => at !== index && onEffortChange(stops[at])}
       />
     </>
   )
@@ -312,14 +295,14 @@ export function ModelControl({
     <>
       <div className="effort-head effort-head-models">
         {settings.model ? (
-          <button type="button" className="icon-btn" aria-label="返回" title="返回" onClick={() => setPane('effort')}>
+          <button type="button" className="icon-btn" aria-label="返回" data-tip="返回" onClick={() => setPane('effort')}>
             <ChevronLeftIcon />
           </button>
         ) : (
           <span />
         )}
         <div className="model-pane-title">切换模型</div>
-        <button type="button" className="icon-btn" aria-label="管理模型服务" title="管理模型服务" onClick={() => (close(false), onOpenSettings())}>
+        <button type="button" className="icon-btn" aria-label="管理模型服务" data-tip="管理模型服务" onClick={() => (close(false), onOpenSettings())}>
           <SettingsIcon />
         </button>
       </div>
@@ -348,7 +331,7 @@ export function ModelControl({
               )}
               {provider.ready && list?.models === null && choices.length === 0 && <div className="model-note">正在获取模型列表…</div>}
               {list?.error && (
-                <div className="model-note model-note-error" title={list.error}>
+                <div className="model-note model-note-error" data-tip={list.error}>
                   {/* A server on one's own machine is usually just not running. */}
                   {isLocalAddress(provider.baseURL) ? '连不上，本地的模型服务启动了吗？' : '无法获取模型列表'}
                 </div>
@@ -365,7 +348,7 @@ export function ModelControl({
                       type="button"
                       className="model-option"
                       aria-current={current ? 'true' : undefined}
-                      title={choice.id}
+                      data-tip={choice.id}
                       onClick={() => {
                         if (!current) onSelectModel(provider.id, choice.id)
                         setQuery('')
@@ -395,7 +378,7 @@ export function ModelControl({
         aria-label={
           settings.model ? `模型 ${name}，思考强度 ${levelText}${fastOn ? '，Fast Mode 已开启' : ''}${searchOn ? '，联网搜索已开启' : ''}，点击调整` : '选择模型'
         }
-        title={
+        data-tip={
           settings.model
             ? `模型：${settings.model}\n思考强度：${levelText}${fastOn ? '\nFast Mode：已开启' : ''}${searchOn ? '\n联网搜索：已开启' : ''}（从下一条消息开始生效）`
             : '选择模型'

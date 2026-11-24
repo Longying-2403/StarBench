@@ -18,6 +18,12 @@ const MAX_DESCRIPTION_CHARS = 600
 export interface ParsedSkill {
   name?: string
   description?: string
+  /**
+   * Only the person picks it, as a command: it is not in the list the model is given, and the model
+   * cannot load it. Written `user-only: true`; Claude Code's `disable-model-invocation: true` is
+   * read the same way.
+   */
+  userOnly?: boolean
   /** The instructions: everything after the front matter. */
   body: string
 }
@@ -52,7 +58,8 @@ export function parseSkill(source: string): ParsedSkill {
       meta[key] = meta[key] ? `${meta[key]}${joiner}${line.trim()}` : line.trim()
     }
   }
-  return { name: meta.name || undefined, description: meta.description || undefined, body: text.slice(match[0].length).trim() }
+  const userOnly = [meta['user-only'], meta['disable-model-invocation']].some((value) => value?.toLowerCase() === 'true')
+  return { name: meta.name || undefined, description: meta.description || undefined, ...(userOnly ? { userOnly: true } : {}), body: text.slice(match[0].length).trim() }
 }
 
 interface Root {
@@ -97,7 +104,7 @@ export class SkillStore {
 
   /** Reads the folders on every call, so a skill dropped in while the app runs shows up at once. */
   async list(): Promise<SkillInfo[]> {
-    return (await this.locate()).map(({ name, description, source }) => ({ name, description, source }))
+    return (await this.locate()).map(({ name, description, source, userOnly }) => ({ name, description, source, ...(userOnly ? { userOnly: true } : {}) }))
   }
 
   /** The text handed to the model when a skill is loaded: where it lives, what else it ships, its instructions. */
@@ -159,7 +166,7 @@ export class SkillStore {
         const name = parsed.name && SKILL_NAME.test(parsed.name) ? parsed.name : entry.name
         if (!SKILL_NAME.test(name) || found.has(name)) continue
         const description = (parsed.description ?? '').replace(/\s+/g, ' ').trim().slice(0, MAX_DESCRIPTION_CHARS)
-        found.set(name, { name, description, source: root.source, dir })
+        found.set(name, { name, description, source: root.source, dir, ...(parsed.userOnly ? { userOnly: true } : {}) })
       }
     }
     return [...found.values()]
@@ -182,8 +189,12 @@ async function listFiles(dir: string, prefix = ''): Promise<string[]> {
   return files.slice(0, MAX_LISTED_FILES)
 }
 
-/** The section of the system prompt that tells the model which skills exist. Empty when there are none. */
-export function skillsPrompt(skills: SkillInfo[]): string {
+/**
+ * The section of the system prompt that tells the model which skills exist. Empty when there are
+ * none. Those only the person picks (commands, `userOnly`) are not among them.
+ */
+export function skillsPrompt(all: SkillInfo[]): string {
+  const skills = all.filter((s) => !s.userOnly)
   if (skills.length === 0) return ''
   return [
     'Skills:',
@@ -213,8 +224,10 @@ export function loadSkillTool(store: SkillStore): ToolSpec {
       required: ['name']
     },
     needsPermission: false,
-    run(args) {
+    async run(args) {
       if (typeof args.name !== 'string') throw new Error('Missing string argument "name"')
+      // A command is the person's to pick: what it says is meant for when they ask for it.
+      if ((await store.list()).some((s) => s.name === args.name && s.userOnly)) throw new Error(`"${args.name}" is a command only the user picks; it cannot be loaded.`)
       return typeof args.file === 'string' && args.file
         ? store.readFile(args.name, args.file)
         : store.load(args.name)

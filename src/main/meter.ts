@@ -27,6 +27,8 @@ export interface MeterHints {
   custom?: string
   /** What the app puts after the instructions: the list of skills. */
   skills?: string
+  /** What the memory tells the model, last in the instructions (main/memory.ts). */
+  memory?: string
   /** Where a tool comes from: the app itself, a plugin, or an MCP server. Taken for the app's own where nothing is said. */
   toolKind?(name: string): 'builtin' | 'plugin' | 'mcp'
 }
@@ -67,11 +69,12 @@ export function weigh(request: Pick<ModelRequest, 'system' | 'messages' | 'tools
   for (const tool of request.tools) {
     tools[hints.toolKind?.(tool.name) ?? 'builtin'] += estimateTokens(tool.name) + estimateTokens(tool.description) + estimateTokens(JSON.stringify(tool.parameters ?? {}))
   }
-  // Of the instructions, what is the person's and what is the list of skills is taken out of the
-  // whole, as far as it stands in them.
+  // Of the instructions, what is the person's, what is the list of skills and what the memory says
+  // is taken out of the whole, as far as it stands in them.
   const within = (text: string | undefined): number => (text?.trim() && request.system.includes(text.trim()) ? estimateTokens(text.trim()) : 0)
   const custom = within(hints.custom)
   const skills = within(hints.skills)
+  const memory = within(hints.memory)
   const parts: ContextParts = {
     messages,
     summary,
@@ -79,9 +82,10 @@ export function weigh(request: Pick<ModelRequest, 'system' | 'messages' | 'tools
     tools: tools.builtin,
     pluginTools: tools.plugin,
     mcpTools: tools.mcp,
-    system: Math.max(0, estimateTokens(request.system) - custom - skills),
+    system: Math.max(0, estimateTokens(request.system) - custom - skills - memory),
     custom,
-    skills
+    skills,
+    memory
   }
   return Object.fromEntries(Object.entries(parts).filter(([, tokens]) => tokens > 0))
 }

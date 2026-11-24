@@ -46,7 +46,7 @@ function FileLink({ address, title, children }: { address: string; title?: strin
         className="file-link"
         role="link"
         tabIndex={0}
-        title={title ?? `打开 ${writtenAddress(address)}`}
+        data-tip={title ?? `打开 ${writtenAddress(address)}`}
         onClick={open}
         onKeyDown={(e) => {
           if (e.key === 'Enter') open()
@@ -75,7 +75,7 @@ function AnswerLink({ href, title, children }: ComponentProps<'a'>) {
   // The window has no status bar to show where a link leads, and the words of an answer can say
   // anything: pointing at a link shows its whole address, to be judged before the press.
   return (
-    <a href={address} title={title && address ? `${title}\n${address}` : (address ?? title)} target="_blank" rel="noreferrer">
+    <a href={address} data-tip={title && address ? `${title}\n${address}` : (address ?? title)} target="_blank" rel="noreferrer">
       {children}
     </a>
   )
@@ -90,11 +90,11 @@ function AnswerLink({ href, title, children }: ComponentProps<'a'>) {
 function WebImage({ address, alt, title }: { address: string; alt: string; title?: string }) {
   const [state, setState] = useState<'waiting' | 'shown' | 'failed'>('waiting')
   if (state === 'shown') {
-    return <img className="answer-image" src={address} alt={alt} title={title ?? address} referrerPolicy="no-referrer" onError={() => setState('failed')} />
+    return <img className="answer-image" src={address} alt={alt} data-tip={title ?? address} referrerPolicy="no-referrer" onError={() => setState('failed')} />
   }
   if (state === 'failed' || !fetchablePicture(address)) {
     return (
-      <span className="file-note" role="status" title={alt}>
+      <span className="file-note" role="status" data-tip={alt}>
         {state === 'failed' ? '网络图片加载失败：' : '只加载 https 地址的图片：'}
         {address}
       </span>
@@ -104,7 +104,7 @@ function WebImage({ address, alt, title }: { address: string; alt: string; title
     <button
       type="button"
       className="web-image"
-      title="点击后从网络加载这张图片"
+      data-tip="点击后从网络加载这张图片"
       onClick={(e) => {
         // Inside a link the press asks for the picture, and does not follow the link yet.
         e.preventDefault()
@@ -147,7 +147,7 @@ function FileImage({ address, alt, title }: { address: string; alt: string; titl
       void api.openFile(workspace, address)
     }
     return (
-      <button type="button" className="answer-image-open" title={title ?? `${name}（点击用默认程序打开）`} onClick={open}>
+      <button type="button" className="answer-image-open" data-tip={title ?? `${name}（点击用默认程序打开）`} onClick={open}>
         <img className="answer-image" src={shown.url} alt={alt} />
       </button>
     )
@@ -156,7 +156,7 @@ function FileImage({ address, alt, title }: { address: string; alt: string; titl
   // Too large to show here, or of a kind the page cannot draw: the file can still be opened.
   if (shown.reason === 'too-large' || shown.reason === 'not-image') {
     return (
-      <span className="file-note" title={alt}>
+      <span className="file-note" data-tip={alt}>
         {shown.reason === 'too-large' ? '图片超过 20 MB，这里不预览：' : '这种文件无法在这里预览：'}
         <FileLink address={address}>{name}</FileLink>
       </span>
@@ -164,7 +164,7 @@ function FileImage({ address, alt, title }: { address: string; alt: string; titl
   }
   const why = { missing: '找不到图片', outside: '图片不在工作文件夹里', unreadable: '图片读取失败' }[shown.reason]
   return (
-    <span className="file-note" role="status" title={alt}>
+    <span className="file-note" role="status" data-tip={alt}>
       {why}：{name}
     </span>
   )

@@ -431,7 +431,7 @@ test("the debug panel's interface draws the settings, what they do for the model
   const panel = panelOf(given)
   const Readout = slotsOf(given)['composer.actions']
   assert.equal(panel?.title, '调试')
-  assert.ok(Readout, 'it has a readout in the row under the message box')
+  assert.ok(Readout, 'it has a readout on the bar above the message box')
   assert.deepEqual(listening.sort(), ['exchange', 'problem'])
   assert.deepEqual(asked, [['state', undefined]], 'it asks for what its main-process half knows as soon as it is loaded')
 
@@ -475,7 +475,7 @@ test("the debug panel's interface draws the settings, what they do for the model
   assert.ok(draw(panel!.component, { ...place(), model: null }).includes('还没有选模型'))
   assert.ok(draw(panel!.component, place({}, 'c3')).includes('这个对话还没有记录'))
 
-  // The readout under the message box: there while fields are being added for this model, and gone otherwise.
+  // The readout on the bar above the message box: there while fields are being added for this model, and gone otherwise.
   assert.match(draw(Readout, place()), /已调 2 项参数/)
   assert.ok(draw(Readout, place()).includes('temperature = 0.2'))
   assert.equal(draw(Readout, place({ local: false })), '')

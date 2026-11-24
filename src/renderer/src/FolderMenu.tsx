@@ -84,7 +84,7 @@ export function FolderMenu({
         className="folder"
         aria-haspopup="menu"
         aria-expanded={open}
-        title={workspace || undefined}
+        data-tip={workspace || undefined}
         onClick={() => (open ? close(false) : show())}
       >
         <FolderIcon />
@@ -106,7 +106,7 @@ export function FolderMenu({
                       role="menuitemradio"
                       aria-checked={current}
                       className="menu-item"
-                      title={dir}
+                      data-tip={dir}
                       onClick={() => {
                         onChoose(dir)
                         close(true)

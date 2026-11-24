@@ -6,6 +6,8 @@ import type { CompactionSettings } from '../shared/compaction.ts'
 import { startingEffort } from '../shared/effort-defaults.ts'
 import { cleanWorkspaceName, folderKey, folderName } from '../shared/folders.ts'
 import { sendsKeySafely } from '../shared/key-address.ts'
+import { DEFAULT_THEME, isTheme } from '../shared/theme.ts'
+import type { Theme } from '../shared/theme.ts'
 import { CUSTOM_PROMPT_LIMIT, PROVIDER_KINDS, PROVIDER_PRESETS, isLocalAddress, isReasoningEffort } from '../shared/types.ts'
 import type { ChatGptAccount, CustomPrompt, ProviderInfo, ProviderInput, ProviderKind, ReasoningEffort, Settings } from '../shared/types.ts'
 
@@ -57,6 +59,12 @@ export interface StoredSettings {
   stats?: false
   /** What the person changed about compacting conversations. What is not here is as the app comes (`COMPACTION_DEFAULTS`). */
   compaction?: { auto?: false; share?: number; cap?: number }
+  /** The look the person chose, where it is not the one the app comes with (`DEFAULT_THEME`). Absent, the app goes by the system. */
+  theme?: Exclude<Theme, typeof DEFAULT_THEME>
+  /** Set, to false, when conversations are no longer to be named by the model after their first turn (title.ts). Absent, they are. */
+  titles?: false
+  /** Set, to false, when the list of conversations no longer says under each when it was last gone on with. Absent, it does. */
+  sessionTimes?: false
 }
 
 /** What a ChatGPT sign-in is added as. */
@@ -207,7 +215,10 @@ export function readSettings(raw: unknown): StoredSettings {
     ...(/^urn:uuid:[0-9a-f-]{36}$/i.test(text(source.hostId)) ? { hostId: text(source.hostId) } : {}),
     ...(source.chatgptWelcomed === true ? { chatgptWelcomed: true } : {}),
     ...(source.stats === false ? { stats: false as const } : {}),
-    ...(compaction ? { compaction } : {})
+    ...(compaction ? { compaction } : {}),
+    ...keptTheme(source.theme),
+    ...(source.titles === false ? { titles: false as const } : {}),
+    ...(source.sessionTimes === false ? { sessionTimes: false as const } : {})
   }
 }
 
@@ -367,7 +378,10 @@ export function toPublic(settings: StoredSettings, accounts: Readonly<Record<str
     stats: settings.stats !== false,
     compaction: compactionOf(settings),
     workspaceNames: settings.workspaceNames ?? {},
-    trustedFolders: settings.trustedFolders ?? []
+    trustedFolders: settings.trustedFolders ?? [],
+    theme: themeOf(settings),
+    titles: settings.titles !== false,
+    sessionTimes: settings.sessionTimes !== false
   }
 }
 
@@ -558,6 +572,33 @@ export function setWindow(settings: StoredSettings, providerId: string, model: s
 export function setStats(settings: StoredSettings, on: boolean): StoredSettings {
   const { stats: _dropped, ...rest } = settings
   return on ? rest : { ...rest, stats: false }
+}
+
+/** The look as it is written down: named only where it is not how the app comes. Anything a file holds that is no look is left out. */
+const keptTheme = (value: unknown): Pick<StoredSettings, 'theme'> => (isTheme(value) && value !== DEFAULT_THEME ? { theme: value } : {})
+
+/** The look in use: the one that was chosen, or how the app comes. */
+export function themeOf(settings: Pick<StoredSettings, 'theme'>): Theme {
+  return settings.theme ?? DEFAULT_THEME
+}
+
+/** Switches the naming of conversations by the model on or off. On is how the app comes, and is not written down. */
+export function setTitles(settings: StoredSettings, on: boolean): StoredSettings {
+  const { titles: _dropped, ...rest } = settings
+  return on ? rest : { ...rest, titles: false }
+}
+
+/** Shows, or no longer shows, under each conversation in the list when it was last gone on with. Shown is how the app comes, and is not written down. */
+export function setSessionTimes(settings: StoredSettings, on: boolean): StoredSettings {
+  const { sessionTimes: _dropped, ...rest } = settings
+  return on ? rest : { ...rest, sessionTimes: false }
+}
+
+/** Chooses the look of the app: dark, light, or as the system is set. `theme` is checked here, since it arrives over IPC. */
+export function setTheme(settings: StoredSettings, theme: unknown): StoredSettings {
+  if (!isTheme(theme)) throw new Error('Unknown look of the app.')
+  const { theme: _dropped, ...rest } = settings
+  return { ...rest, ...keptTheme(theme) }
 }
 
 /** Turns faster answers on or off for the active provider's current model. */

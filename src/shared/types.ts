@@ -4,6 +4,7 @@ import type { Attachment, AttachmentsRead } from './attachments.ts'
 import type { CompactionChange, CompactionSettings } from './compaction.ts'
 import type { PermissionMode } from './permissions.ts'
 import type { SessionStats } from './stats.ts'
+import type { Theme } from './theme.ts'
 
 export interface ToolCall {
   id: string
@@ -60,10 +61,17 @@ export type ChatMessage =
        * content goes in front of what was typed, and pictures, which go to a model that can see.
        */
       attachments?: Attachment[]
+      /**
+       * When the person sent it, in milliseconds since 1970. Shown under the message, and sent to
+       * no service. Absent on messages from before the app wrote it down.
+       */
+      at?: number
     }
   | {
       role: 'assistant'
       content: string
+      /** When the model had finished writing it, in milliseconds since 1970: shown under the last reply of a turn, and sent to no service. */
+      at?: number
       /** The model's thinking, or the summary of it the service returned. Shown to the user. */
       reasoning_content?: string
       tool_calls?: ToolCall[]
@@ -229,7 +237,7 @@ const hostOf = (url: string): string => {
  * for one region (`us.api.x.ai`): the same service, so the same rules. An address that only has
  * the name somewhere in it (`api.x.ai.example.com`) is another service.
  */
-const serviceHost = (url: string): string => {
+export const serviceHost = (url: string): string => {
   const host = hostOf(url)
   return host.endsWith('.api.x.ai') ? 'api.x.ai' : host
 }
@@ -439,6 +447,16 @@ export interface Settings {
    * folder asks first (`trustFolder`).
    */
   trustedFolders: string[]
+  /** The look of the app: its dark colours, its light ones, or those the system is set to (shared/theme.ts). */
+  theme: Theme
+  /**
+   * Whether a conversation is named by the model once its first turn is over: a short title of
+   * what it is about, in the place of the first words the person wrote. One small request more
+   * for each conversation.
+   */
+  titles: boolean
+  /** Whether the list of conversations says under each one when it was last gone on with. It takes a line of each row. */
+  sessionTimes: boolean
 }
 
 /** The Claude models that answer faster on request, with nothing to apply for first. */
@@ -598,6 +616,8 @@ export interface SkillInfo {
   description: string
   /** "user" for the user's own skills folder, "builtin" for those that come with the app, otherwise the id of the plugin that ships it. */
   source: string
+  /** A command: only the person picks it (指令), and the model is not told of it (`user-only` in its front matter). */
+  userOnly?: boolean
 }
 
 export type PermissionDecision = 'allow' | 'always' | 'deny'
@@ -630,6 +650,12 @@ export type AgentEvent =
   | { type: 'turn_end' }
   /** The numbers of the conversation, after a request or a tool call changed them. */
   | { type: 'stats'; stats: SessionStats }
+  /**
+   * The conversation has another name: the one the model wrote for it once its first turn was
+   * over. It comes when it comes, a moment after that turn or well into the next one, and says
+   * nothing of the turn: the list of sessions is what it is for.
+   */
+  | { type: 'titled'; title: string }
   /** A summary of the conversation is being asked of the model, which takes a while, or that has ended. */
   | { type: 'compacting'; on: boolean }
   /** The conversation was compacted. `messages` is all of it as it is kept now, with the mark of that in its place. */
@@ -705,6 +731,12 @@ export interface HarnessApi {
   setContextWindow(providerId: string, model: string, tokens: number | null): Promise<Settings>
   /** Switches the counting of what conversations cost on or off. */
   setStats(on: boolean): Promise<Settings>
+  /** Chooses the look of the app: dark, light, or as the system is set. It holds at once. Resolves with the updated settings. */
+  setTheme(theme: Theme): Promise<Settings>
+  /** Switches the naming of conversations by the model, after their first turn, on or off. */
+  setTitles(on: boolean): Promise<Settings>
+  /** Shows, or no longer shows, under each conversation in the list when it was last gone on with. */
+  setSessionTimes(on: boolean): Promise<Settings>
   /** Changes whether, and from where on, conversations are compacted by themselves. What is left out stays as it is. */
   setCompaction(change: CompactionChange): Promise<Settings>
   /** The instructions the app itself gives every model, for showing them next to the person's own. */

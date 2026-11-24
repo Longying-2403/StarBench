@@ -1,4 +1,4 @@
-// 调试面板的界面：对话右侧的“调试”面板，和输入框下面的一小段读数。
+// 调试面板的界面：对话右侧的“调试”面板，和输入框上面那条栏里的一小段读数。
 // 这个文件运行在 StarBench 的窗口里。设置和记录都放在后台部分（../index.js），这里只负责
 // 显示和改动；怎么把设置变成请求里的字段在 params.js，怎么把记录变成文字在 format.js。
 
@@ -23,7 +23,7 @@ export default function setup({ React, controls, backend }) {
   const { memo, useState, useSyncExternalStore, createElement: h } = React
   const { Field, Slider, Switch } = controls
 
-  // 状态放在组件外面：面板收起时组件会卸载，而且面板和输入框下面的读数要看到同一份。
+  // 状态放在组件外面：面板收起时组件会卸载，而且面板和输入框上面那条栏里的读数要看到同一份。
   // 每次改动都换成一个新对象，组件靠这个知道要不要重画。
   let state = { loaded: false, config: normalize(undefined), exchanges: [], problem: '' }
   const watchers = new Set()
@@ -79,7 +79,7 @@ export default function setup({ React, controls, backend }) {
   }
 
   /**
-   * 输入框下面的读数：有参数正在加进请求时提醒一下，面板收着也看得到。
+   * 输入框上面那条栏里的读数：有参数正在加进请求时提醒一下，面板收着也看得到。
    * @param {import('../../../types/starbench-plugin').PluginPlaceProps} props
    */
   function Readout({ model }) {

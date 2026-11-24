@@ -1,7 +1,7 @@
 // The interfaces of plugins, in the page. A plugin that is switched on and has a `ui/index.js`
 // is loaded here: the module is fetched from the plugin's own address (shared/plugin-ui.ts), its
 // `setup` is called once with what the app has for it, and the components it gives back are
-// drawn in the places the app has for them: in the row under the message box (`PluginSlot`), and
+// drawn in the places the app has for them: on the bar above the message box (`PluginSlot`), and
 // in a panel beside the conversation (`PluginPanel`).
 //
 // A plugin's components are drawn by the app's React, the one copy there is in the page. A
@@ -396,7 +396,7 @@ class Guard extends Component<{ plugin: string; onFail(message: string): void; c
   render(): ReactNode {
     if (this.state.failed === null) return this.props.children
     return (
-      <span className="plugin-failed" role="status" title={this.state.failed}>
+      <span className="plugin-failed" role="status" data-tip={this.state.failed}>
         插件“{this.props.plugin}”的界面出错了
       </span>
     )
@@ -444,7 +444,7 @@ function PluginPanelButtons() {
             aria-pressed={open === ui.id}
             aria-controls="plugin-panel"
             data-set={open === ui.id ? '' : undefined}
-            title={`${open === ui.id ? '收起' : '打开'}插件“${ui.name}”的面板：${ui.panel.title}`}
+            data-tip={`${open === ui.id ? '收起' : '打开'}插件“${ui.name}”的面板：${ui.panel.title}`}
             onClick={() => toggle(ui.id)}
           >
             {/* The panel that comes with the app for looking into a model's behaviour has a drawing of its own; any other goes by the mark of plugins. */}
@@ -458,9 +458,10 @@ function PluginPanelButtons() {
 }
 
 /**
- * What plugins have in the row under the message box, beside the app's own button there: their
- * components for `composer.actions`, then the buttons of their panels. Nothing at all while no
- * plugin has either. When the row is full these go onto further lines of their own.
+ * What plugins have at the right end of the bar above the message box, beside the app's own
+ * button there: their components for `composer.actions`, then the buttons of their panels.
+ * Nothing at all while no plugin has either. When the bar is full these go onto further lines of
+ * their own.
  */
 export function PluginRow() {
   const uis = usePluginUis()
@@ -488,7 +489,7 @@ export function PluginPanel() {
   return (
     <aside className="plugin-panel" id="plugin-panel" aria-label={`插件面板：${ui.panel.title}`}>
       <div className="plugin-panel-head">
-        <h2 title={`来自插件“${ui.name}”`}>{ui.panel.title}</h2>
+        <h2 data-tip={`来自插件“${ui.name}”`}>{ui.panel.title}</h2>
         <button type="button" className="icon-btn" onClick={close} aria-label="收起面板">
           ×
         </button>

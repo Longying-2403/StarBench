@@ -5,11 +5,15 @@ import type { WorkspaceGroup } from '../../shared/folders.ts'
 import { SHORTCUTS, keysLabel } from '../../shared/shortcuts.ts'
 import { SESSION_ICONS } from '../../shared/types.ts'
 import type { SessionHit, SessionIcon, SessionSummary } from '../../shared/types.ts'
+import { whenExact, whenText } from '../../shared/when.ts'
 import {
+  AppIcon,
   ArchiveIcon,
   ChevronDownIcon,
   ComposeIcon,
+  FoldIcon,
   FolderIcon,
+  HandIcon,
   MoreIcon,
   PluginIcon,
   PlusIcon,
@@ -17,10 +21,12 @@ import {
   ResetIcon,
   SearchIcon,
   SettingsIcon,
-  TrashIcon
+  TrashIcon,
+  UnfoldIcon
 } from './icons.tsx'
+import { MemoryNavButton } from './MemoryPage.tsx'
 import { NoMarkIcon, SessionMark, markLabel } from './SessionIcons.tsx'
-import { errorText, isMac, isWindows, useOutsidePress, useShortcut } from './util.ts'
+import { errorText, isMac, isWindows, useNow, useOutsidePress, useShortcut } from './util.ts'
 
 const COLLAPSED_KEY = 'collapsedWorkspaces'
 
@@ -30,6 +36,17 @@ function readCollapsed(): string[] {
     return Array.isArray(stored) ? stored.filter((k): k is string => typeof k === 'string') : []
   } catch {
     return []
+  }
+}
+
+const FOLDED_KEY = 'sidebarFolded'
+
+/** Whether the sidebar was left folded away to its strip. */
+function readFolded(): boolean {
+  try {
+    return localStorage.getItem(FOLDED_KEY) === '1'
+  } catch {
+    return false
   }
 }
 
@@ -132,7 +149,7 @@ function Resizer() {
       aria-valuemin={WIDTH.min}
       aria-valuemax={WIDTH.max}
       aria-valuenow={width}
-      title="拖动调整侧边栏宽度，双击恢复默认"
+      data-tip="拖动调整侧边栏宽度，双击恢复默认"
       data-dragging={dragging ? '' : undefined}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
@@ -273,10 +290,12 @@ function SessionRow({
   session,
   active,
   working,
+  waiting,
   busy,
   markSlot,
   snippet,
   place,
+  now,
   onError,
   onOpen,
   onRename,
@@ -288,6 +307,8 @@ function SessionRow({
   active: boolean
   /** A turn of this session is under way: a ring turns at the left of its row. */
   working: boolean
+  /** That turn waits for the person to allow or refuse a tool call: a hand stands in the place of the ring. */
+  waiting: boolean
   /** While a turn runs, sessions can be neither switched nor changed. */
   busy: boolean
   /** Room for a mark is kept even without one, because a session around this one has a mark: the names stay in line. */
@@ -296,6 +317,8 @@ function SessionRow({
   snippet?: SessionHit['snippet']
   /** The workspace the session ran in, by the name it goes by, for a session that is not listed under it. */
   place?: string
+  /** The time as the list has it, from which the row says how long ago the session was gone on with. Absent, the row does not say it (设置 → 外观). */
+  now?: number
   onError: (message: string) => void
 }) {
   /** The new name being typed; null while the row is not being renamed. */
@@ -345,19 +368,35 @@ function SessionRow({
       className={`session ${active ? 'session-active' : ''} ${menu.place ? 'session-menu-open' : ''}`}
       onContextMenu={onContextMenu}
     >
-      {/* In the margin left of the mark, so that no name moves when it comes and goes. */}
-      {working && <span className="session-working" role="img" aria-label="正在工作" title="正在工作" />}
+      {/* In the margin left of the mark, so that no name moves when it comes and goes. A turn that
+          stands still until the person has answered says that, and not that it is at work. */}
+      {waiting ? (
+        <span className="session-waiting" role="img" aria-label="等你确认" data-tip="等你确认：模型要调用一个需要你允许的工具">
+          <HandIcon />
+        </span>
+      ) : (
+        working && <span className="session-working" role="img" aria-label="正在工作" data-tip="正在工作" />
+      )}
       {draft === null ? (
-        <button className="session-open" disabled={busy} onClick={() => onOpen(session.id)} title={session.title}>
+        <button className="session-open" disabled={busy} onClick={() => onOpen(session.id)}>
           {mark}
           <span className="session-words">
-            <span className="session-title">{session.title}</span>
+            {/* The whole name, for one that is cut short: asked of the name itself, since the row holds more than it. */}
+            <span className="session-title" data-tip={session.title}>
+              {session.title}
+            </span>
             {place && (
-              <span className="session-place" title={`工作区：${session.workspace}`}>
+              <span className="session-place" data-tip={`工作区：${session.workspace}`}>
                 {place}
               </span>
             )}
             {snippet && <Snippet {...snippet} />}
+            {/* When the conversation was last gone on with, said from now; the exact moment for whoever asks. */}
+            {now !== undefined && (
+              <span className="session-time" data-tip={`最后更新：${whenExact(session.updatedAt)}`}>
+                {whenText(session.updatedAt, now)}
+              </span>
+            )}
           </span>
         </button>
       ) : (
@@ -384,7 +423,7 @@ function SessionRow({
           aria-haspopup="menu"
           aria-expanded={menu.place !== null}
           aria-label={`会话"${session.title}"的更多操作`}
-          title="更多操作"
+          data-tip="更多操作"
           onClick={menu.toggle}
         >
           <MoreIcon />
@@ -400,7 +439,7 @@ function SessionRow({
               aria-checked={!session.icon}
               className="icon-choice"
               aria-label="不用图标"
-              title="不用图标"
+              data-tip="不用图标"
               onClick={() => chooseIcon(null)}
             >
               <NoMarkIcon />
@@ -413,7 +452,7 @@ function SessionRow({
                 aria-checked={session.icon === name}
                 className="icon-choice"
                 aria-label={markLabel(name)}
-                title={markLabel(name)}
+                data-tip={markLabel(name)}
                 onClick={() => chooseIcon(name)}
               >
                 <SessionMark name={name} />
@@ -526,7 +565,7 @@ function GroupHead({
   return (
     <div ref={headRef} className={`group-head ${menu.place ? 'group-menu-open' : ''}`} onContextMenu={onContextMenu}>
       {draft === null ? (
-        <button className="group-toggle" aria-expanded={open} onClick={onToggle} title={group.workspace}>
+        <button className="group-toggle" aria-expanded={open} onClick={onToggle} data-tip={group.workspace}>
           <span className="group-chevron">
             <ChevronDownIcon />
           </span>
@@ -567,7 +606,7 @@ function GroupHead({
           aria-haspopup="menu"
           aria-expanded={menu.place !== null}
           aria-label={`工作区"${group.name}"的更多操作`}
-          title="更多操作"
+          data-tip="更多操作"
           onClick={menu.toggle}
         >
           <MoreIcon />
@@ -579,7 +618,7 @@ function GroupHead({
           disabled={busy}
           onClick={() => onNewChat(group.workspace)}
           aria-label={`在 ${group.name} 里开始新对话`}
-          title="在这个文件夹里开始新对话"
+          data-tip="在这个文件夹里开始新对话"
         >
           <PlusIcon />
         </button>
@@ -590,7 +629,7 @@ function GroupHead({
             type="button"
             role="menuitem"
             className="menu-item"
-            title="只改这里显示的名字，磁盘上的文件夹不改名"
+            data-tip="只改这里显示的名字，磁盘上的文件夹不改名"
             onClick={() => {
               menu.close(false)
               setDraft(group.name)
@@ -603,7 +642,7 @@ function GroupHead({
             type="button"
             role="menuitem"
             className="menu-item"
-            title="把这个工作区列出的对话都收进“已归档”"
+            data-tip="把这个工作区列出的对话都收进“已归档”"
             onClick={() => {
               menu.close(false)
               run(onArchiveWorkspace(group.workspace))
@@ -617,7 +656,7 @@ function GroupHead({
             role="menuitem"
             // The second press is the one that deletes, and says how much goes.
             className={`menu-item menu-item-danger${menu.confirming ? ' menu-item-confirm' : ''}`}
-            title="删除这个工作区列出的对话，并把它从列表里拿掉。文件夹和里面的文件不动，已归档的对话保留。"
+            data-tip="删除这个工作区列出的对话，并把它从列表里拿掉。文件夹和里面的文件不动，已归档的对话保留。"
             onClick={() => {
               if (!menu.confirming) return menu.setConfirming(true)
               menu.close(false)
@@ -644,17 +683,23 @@ const SEARCH_DELAY_MS = 150
 /**
  * The left column: a button for a new chat, the search box and the way to the plugins, the
  * sessions sorted into their workspaces, the archived ones tucked away below, and the settings.
+ * Beside the button for a new chat is the one that folds the column away to a strip. The strip
+ * shows the app's icon, which opens the column again, the button for a new chat, and the
+ * settings at the bottom; how the column was left is remembered.
  */
 export function Sidebar({
   sessions,
   names,
   activeId,
   workingId,
+  waitingIds,
   busy,
   page,
+  showTimes,
   onNewChat,
   onSearch,
   onPlugins,
+  onMemory,
   onSettings,
   onRenameWorkspace,
   onArchiveWorkspace,
@@ -669,15 +714,21 @@ export function Sidebar({
   activeId: string | null
   /** The session whose turn the page itself is running, if any. Of sessions at work elsewhere the list says so (`running`). */
   workingId: string | null
+  /** The sessions that wait for the person to allow or refuse a tool call. */
+  waitingIds: readonly string[]
   busy: boolean
-  /** What the main part of the window shows: the conversation, or the plugins. */
-  page: 'chat' | 'plugins'
+  /** What the main part of the window shows: the conversation, the plugins, the settings, or the memory. */
+  page: 'chat' | 'plugins' | 'settings' | 'memory'
+  /** Whether each session says, under its name, when it was last gone on with (设置 → 外观). */
+  showTimes: boolean
   /** With a folder, the new chat starts in that workspace. */
   onNewChat: (workspace?: string) => void
   /** The sessions in which the words of a search are found, in the name or in what was said. */
   onSearch: (query: string) => Promise<SessionHit[]>
   /** Shows the plugins in the main part of the window, or goes back from them to the conversation. */
   onPlugins: () => void
+  /** The same for the memory's page (MemoryPage.tsx). */
+  onMemory: () => void
   onSettings: () => void
 }) {
   const [collapsed, setCollapsed] = useState(readCollapsed)
@@ -689,11 +740,48 @@ export function Sidebar({
   const searchRef = useRef<HTMLInputElement>(null)
   const listRef = useRef<HTMLElement>(null)
   const searching = query.trim() !== ''
+  // For the "3 分钟前" under each session: told anew twice a minute, so that it does not stand still.
+  const now = useNow(30_000)
 
-  useShortcut('search', () => {
+  /** Folded away to a strip: the app's icon, the button for a new chat, and the way to the settings. */
+  const [folded, setFolded] = useState(readFolded)
+  /** The button of the open sidebar that folds it, and the one on the strip that opens it again. Each hands the keyboard to the other. */
+  const foldRef = useRef<HTMLButtonElement>(null)
+  const unfoldRef = useRef<HTMLButtonElement>(null)
+  /** What takes the keyboard once the sidebar is drawn the other way: the button that undoes the one pressed, or the search box. */
+  const focusNext = useRef<'toggle' | 'search' | null>(null)
+
+  // The stylesheet lays the window out from this. Set before the first paint, so that a sidebar
+  // that was left folded does not start wide and jump.
+  useLayoutEffect(() => {
+    document.documentElement.toggleAttribute('data-sidebar-folded', folded)
+  }, [folded])
+
+  const fold = (next: boolean, focus: 'toggle' | 'search' | null = null): void => {
+    focusNext.current = focus
+    setFolded(next)
+    try {
+      localStorage.setItem(FOLDED_KEY, next ? '1' : '0')
+    } catch {
+      // Remembering how the sidebar was left is a convenience; it works without it.
+    }
+  }
+
+  const toSearch = (): void => {
     searchRef.current?.focus()
     searchRef.current?.select()
-  })
+  }
+
+  useEffect(() => {
+    const focus = focusNext.current
+    focusNext.current = null
+    if (focus === 'toggle') (folded ? unfoldRef.current : foldRef.current)?.focus()
+    else if (focus === 'search' && !folded) toSearch()
+  }, [folded])
+
+  useShortcut('sidebar', () => fold(!folded))
+  // The search box is in the part that folds away: asked for from the strip, the sidebar opens first.
+  useShortcut('search', () => (folded ? fold(false, 'search') : toSearch()))
 
   // Asked a moment after the typing pauses, and again when the sessions change under the search.
   // What was found before stays on show until the answer comes; an answer to an older search is dropped.
@@ -769,25 +857,48 @@ export function Sidebar({
         session={session}
         active={session.id === activeId}
         working={session.running === true || session.id === workingId}
+        waiting={waitingIds.includes(session.id)}
         busy={busy}
         markSlot={markSlot}
         snippet={filtered ? hits.get(session.id)?.snippet : undefined}
         place={placed ? workspaceName(session.workspace, names, isWindows) : undefined}
+        now={showTimes ? now : undefined}
         onError={setError}
         {...actions}
       />
     ))
   }
 
+  const foldKeys = keysLabel(SHORTCUTS.sidebar.keys, isMac)
   return (
-    <aside className="sidebar">
-      <button className="btn btn-primary sidebar-new" onClick={() => onNewChat()} disabled={busy}>
+    <aside className={`sidebar${folded ? ' sidebar-folded' : ''}`}>
+      {/* The app's icon and name, and the button that folds the sidebar away. Where the window has
+          no title bar of its own (Windows), this row is what says which app this is. */}
+      <div className="sidebar-head">
+        <span className="sidebar-mark">
+          <AppIcon />
+        </span>
+        {!folded && <span className="sidebar-name">StarBench</span>}
+        {!folded && (
+          <button ref={foldRef} type="button" className="sidebar-fold" aria-label="收起侧边栏" data-tip={`收起侧边栏（${foldKeys}）`} onClick={() => fold(true, 'toggle')}>
+            <FoldIcon />
+          </button>
+        )}
+      </div>
+      {/* On the strip a button of its own opens the sidebar again: the icon above it is a picture, and is not pressed. */}
+      {folded && (
+        <button ref={unfoldRef} type="button" className="sidebar-fold" aria-label="展开侧边栏" data-tip={`展开侧边栏（${foldKeys}）`} onClick={() => fold(false, 'toggle')}>
+          <UnfoldIcon />
+        </button>
+      )}
+      {/* Without their words on the strip, this button and the one for the settings say what they are when asked. */}
+      <button className="btn btn-primary sidebar-new" onClick={() => onNewChat()} disabled={busy} {...(folded ? { 'aria-label': '新对话', 'data-tip': '新对话' } : {})}>
         <QuillIcon />
-        新对话
+        {!folded && '新对话'}
       </button>
       <div className="sidebar-nav">
         {/* A press anywhere on the row puts the cursor into the box. */}
-        <label className="sidebar-search" title="搜索对话的标题和内容">
+        <label className="sidebar-search" data-tip="搜索对话的标题和内容">
           <SearchIcon />
           <input
             ref={searchRef}
@@ -821,6 +932,8 @@ export function Sidebar({
           <PluginIcon />
           插件
         </button>
+        {/* Only while the memory is on; folded away with the rest of this block. */}
+        <MemoryNavButton pressed={page === 'memory'} onOpen={onMemory} />
       </div>
       <nav className="sessions" aria-label="会话" ref={listRef}>
         {filtered ? (
@@ -873,9 +986,16 @@ export function Sidebar({
           {error}
         </div>
       )}
-      <button className="btn sidebar-settings" onClick={onSettings}>
+      {/* Like the plugins: pressed once it shows the settings in the main part of the window, pressed again it goes back. */}
+      <button
+        type="button"
+        className="btn sidebar-settings"
+        aria-pressed={page === 'settings'}
+        onClick={onSettings}
+        {...(folded ? { 'aria-label': '设置', 'data-tip': '设置' } : {})}
+      >
         <SettingsIcon />
-        设置
+        {!folded && '设置'}
       </button>
       <Resizer />
     </aside>

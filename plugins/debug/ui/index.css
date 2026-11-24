@@ -59,7 +59,7 @@
   margin: 0 0 8px;
 }
 
-/* 输入框下面的读数：前面一个小圆点。 */
+/* 输入框上面那条栏里的读数：前面一个小圆点。 */
 .debug-readout::before {
   content: '';
   display: inline-block;

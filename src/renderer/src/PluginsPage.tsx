@@ -5,6 +5,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import type { PluginInfo } from '../../shared/types.ts'
 import { ChevronLeftIcon } from './icons.tsx'
+import { MemoryFeatureRow } from './MemoryPage.tsx'
 import { Notice } from './Notice.tsx'
 import { useFailuresInSight, usePluginPanels, usePluginUis } from './PluginUi.tsx'
 import { errorText } from './util.ts'
@@ -19,7 +20,7 @@ const PLUGIN_STATUS: Record<PluginInfo['status'], string> = {
   held: '本次未加载'
 }
 
-export function PluginsPage({ onBack }: { onBack: () => void }) {
+export function PluginsPage({ onBack, onOpenMemory }: { onBack: () => void; /** Opens the memory's page, from its row among the built-in features. */ onOpenMemory: () => void }) {
   const [plugins, setPlugins] = useState<PluginInfo[] | null>(null)
   const [error, setError] = useState('')
   /** Id of the plugin whose switch is mid-flight, so it cannot be toggled twice. */
@@ -74,6 +75,7 @@ export function PluginsPage({ onBack }: { onBack: () => void }) {
         <h1 id="plugins-title">插件</h1>
       </header>
       <div className="page-body">
+        <h2 className="page-group-title">插件</h2>
         <Notice>插件在应用内以完整权限运行：可以读写文件、执行命令，也能访问你的 API Key 和 ChatGPT 登录。只启用你信任的插件。</Notice>
         {held && (
           <Notice>
@@ -105,8 +107,8 @@ export function PluginsPage({ onBack }: { onBack: () => void }) {
                   {plugin.name}
                   {plugin.version && <span className="row-meta">{plugin.version}</span>}
                   {plugin.builtin && (
-                    <span className="badge" title="随应用一起安装的插件">
-                      内置
+                    <span className="badge" data-tip="随应用一起安装的插件">
+                      内置插件
                     </span>
                   )}
                   <span className={`badge badge-${plugin.status}`}>{PLUGIN_STATUS[plugin.status]}</span>
@@ -118,7 +120,7 @@ export function PluginsPage({ onBack }: { onBack: () => void }) {
                 {plugin.error && <div className="row-error">{plugin.error}</div>}
                 {plugin.ui && uiErrors.get(plugin.id) && <div className="row-error">{uiErrors.get(plugin.id)}</div>}
               </div>
-              {/* The panel a plugin has beside the conversation, opened from here as from under the message box. */}
+              {/* The panel a plugin has beside the conversation, opened from here as from the bar above the message box. */}
               {withPanel.has(plugin.id) && (
                 <button
                   className="btn btn-small"
@@ -136,7 +138,7 @@ export function PluginsPage({ onBack }: { onBack: () => void }) {
                   className="btn btn-small"
                   disabled={busy !== null}
                   onClick={() => void change(plugin, 'reload')}
-                  title="停掉再启动这个插件，读入它文件夹里改动过的内容"
+                  data-tip="停掉再启动这个插件，读入它文件夹里改动过的内容"
                   aria-label={`重新加载插件 ${plugin.name}`}
                 >
                   重新加载
@@ -153,6 +155,11 @@ export function PluginsPage({ onBack }: { onBack: () => void }) {
               />
             </li>
           ))}
+        </ul>
+        {/* The app's own features that can be switched off, below the plugins and apart from them: the warning above is about other people's code. */}
+        <h2 className="page-group-title">内置功能</h2>
+        <ul className="rows">
+          <MemoryFeatureRow onOpen={onOpenMemory} />
         </ul>
       </div>
     </>

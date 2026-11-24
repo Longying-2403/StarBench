@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { Fragment, useEffect, useRef, useState } from 'react'
 import type { KeyboardEvent } from 'react'
 import { MAX_ATTACHMENTS, MAX_IMAGE_FILE_BYTES } from '../../shared/attachments.ts'
 import type { Attachment, AttachmentsRead } from '../../shared/attachments.ts'
@@ -74,7 +74,14 @@ export function Composer({
   const slashOpen = slash !== null && dismissed !== draft
   const visible = !blocked && slashOpen
   const filter = slashOpen ? slash[1].toLowerCase() : ''
-  const matches = visible ? skills.filter((s) => s.name.toLowerCase().includes(filter)) : []
+  const found = visible ? skills.filter((s) => s.name.toLowerCase().includes(filter)) : []
+  // The commands (skills only the person picks, such as the memory's) first, then the skills, each under a heading.
+  const matches = [...found.filter((s) => s.userOnly), ...found.filter((s) => !s.userOnly)]
+  const headingAt = (index: number): string | null => {
+    if (!matches.some((s) => s.userOnly)) return null
+    if (index === 0) return matches[0].userOnly ? '指令' : 'Skills'
+    return matches[index - 1].userOnly && !matches[index].userOnly ? 'Skills' : null
+  }
   const activeIndex = Math.min(active, Math.max(matches.length - 1, 0))
 
   // Below the box while it sits in the middle of a new chat and the whole menu fits there, above
@@ -202,22 +209,28 @@ export function Composer({
             </div>
           ) : (
             matches.map((skill, index) => (
-              <div
-                key={skill.name}
-                role="option"
-                aria-selected={index === activeIndex}
-                className={`skill-option ${index === activeIndex ? 'skill-option-active' : ''}`}
-                title={skill.description}
-                onMouseEnter={() => setActive(index)}
-                // mousedown, not click: picking must not take focus away from the text box.
-                onMouseDown={(e) => {
-                  e.preventDefault()
-                  pick(skill.name)
-                }}
-              >
-                <span className="skill-name">{skill.name}</span>
-                {skill.description && <span className="skill-desc">{skill.description}</span>}
-              </div>
+              <Fragment key={skill.name}>
+                {headingAt(index) && (
+                  <div className="skill-group" role="presentation">
+                    {headingAt(index)}
+                  </div>
+                )}
+                <div
+                  role="option"
+                  aria-selected={index === activeIndex}
+                  className={`skill-option ${index === activeIndex ? 'skill-option-active' : ''}`}
+                  data-tip={skill.description}
+                  onMouseEnter={() => setActive(index)}
+                  // mousedown, not click: picking must not take focus away from the text box.
+                  onMouseDown={(e) => {
+                    e.preventDefault()
+                    pick(skill.name)
+                  }}
+                >
+                  <span className="skill-name">{skill.name}</span>
+                  {skill.description && <span className="skill-desc">{skill.description}</span>}
+                </div>
+              </Fragment>
             ))
           )}
         </div>
@@ -267,7 +280,7 @@ export function Composer({
           />
         )}
         {running ? (
-          <button type="button" className="send send-stop" onClick={onStop} aria-label="停止" title="停止">
+          <button type="button" className="send send-stop" onClick={onStop} aria-label="停止" data-tip="停止">
             <StopIcon />
           </button>
         ) : (
@@ -277,7 +290,7 @@ export function Composer({
             onClick={submit}
             disabled={Boolean(blocked) || (!draft.trim() && files.length === 0)}
             aria-label="发送"
-            title="发送（Enter）"
+            data-tip="发送（Enter）"
           >
             <EnterIcon />
           </button>

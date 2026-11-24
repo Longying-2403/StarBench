@@ -1,0 +1,312 @@
+/* The memory: its page, the notice above the message box, and the question about a sensitive note.
+   Colours come from the app's own variables only, so that both looks hold. */
+
+/* Each kind of note in a colour of its own. */
+.badge.memory-kind-user {
+  border-color: var(--peak);
+  color: var(--peak);
+}
+.badge.memory-kind-feedback {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.badge.memory-kind-project {
+  border-color: var(--ok);
+  color: var(--ok);
+}
+.badge.memory-kind {
+  flex-shrink: 0;
+}
+
+/* The memory's part of the context (StatusRow.tsx): quiet like the other instructions, in the memory's own hue. */
+.status-part-memory {
+  background: color-mix(in srgb, var(--peak) 45%, var(--panel));
+}
+.status-part-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+
+/* What looks sensitive, framed in red, as the question about a command frames characters that would not show. */
+.memory-marked {
+  color: var(--danger);
+  border: 1px solid var(--danger);
+  border-radius: 3px;
+  padding: 0 2px;
+  margin: 0 1px;
+}
+.memory-sensitive-line {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 4px 0;
+  overflow-wrap: anywhere;
+}
+
+/* The notice of a change: the question's box, with the time it has left running out along its lower edge. */
+.memory-notice {
+  position: relative;
+  overflow: hidden;
+  padding-bottom: 14px;
+}
+.memory-notice-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 6px 0 2px;
+}
+.memory-notice-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+.memory-notice-what {
+  flex-shrink: 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+.memory-notice-text {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.memory-notice-gone .memory-notice-text {
+  color: var(--muted);
+  text-decoration: line-through;
+}
+.memory-notice-bar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 4px;
+  background: var(--accent);
+  transform-origin: left;
+  animation: memory-notice-time linear forwards;
+}
+.memory-notice[data-paused] .memory-notice-bar {
+  animation-play-state: paused;
+}
+@keyframes memory-notice-time {
+  to {
+    transform: scaleX(0);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  /* The notice still goes when its time is up; the time is just not drawn. */
+  .memory-notice-bar {
+    display: none;
+  }
+}
+
+/* The headings of the "/" menu (Composer.tsx), shown when commands (skills only the person picks, such as the memory's) are among its entries. */
+.skill-group {
+  padding: 4px 10px 2px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.skill-option + .skill-group {
+  margin-top: 4px;
+  border-top: 1px solid var(--border);
+  padding-top: 6px;
+}
+
+/* A heading over a group of rows on a page (the memory's settings; the groups of the plugins page). */
+.page-group-title {
+  margin: 8px 0 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+/* The page. */
+.memory-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--muted);
+}
+.memory-views {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.memory-views button {
+  padding: 4px 12px;
+  border: 0;
+  border-right: 1px solid var(--border);
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.memory-views button:last-child {
+  border-right: 0;
+}
+.memory-views button[aria-selected='true'] {
+  background: var(--raised);
+  color: var(--text);
+}
+.memory-search {
+  flex: 1;
+  min-width: 140px;
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+}
+.memory-add {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.memory-row .row-title {
+  font-weight: 400;
+}
+.memory-text {
+  overflow-wrap: anywhere;
+}
+.memory-details {
+  margin-top: 2px;
+  color: var(--muted);
+  white-space: pre-wrap;
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+.memory-details[data-open] {
+  display: block;
+}
+.memory-row[data-focus] {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+.memory-gone {
+  align-items: center;
+  color: var(--muted);
+}
+.memory-gone .row-main {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.memory-group-title {
+  margin: 6px 0 -2px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.memory-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+}
+.memory-form input[type='text'],
+.memory-form textarea,
+.memory-form select {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+}
+.memory-form textarea {
+  resize: vertical;
+}
+.memory-form-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.memory-form-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.memory-form-row select {
+  width: auto;
+}
+.memory-form-row label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+}
+.memory-form-grow {
+  flex: 1;
+}
+.memory-count[data-over] {
+  color: var(--danger);
+}
+.memory-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.memory-foot .hint {
+  flex: 1;
+}
+.memory-modes {
+  display: inline-flex;
+  flex-shrink: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.memory-modes button {
+  padding: 3px 10px;
+  border: 0;
+  border-right: 1px solid var(--border);
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.memory-modes button:last-child {
+  border-right: 0;
+}
+.memory-modes button[aria-pressed='true'] {
+  background: var(--raised);
+  color: var(--text);
+}
+/* A model service and what it may do with the memory: its name at the left, the choice at the right. */
+.memory-provider {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+}
+.memory-provider:last-child {
+  border-bottom: 0;
+}
+.memory-provider .badge {
+  margin-left: 6px;
+}

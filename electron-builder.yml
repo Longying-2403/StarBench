@@ -18,6 +18,9 @@ extraResources:
     to: plugins
   - from: skills
     to: skills
+  # The commands that come with the memory (memory-commands/), offered while the memory is on.
+  - from: memory-commands
+    to: memory-commands
 
 # No dependency contains native code, so there is nothing to rebuild for Electron.
 npmRebuild: false

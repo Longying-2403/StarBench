@@ -114,12 +114,12 @@ export interface PluginUiApi {
 
 /** `setup` 交回的对象。每一项都可以省略。 */
 export interface PluginUiResult {
-  /** 放进应用现有位置的组件。目前只有输入框下面那一排：`composer.actions`，一行高，适合一个按钮或一小段读数。 */
+  /** 放进应用现有位置的组件。目前只有输入框上面那条栏的右端：`composer.actions`，一行高，适合一个按钮或一小段读数。 */
   slots?: {
     'composer.actions'?: PluginComponent
   }
   /**
-   * 对话右侧的面板，每个插件最多一个。应用会在输入框下面加一个按钮来打开它，按钮上写的是 `title`
+   * 对话右侧的面板，每个插件最多一个。应用会在输入框上面那条栏的右端加一个按钮来打开它，按钮上写的是 `title`
    * （最长 16 个字）。面板收起时组件会卸载，需要保留的状态请放在组件外面，或者交给后台部分。
    */
   panel?: {

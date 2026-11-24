@@ -113,7 +113,8 @@ const PART_NAMES: Record<ShownPart, string> = {
   mcpTools: 'MCP 工具',
   system: '系统提示词',
   custom: '自定义提示词',
-  skills: 'Skills 列表'
+  skills: 'Skills 列表',
+  memory: '记忆'
 }
 
 /** How full the context is, as a state for colouring: nearly full is a warning, full an alarm. */
@@ -135,7 +136,8 @@ function ContextCard({
   compaction,
   busy,
   onSetWindow,
-  onCompact
+  onCompact,
+  onOpenMemory
 }: {
   stats: SessionStats
   info: ModelInfo | null
@@ -144,6 +146,8 @@ function ContextCard({
   busy: boolean
   onSetWindow: (tokens: number | null) => Promise<void>
   onCompact: () => void
+  /** Opens the memory's page, from the memory's part of the context. */
+  onOpenMemory?: () => void
 }) {
   /** The size being typed; null while none is. */
   const [draft, setDraft] = useState<string | null>(null)
@@ -194,7 +198,15 @@ function ContextCard({
             {view.parts.map(({ part, tokens: weight, share }) => (
               <div key={part} className="status-part">
                 <span className={`status-swatch status-part-${part}`} aria-hidden="true" />
-                <span className="status-part-name">{PART_NAMES[part]}</span>
+                {part === 'memory' && onOpenMemory ? (
+                  <span className="status-part-name">
+                    <button type="button" className="status-part-link" data-tip="打开记忆页" onClick={onOpenMemory}>
+                      {PART_NAMES[part]}
+                    </button>
+                  </span>
+                ) : (
+                  <span className="status-part-name">{PART_NAMES[part]}</span>
+                )}
                 <span className="status-value">{formatTokens(weight)}</span>
                 <span className="status-share">{formatShareFine(share)}</span>
               </div>
@@ -352,7 +364,8 @@ export function StatusRow({
   compaction,
   busy,
   onSetWindow,
-  onCompact
+  onCompact,
+  onOpenMemory
 }: {
   stats: SessionStats
   /** What is known of the model in use, the size of its context among it. */
@@ -367,6 +380,8 @@ export function StatusRow({
   onSetWindow: (tokens: number | null) => Promise<void>
   /** Has the conversation compacted now. */
   onCompact: () => void
+  /** Opens the memory's page, from the memory's part of the context. */
+  onOpenMemory?: () => void
 }) {
   /** The card that is open. A press opens one and closes it again; so do Escape and a press elsewhere. */
   const [shown, setShown] = useState<Which | null>(null)
@@ -433,7 +448,16 @@ export function StatusRow({
           </>
         }
       >
-        <ContextCard stats={stats} info={modelInfo} local={local} compaction={compaction} busy={busy} onSetWindow={onSetWindow} onCompact={onCompact} />
+        <ContextCard
+          stats={stats}
+          info={modelInfo}
+          local={local}
+          compaction={compaction}
+          busy={busy}
+          onSetWindow={onSetWindow}
+          onCompact={onCompact}
+          {...(onOpenMemory ? { onOpenMemory: () => (close(), onOpenMemory()) } : {})}
+        />
       </Widget>
     </div>
   )

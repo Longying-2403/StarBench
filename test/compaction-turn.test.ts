@@ -17,6 +17,7 @@ import { COMPACTION_DEFAULTS, SUMMARY_CLOSE, SUMMARY_OPEN } from '../src/shared/
 import { addCompaction, addStep, emptyStats, estimateTokens } from '../src/shared/stats.ts'
 import type { CompactionDone, StepMeasure } from '../src/shared/stats.ts'
 import type { AgentEvent, ChatMessage, CompactionMark, StoredMessage } from '../src/shared/types.ts'
+import { keptReply } from './kept-reply.ts'
 
 const chunk = (delta: object): string => `data: ${JSON.stringify({ id: 'x', object: 'chat.completion.chunk', choices: [{ index: 0, delta }] })}\n\n`
 /** What the service says a request cost, as the last piece of a streamed reply. */
@@ -130,7 +131,7 @@ test('tool results are cut to fit the context as they come, and the old ones are
   assert.deepEqual(typesOf(events).filter((t) => t.startsWith('compact')), ['compacted'])
   const told = events.find((e) => e.type === 'compacted')
   assert.deepEqual(told?.type === 'compacted' ? told.messages : null, messages.slice(0, 10), 'the page is handed the conversation with the mark in it')
-  assert.deepEqual(messages.at(-1), { role: 'assistant', content: 'done', origin: { provider: 'test', kind: 'openai-chat', model: 'fake' } })
+  assert.deepEqual(keptReply(messages.at(-1)), { role: 'assistant', content: 'done', origin: { provider: 'test', kind: 'openai-chat', model: 'fake' } })
 })
 
 test('a conversation that is mostly talk is summed up by the model before the next request, and goes on from the summary', async () => {
@@ -173,7 +174,7 @@ test('a conversation that is mostly talk is summed up by the model before the ne
   assert.equal(compactions.length, 1)
   assert.ok((compactions[0].parts.summary ?? 0) > 100, JSON.stringify(compactions[0].parts))
   assert.equal(compactions[0].cost?.model, 'fake')
-  assert.deepEqual(messages.at(-1), { role: 'assistant', content: 'ok', origin: { provider: 'test', kind: 'openai-chat', model: 'fake' } })
+  assert.deepEqual(keptReply(messages.at(-1)), { role: 'assistant', content: 'ok', origin: { provider: 'test', kind: 'openai-chat', model: 'fake' } })
 })
 
 test('a request the service turns down as too long is compacted and sent once more', async () => {

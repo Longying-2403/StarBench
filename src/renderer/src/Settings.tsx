@@ -1,13 +1,19 @@
 import { Fragment, useCallback, useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
-import { CHATGPT_HELP_URL, LOCAL_SERVERS, PROVIDER_KINDS, PROVIDER_PRESETS, isLocalAddress } from '../../shared/types.ts'
+import { CHATGPT_HELP_URL, LOCAL_SERVERS, PROVIDER_KINDS, PROVIDER_PRESETS, isLocalAddress, serviceHost } from '../../shared/types.ts'
 import { sendsKeySafely } from '../../shared/key-address.ts'
 import type { McpServerStatus, ModelChoice, ProviderInfo, ProviderKind, Settings, SkillInfo } from '../../shared/types.ts'
 import { ABOUT } from '../../shared/about.ts'
 import { CAP_MIN, SHARE_MAX, SHARE_MIN, isCap } from '../../shared/compaction.ts'
 import type { CompactionChange } from '../../shared/compaction.ts'
 import { formatTokens, readWindow } from '../../shared/stats.ts'
+import { THEMES } from '../../shared/theme.ts'
+import type { Theme } from '../../shared/theme.ts'
+import { signInOffer } from '../../shared/provider-choices.ts'
+import { AddProviderMenu } from './AddProviderMenu.tsx'
+import type { AddChoice } from './AddProviderMenu.tsx'
 import { ChatGptButton, ChatGptPane } from './ChatGptPane.tsx'
+import { CheckIcon, ChevronLeftIcon, MonitorIcon, MoonIcon, SunIcon } from './icons.tsx'
 import { Notice } from './Notice.tsx'
 import { errorText } from './util.ts'
 
@@ -21,6 +27,7 @@ const TABS = [
   { id: 'skills', label: 'Skills' },
   { id: 'mcp', label: 'MCP' },
   { id: 'general', label: '通用' },
+  { id: 'appearance', label: '外观' },
   { id: 'about', label: '关于' }
 ] as const
 type TabId = (typeof TABS)[number]['id']
@@ -60,12 +67,15 @@ interface Draft {
 }
 
 function ProviderForm({
+  title,
   draft,
   removable,
   planOffered,
   onBack,
   onChanged
 }: {
+  /** What the page is for: adding a service, or changing the one that is named. */
+  title: string
   draft: Draft
   /** The last provider stays. */
   removable: boolean
@@ -136,6 +146,13 @@ function ProviderForm({
 
   return (
     <form className="tab-body" onSubmit={submit}>
+      <div className="form-head">
+        <button type="button" className="btn btn-small page-back" onClick={onBack}>
+          <ChevronLeftIcon />
+          返回
+        </button>
+        <h2 className="form-title">{title}</h2>
+      </div>
       <label>
         名称
         <input value={name} onChange={(e) => setName(e.target.value)} placeholder="显示在模型列表里的名字" />
@@ -165,7 +182,7 @@ function ProviderForm({
                 type="button"
                 className="btn btn-small"
                 aria-pressed={baseURL.trim() === server.baseURL}
-                title={server.baseURL}
+                data-tip={server.baseURL}
                 onClick={() => pickServer(server)}
               >
                 {server.name}
@@ -234,12 +251,28 @@ function ProviderForm({
 }
 
 /** What the tab shows in place of the list: the form of a provider with a key, or the pane of a ChatGPT sign-in. */
-type Editing = { type: 'key'; draft: Draft } | { type: 'chatgpt'; providerId?: string; autoStart?: boolean } | null
+type Editing = { type: 'key'; title: string; draft: Draft } | { type: 'chatgpt'; providerId?: string; autoStart?: boolean } | null
 
 const editingOf = (provider: ProviderInfo): Editing =>
   provider.auth === 'chatgpt'
     ? { type: 'chatgpt', providerId: provider.id }
-    : { type: 'key', draft: { ...provider, keyHint: PROVIDER_PRESETS.find((p) => p.id === provider.id)?.keyHint ?? '' } }
+    : {
+        type: 'key',
+        title: `编辑 ${provider.name}`,
+        // What a key of the service looks like, for each provider that talks to it: there may be more than one.
+        draft: { ...provider, keyHint: PROVIDER_PRESETS.find((p) => serviceHost(p.baseURL) === serviceHost(provider.baseURL))?.keyHint ?? '' }
+      }
+
+/** What the page for a new provider starts with, for each entry of "添加模型" that leads to the form. */
+const adding = (choice: Exclude<AddChoice, { type: 'signin' }>): Editing => {
+  if (choice.type === 'preset') {
+    const { preset, name } = choice.offer
+    return { type: 'key', title: `添加 ${preset.name}`, draft: { ...preset, id: undefined, name, hasApiKey: false } }
+  }
+  // A model server on one's own computer: the form starts at the most common one and offers the others.
+  if (choice.type === 'local') return { type: 'key', title: '添加本地模型', draft: { ...LOCAL_SERVERS[0], kind: 'openai-chat', model: '', hasApiKey: false, keyHint: '' } }
+  return { type: 'key', title: '添加其他服务', draft: { name: '', kind: 'openai-chat', baseURL: '', model: '', hasApiKey: false, keyHint: '' } }
+}
 
 /** The words for what a provider still needs before it can be used; empty when it needs nothing. */
 function missing(provider: ProviderInfo): string {
@@ -282,6 +315,7 @@ function ProvidersTab({
       <ProviderForm
         // A fresh form for each provider, so nothing typed for one shows up in another.
         key={editing.draft.id ?? `new-${editing.draft.name}`}
+        title={editing.title}
         draft={editing.draft}
         removable={settings.providers.length > 1}
         planOffered={!hasPlan}
@@ -291,12 +325,20 @@ function ProvidersTab({
     )
   }
 
-  const taken = new Set(settings.providers.map((p) => p.id))
+  const add = (choice: AddChoice): void => {
+    if (choice.type !== 'signin') return setEditing(adding(choice))
+    // There is one sign-in with an OpenAI account at most: where a provider is one, its own page is where to go on.
+    const { providerId } = signInOffer(settings.providers)
+    setEditing({ type: 'chatgpt', ...(providerId ? { providerId } : {}) })
+  }
   return (
     <div className="tab-body">
-      <p className="hint">
-        可以添加多个模型服务，各用各的 API Key，也可以用 ChatGPT 套餐登录，或者连接自己电脑上运行的本地模型。用哪个模型，在输入框右下角点模型名切换。
-      </p>
+      <div className="tab-head">
+        <p className="hint">
+          可以添加多个模型服务，各用各的 API Key，也可以用 ChatGPT 套餐登录，或者连接自己电脑上运行的本地模型。用哪个模型，在输入框右下角点模型名切换。
+        </p>
+        <AddProviderMenu providers={settings.providers} onChoose={add} />
+      </div>
       <ul className="rows">
         {settings.providers.map((provider) => (
           <li key={provider.id} className="row">
@@ -317,33 +359,6 @@ function ProvidersTab({
           </li>
         ))}
       </ul>
-      <div className="toolbar toolbar-wrap">
-        <span className="hint">添加：</span>
-        {PROVIDER_PRESETS.filter((preset) => !taken.has(preset.id)).map((preset) => (
-          <button
-            key={preset.id}
-            className="btn btn-small"
-            onClick={() => setEditing({ type: 'key', draft: { ...preset, id: undefined, hasApiKey: false } })}
-          >
-            {preset.name}
-          </button>
-        ))}
-        {/* A model server on one's own computer: the form starts at the most common one and offers the others. */}
-        <button
-          className="btn btn-small"
-          onClick={() =>
-            setEditing({ type: 'key', draft: { ...LOCAL_SERVERS[0], kind: 'openai-chat', model: '', hasApiKey: false, keyHint: '' } })
-          }
-        >
-          本地模型
-        </button>
-        <button
-          className="btn btn-small"
-          onClick={() => setEditing({ type: 'key', draft: { name: '', kind: 'openai-chat', baseURL: '', model: '', hasApiKey: false, keyHint: '' } })}
-        >
-          其他服务
-        </button>
-      </div>
       {!hasPlan && (
         <div className="plan-card">
           <div className="plan-title">使用你的 ChatGPT 套餐</div>
@@ -399,11 +414,16 @@ function SkillsTab() {
               <div className="row-title">
                 {skill.name}
                 {skill.source === 'builtin' ? (
-                  <span className="badge" title="随应用一起安装的 Skill">
+                  <span className="badge" data-tip="随应用一起安装的 Skill">
                     内置
                   </span>
                 ) : (
-                  <span className="row-meta">{skill.source === 'user' ? '我的 Skill' : `来自插件 ${skill.source}`}</span>
+                  <span className="row-meta">{skill.source === 'user' ? '我的 Skill' : skill.source === 'memory' ? '来自记忆（内置功能）' : `来自插件 ${skill.source}`}</span>
+                )}
+                {skill.userOnly && (
+                  <span className="badge" data-tip="只由你选用：在输入框里输入 / 或从 + 的“指令”里选，不放进发给模型的 Skills 清单">
+                    指令
+                  </span>
                 )}
               </div>
               <div className="row-desc">{skill.description || '（没有填写说明，模型无法判断何时使用它）'}</div>
@@ -621,6 +641,24 @@ function GeneralTab({ settings, onChanged }: { settings: Settings; onChanged: (s
       </label>
       <label className="setting-row">
         <span className="setting-words">
+          <span className="setting-name">自动给对话起标题</span>
+          <span className="hint">
+            第一轮对话结束后，让当前模型根据你的第一条消息和回答的开头起一个简短的标题，代替侧栏里原来截取的开头几个字。每个对话只起一次：为此多发一个很小的请求，不带工具、不联网，也不计入对话的用量统计。你自己改过名的对话不会被覆盖。关掉后，标题就是第一条消息的开头。
+          </span>
+        </span>
+        <input
+          type="checkbox"
+          role="switch"
+          className="switch"
+          checked={settings.titles}
+          onChange={(e) => {
+            setError('')
+            api.setTitles(e.target.checked).then(onChanged, (err) => setError(errorText(err)))
+          }}
+        />
+      </label>
+      <label className="setting-row">
+        <span className="setting-words">
           <span className="setting-name">自动压缩上下文</span>
           <span className="hint">
             对话快要占满模型的上下文时，先把较早的工具结果从发给模型的内容里清掉；还不够，再让当前模型把较早的对话写成摘要，只把最近的部分原样保留。屏幕上的对话记录不会少。关掉后，只在你点上下文小工具里的"立即压缩"，或者模型服务报告对话太长时才压缩。
@@ -688,6 +726,106 @@ function GeneralTab({ settings, onChanged }: { settings: Settings; onChanged: (s
   )
 }
 
+const THEME_NAMES: Record<Theme, string> = { system: '跟随系统', light: '浅色', dark: '深色' }
+
+/** One of the app's two looks, in small: the list at the left, something said and what was answered, and the message box. */
+function Look({ look, bare }: { look: 'dark' | 'light'; /** Without the list at the left, where two looks share one picture. */ bare?: boolean }) {
+  return (
+    <span className="theme-look" data-look={look}>
+      {!bare && <span className="theme-look-side" />}
+      <span className="theme-look-main">
+        <span className="theme-look-said" />
+        <span className="theme-look-answer" />
+        <span className="theme-look-box" />
+      </span>
+    </span>
+  )
+}
+
+/** How the app looks: in its dark colours, in its light ones, or as the system is set. Chosen from pictures; it holds at once. */
+function AppearanceTab({ settings, onChanged }: { settings: Settings; onChanged: (s: Settings) => void }) {
+  const [error, setError] = useState('')
+  const choose = (theme: Theme): void => {
+    setError('')
+    api.setTheme(theme).then(onChanged, (err) => setError(errorText(err)))
+  }
+  return (
+    <div className="tab-body">
+      <div className="setting-name" id="theme-title">
+        主题
+      </div>
+      <div
+        className="theme-choices"
+        role="radiogroup"
+        aria-labelledby="theme-title"
+        onKeyDown={(e) => {
+          // As among radio buttons: an arrow key moves on to the next look and chooses it.
+          const step = e.key === 'ArrowRight' || e.key === 'ArrowDown' ? 1 : e.key === 'ArrowLeft' || e.key === 'ArrowUp' ? -1 : 0
+          if (!step) return
+          e.preventDefault()
+          const next = THEMES[(THEMES.indexOf(settings.theme) + step + THEMES.length) % THEMES.length]
+          choose(next)
+          e.currentTarget.querySelector<HTMLElement>(`[data-choice="${next}"]`)?.focus()
+        }}
+      >
+        {THEMES.map((theme) => (
+          <button
+            key={theme}
+            type="button"
+            role="radio"
+            aria-checked={settings.theme === theme}
+            // One stop for the Tab key, at the look in use; the arrows go on from there.
+            tabIndex={settings.theme === theme ? 0 : -1}
+            data-choice={theme}
+            className="theme-choice"
+            onClick={() => choose(theme)}
+          >
+            <span className="theme-picture" aria-hidden="true">
+              {theme === 'system' ? (
+                <>
+                  <Look look="dark" bare />
+                  <Look look="light" bare />
+                </>
+              ) : (
+                <Look look={theme} />
+              )}
+            </span>
+            <span className="theme-choice-name">
+              {theme === 'system' ? <MonitorIcon /> : theme === 'light' ? <SunIcon /> : <MoonIcon />}
+              {THEME_NAMES[theme]}
+              {settings.theme === theme && (
+                <span className="theme-check">
+                  <CheckIcon />
+                </span>
+              )}
+            </span>
+          </button>
+        ))}
+      </div>
+      <label className="setting-row">
+        <span className="setting-words">
+          <span className="setting-name">侧栏里显示每个对话的更新时间</span>
+        </span>
+        <input
+          type="checkbox"
+          role="switch"
+          className="switch"
+          checked={settings.sessionTimes}
+          onChange={(e) => {
+            setError('')
+            api.setSessionTimes(e.target.checked).then(onChanged, (err) => setError(errorText(err)))
+          }}
+        />
+      </label>
+      {error && (
+        <div className="msg-error" role="alert">
+          {error}
+        </div>
+      )}
+    </div>
+  )
+}
+
 /** What the app is, which version is running, where its code is, where to report a problem, and who makes it. */
 function AboutTab() {
   const [version, setVersion] = useState('')
@@ -735,56 +873,52 @@ function AboutTab() {
   )
 }
 
-export function SettingsDialog({
+/**
+ * The settings, as a page in the main part of the window, like the plugins: its sections in a
+ * column at the left, the one that is open beside them. Reached from the sidebar and from the
+ * places that send the person here (no key yet, a sign-in that ended, the model card).
+ */
+export function SettingsPage({
   settings,
-  onClose,
+  onBack,
   onSaved,
   onWelcome
 }: {
   settings: Settings
-  onClose: () => void
+  /** Goes back to the conversation. */
+  onBack: () => void
   onSaved: (s: Settings) => void
   /** The first ChatGPT sign-in with plan usage has just succeeded. */
   onWelcome: () => void
 }) {
   const [tab, setTab] = useState<TabId>('model')
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent): void => {
-      if (e.key === 'Escape') onClose()
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [onClose])
-
   return (
-    <div className="overlay" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="dialog" role="dialog" aria-modal="true" aria-label="设置">
-        <div className="dialog-head">
-          <h2>设置</h2>
-          <button className="icon-btn" onClick={onClose} aria-label="关闭设置">
-            ×
-          </button>
-        </div>
-        <div className="tabs" role="tablist">
+    <>
+      <header className="page-head">
+        <button className="btn btn-small page-back" onClick={onBack}>
+          <ChevronLeftIcon />
+          返回对话
+        </button>
+        <h1 id="settings-title">设置</h1>
+      </header>
+      <div className="settings-page">
+        <div className="settings-tabs" role="tablist" aria-label="设置的分页" aria-orientation="vertical">
           {TABS.map((t) => (
-            <button
-              key={t.id}
-              role="tab"
-              aria-selected={tab === t.id}
-              className={`tab ${tab === t.id ? 'tab-active' : ''}`}
-              onClick={() => setTab(t.id)}
-            >
+            <button key={t.id} type="button" role="tab" id={`settings-tab-${t.id}`} aria-selected={tab === t.id} className="settings-tab" onClick={() => setTab(t.id)}>
               {t.label}
             </button>
           ))}
         </div>
-        {tab === 'model' && <ProvidersTab settings={settings} onChanged={onSaved} onWelcome={onWelcome} />}
-        {tab === 'skills' && <SkillsTab />}
-        {tab === 'mcp' && <McpTab />}
-        {tab === 'general' && <GeneralTab settings={settings} onChanged={onSaved} />}
-        {tab === 'about' && <AboutTab />}
+        <div className="settings-pane" role="tabpanel" aria-labelledby={`settings-tab-${tab}`}>
+          {tab === 'model' && <ProvidersTab settings={settings} onChanged={onSaved} onWelcome={onWelcome} />}
+          {tab === 'skills' && <SkillsTab />}
+          {tab === 'mcp' && <McpTab />}
+          {tab === 'general' && <GeneralTab settings={settings} onChanged={onSaved} />}
+          {tab === 'appearance' && <AppearanceTab settings={settings} onChanged={onSaved} />}
+          {tab === 'about' && <AboutTab />}
+        </div>
       </div>
-    </div>
+    </>
   )
 }

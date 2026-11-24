@@ -95,7 +95,7 @@ export function AttachmentRow({ files, onRemove, sent }: { files: readonly Attac
   return (
     <div className={`attach-row${sent ? ' attach-row-sent' : ''}`}>
       {files.map((file, index) => (
-        <span key={index} className={`attach attach-${file.kind}`} title={file.name}>
+        <span key={index} className={`attach attach-${file.kind}`} data-tip={file.name}>
           {file.kind === 'image' ? (
             <img src={imageSrc(file)} alt={file.name} draggable={false} />
           ) : (
@@ -105,7 +105,7 @@ export function AttachmentRow({ files, onRemove, sent }: { files: readonly Attac
             </>
           )}
           {onRemove && (
-            <button type="button" className="attach-remove" onClick={() => onRemove(index)} aria-label={`移除 ${file.name}`} title="移除">
+            <button type="button" className="attach-remove" onClick={() => onRemove(index)} aria-label={`移除 ${file.name}`} data-tip="移除">
               ×
             </button>
           )}

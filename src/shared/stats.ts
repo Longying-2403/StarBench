@@ -29,9 +29,9 @@ const USAGE_KEYS = ['input', 'cacheRead', 'cacheWrite', 'output', 'reasoning'] a
  * shown: what the person and the model wrote; the summary that stands for the part of the
  * conversation that was compacted; the tool calls and what the tools returned; the definitions
  * of the tools of the app, of plugins and of MCP servers; the app's own instructions, the
- * person's, and the list of skills that goes with them.
+ * person's, the list of skills that goes with them, and what the memory tells the model.
  */
-export const CONTEXT_PARTS = ['messages', 'summary', 'toolResults', 'tools', 'pluginTools', 'mcpTools', 'system', 'custom', 'skills'] as const
+export const CONTEXT_PARTS = ['messages', 'summary', 'toolResults', 'tools', 'pluginTools', 'mcpTools', 'system', 'custom', 'skills', 'memory'] as const
 export type ContextPart = (typeof CONTEXT_PARTS)[number]
 
 /**

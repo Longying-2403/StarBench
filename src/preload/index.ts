@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
+import type { MemoryApi, MemoryEvent } from '../shared/memory.ts'
 import type { HarnessApi, SessionEvent } from '../shared/types.ts'
 
 const api: HarnessApi = {
@@ -17,6 +18,9 @@ const api: HarnessApi = {
   setWebSearch: (on) => ipcRenderer.invoke('settings:setWebSearch', on),
   setContextWindow: (providerId, model, tokens) => ipcRenderer.invoke('settings:setWindow', providerId, model, tokens),
   setStats: (on) => ipcRenderer.invoke('settings:setStats', on),
+  setTheme: (theme) => ipcRenderer.invoke('settings:setTheme', theme),
+  setTitles: (on) => ipcRenderer.invoke('settings:setTitles', on),
+  setSessionTimes: (on) => ipcRenderer.invoke('settings:setSessionTimes', on),
   setCompaction: (change) => ipcRenderer.invoke('settings:setCompaction', change),
   getModelInfo: () => ipcRenderer.invoke('models:info'),
   builtinPrompt: () => ipcRenderer.invoke('prompt:builtin'),
@@ -73,3 +77,23 @@ const api: HarnessApi = {
 }
 
 contextBridge.exposeInMainWorld('harness', api)
+
+/** The page's way to the memory (main/memory.ts), kept apart from the rest. */
+const memory: MemoryApi = {
+  state: () => ipcRenderer.invoke('memory:state'),
+  list: (workspace) => ipcRenderer.invoke('memory:list', workspace),
+  save: (input) => ipcRenderer.invoke('memory:save', input),
+  remove: (ref) => ipcRenderer.invoke('memory:remove', ref),
+  undo: (changeId) => ipcRenderer.invoke('memory:undo', changeId),
+  setEnabled: (on) => ipcRenderer.invoke('memory:setEnabled', on),
+  setBudget: (tokens) => ipcRenderer.invoke('memory:setBudget', tokens),
+  setProviderMode: (providerId, mode) => ipcRenderer.invoke('memory:setProviderMode', providerId, mode),
+  openFolder: () => ipcRenderer.invoke('memory:openFolder'),
+  onEvent: (listener) => {
+    const handler = (_: unknown, event: MemoryEvent): void => listener(event)
+    ipcRenderer.on('memory:event', handler)
+    return () => ipcRenderer.removeListener('memory:event', handler)
+  }
+}
+
+contextBridge.exposeInMainWorld('memory', memory)

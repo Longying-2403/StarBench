@@ -5,12 +5,15 @@ import type { Attachment } from '../../shared/attachments.ts'
 import type { AgentEvent, CompactionMark, ErrorHint, StoredMessage, ToolCall, WebActivity } from '../../shared/types.ts'
 
 export type Item =
-  /** `skill` is the name of a skill the user picked for the message; `attachments` are the files put with it. */
-  | { kind: 'user'; text: string; skill?: string; attachments?: Attachment[] }
-  /** `open` is true while the model is still streaming into this message. */
-  | { kind: 'assistant'; reasoning: string; text: string; open: boolean }
-  /** `cleared`: the result is no longer sent to the model, to make room in its context. It is still shown. */
-  | { kind: 'tool'; call: ToolCall; output?: string; cleared?: boolean }
+  /** `skill` is the name of a skill the user picked for the message; `attachments` are the files put with it; `at` is when it was sent. */
+  | { kind: 'user'; text: string; skill?: string; attachments?: Attachment[]; at?: number }
+  /** `open` is true while the model is still streaming into this message; `at` is when it had finished. */
+  | { kind: 'assistant'; reasoning: string; text: string; open: boolean; at?: number }
+  /**
+   * `cleared`: the result is no longer sent to the model, to make room in its context. It is still shown.
+   * `at` is when the model had finished the reply the call was made in: a reply that is calls and no words leaves no other trace of it.
+   */
+  | { kind: 'tool'; call: ToolCall; output?: string; cleared?: boolean; at?: number }
   /** A web search or page read that the model's service did by itself, with its own search tool. */
   | { kind: 'web'; activity: WebActivity }
   /** `hint` marks errors that are shown with a way out instead of as plain text. */
@@ -29,11 +32,20 @@ const NOTICES: Record<Extract<AgentEvent, { type: 'notice' }>['code'], string> =
   'images-refused': '这个模型不能看图片，所以图片没有发给它，只告诉了它图片的文件名。换成能看图的模型后，这个对话里的图片会照常发送。'
 }
 
+/** A moment, as a part of an item that is only there when the moment is known. */
+const timed = (at: number | undefined): { at?: number } => (at !== undefined ? { at } : {})
+
 export function itemsFromMessages(messages: readonly StoredMessage[]): Item[] {
   const items: Item[] = []
   for (const message of messages) {
     if (message.role === 'user') {
-      items.push({ kind: 'user', text: message.content, skill: message.skill?.name, ...(message.attachments?.length ? { attachments: message.attachments } : {}) })
+      items.push({
+        kind: 'user',
+        text: message.content,
+        skill: message.skill?.name,
+        ...(message.attachments?.length ? { attachments: message.attachments } : {}),
+        ...timed(message.at)
+      })
     } else if (message.role === 'assistant') {
       // The service's own searches stand above what it wrote with them, as they did while it wrote.
       for (const activity of message.web ?? []) items.push({ kind: 'web', activity })
@@ -42,10 +54,11 @@ export function itemsFromMessages(messages: readonly StoredMessage[]): Item[] {
           kind: 'assistant',
           reasoning: message.reasoning_content ?? '',
           text: message.content,
-          open: false
+          open: false,
+          ...timed(message.at)
         })
       }
-      for (const call of message.tool_calls ?? []) items.push({ kind: 'tool', call })
+      for (const call of message.tool_calls ?? []) items.push({ kind: 'tool', call, ...timed(message.at) })
     } else if (message.role === 'compaction') {
       items.push({ kind: 'mark', mark: message })
     } else {
@@ -65,10 +78,39 @@ export function lastSummaryAt(items: readonly Item[]): number {
   return items.findLastIndex((item) => item.kind === 'mark' && item.mark.summary !== undefined)
 }
 
+/**
+ * Where the model's part of each turn that is over ends, and when: the place of the last thing it
+ * wrote in the turn (an answer, or a call), and the moment it had finished it. What may stand
+ * after that in the turn (an error, a notice, the line of a compaction) is not of the model, so
+ * the time goes above it. A turn is what follows a message of the person, up to their next one.
+ * The turn that is still under way (`running`) has no end yet, and a turn in which the model wrote
+ * nothing, or of which no time was kept, is not in here.
+ */
+export function turnEnds(items: readonly Item[], running: boolean): Map<number, number> {
+  const ends = new Map<number, number>()
+  let last = -1
+  let finished = 0
+  const close = (): void => {
+    if (last >= 0) ends.set(last, finished)
+    last = -1
+    finished = 0
+  }
+  items.forEach((item, index) => {
+    if (item.kind === 'user') close()
+    else if ((item.kind === 'assistant' || item.kind === 'tool') && item.at !== undefined) {
+      last = index
+      finished = Math.max(finished, item.at)
+    }
+  })
+  if (!running) close()
+  return ends
+}
+
+/** `at` is the time by the clock of the page, for what the action brings about: a message sent, a reply finished. */
 export type ItemsAction =
   | { type: 'reset'; items: Item[] }
-  | { type: 'user'; text: string; skill?: string; attachments?: Attachment[] }
-  | { type: 'event'; event: AgentEvent }
+  | { type: 'user'; text: string; skill?: string; attachments?: Attachment[]; at?: number }
+  | { type: 'event'; event: AgentEvent; at?: number }
 
 function appendDelta(items: Item[], field: 'reasoning' | 'text', text: string): Item[] {
   const last = items.at(-1)
@@ -80,7 +122,9 @@ function appendDelta(items: Item[], field: 'reasoning' | 'text', text: string): 
 
 export function itemsReducer(items: Item[], action: ItemsAction): Item[] {
   if (action.type === 'reset') return action.items
-  if (action.type === 'user') return [...items, { kind: 'user', text: action.text, skill: action.skill, ...(action.attachments?.length ? { attachments: action.attachments } : {}) }]
+  if (action.type === 'user') {
+    return [...items, { kind: 'user', text: action.text, skill: action.skill, ...(action.attachments?.length ? { attachments: action.attachments } : {}), ...timed(action.at) }]
+  }
 
   const { event } = action
   switch (event.type) {
@@ -98,9 +142,10 @@ export function itemsReducer(items: Item[], action: ItemsAction): Item[] {
     }
     case 'assistant_done':
     case 'turn_end':
-      return items.map((i) => (i.kind === 'assistant' && i.open ? { ...i, open: false } : i))
+      // What was being written is finished, and that is when it was.
+      return items.map((i) => (i.kind === 'assistant' && i.open ? { ...i, open: false, ...timed(action.at) } : i))
     case 'tool_start':
-      return [...items, { kind: 'tool', call: event.call }]
+      return [...items, { kind: 'tool', call: event.call, ...timed(action.at) }]
     case 'tool_result':
       return items.map((i) => (i.kind === 'tool' && i.call.id === event.id ? { ...i, output: event.output } : i))
     case 'web_activity': {

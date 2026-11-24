@@ -20,6 +20,7 @@ import type { ExchangeDraft } from '../src/main/trace.ts'
 import type { StepMeasure } from '../src/shared/stats.ts'
 import { routesByConversation, usualEfforts } from '../src/shared/types.ts'
 import type { AgentEvent, ChatMessage, ProviderKind } from '../src/shared/types.ts'
+import { keptReply } from './kept-reply.ts'
 
 interface Seen {
   method: string
@@ -220,7 +221,7 @@ test('the Responses API: reasoning, a tool call and the answer', async () => {
   assert.deepEqual([first.body.prompt_cache_key, first.headers['x-grok-conv-id'], second.body.prompt_cache_key], [undefined, undefined, undefined])
   assert.deepEqual(watched.map((exchange) => exchange.request.headers), [undefined, undefined])
 
-  assert.deepEqual(messages[1], {
+  assert.deepEqual(keptReply(messages[1]), {
     role: 'assistant',
     content: '',
     reasoning_content: 'Need the file.',
@@ -266,7 +267,7 @@ test('the Responses API: summaries that are refused are done without, and a cut-
   assert.deepEqual(second.toolResults, [], 'no tool ran')
   assert.match(second.errors[0], /ran out of output space/)
   assert.equal(cut.posts().length, 1)
-  assert.deepEqual(messages[1], { role: 'assistant', content: 'Let me save that', origin: { provider: 'p1', kind: 'openai-responses', model: 'model-x' } })
+  assert.deepEqual(keptReply(messages[1]), { role: 'assistant', content: 'Let me save that', origin: { provider: 'p1', kind: 'openai-responses', model: 'model-x' } })
 })
 
 /** The stream of one Claude message, block by block, as the Messages API sends it. */
@@ -398,7 +399,7 @@ test('the Messages API: a refusal and a cut-off tool call stop the turn without 
   const first = await turn(conn, refused)
   assert.deepEqual(first.errors, ['The model declined this request (cyber).'])
   assert.deepEqual(first.toolResults, [])
-  assert.deepEqual(refused[1], { role: 'assistant', content: 'I can', origin: { provider: 'p1', kind: 'anthropic', model: 'model-x' } })
+  assert.deepEqual(keptReply(refused[1]), { role: 'assistant', content: 'I can', origin: { provider: 'p1', kind: 'anthropic', model: 'model-x' } })
   // The model could not be looked up, so the request used the defaults.
   assert.equal(service.posts()[0].body.max_tokens, 64_000)
   assert.deepEqual(service.posts()[0].body.thinking, { type: 'adaptive', display: 'summarized' })
@@ -714,7 +715,7 @@ test('a reply that is stopped while it streams keeps its text and thinking, and 
   )
   const first: ChatMessage[] = [{ role: 'user', content: 'save it' }]
   assert.deepEqual(kinds(await run(handing.baseURL, first, true)), ['assistant_done', 'turn_end'], 'no tool was started and nothing is reported as an error')
-  assert.deepEqual(first[1], { role: 'assistant', content: 'Let me save that.', reasoning_content: 'I should save it.', origin })
+  assert.deepEqual(keptReply(first[1]), { role: 'assistant', content: 'Let me save that.', reasoning_content: 'I should save it.', origin })
   // So the next request carries no call with half its arguments, which a server may refuse to read.
   first.push({ role: 'user', content: 'and now?' })
   await run(handing.baseURL, first, false)
@@ -739,7 +740,7 @@ test('a reply that is stopped while it streams keeps its text and thinking, and 
   assert.deepEqual([(third[1] as typeof kept).content, (third[1] as typeof kept).reasoning_content?.trim()], ['Done.', 'Planning the answer.'])
   third.push({ role: 'user', content: 'two' })
   assert.deepEqual(kinds(await run(thinker.baseURL, third, true)), ['assistant_done', 'turn_end'])
-  assert.deepEqual(third[3], { role: 'assistant', content: '', reasoning_content: 'Still weighing the options', origin: { ...origin, replay: { thinking: 'inline' } } })
+  assert.deepEqual(keptReply(third[3]), { role: 'assistant', content: '', reasoning_content: 'Still weighing the options', origin: { ...origin, replay: { thinking: 'inline' } } })
   third.push({ role: 'user', content: 'three' })
   const after = await run(thinker.baseURL, third, false)
   assert.deepEqual([(third[5] as typeof kept).content, (third[5] as typeof kept).reasoning_content?.trim()], ['Fine.', 'One more thought.'])

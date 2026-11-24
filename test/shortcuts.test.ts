@@ -26,6 +26,19 @@ test('on a Mac the shortcuts are on ⌘', () => {
   assert.equal(pressed(press('k', { metaKey: true, ctrlKey: true }), keys, true), false)
 })
 
+test('the sidebar is folded away and opened again with Ctrl+B, and no two shortcuts are on the same keys', () => {
+  const { keys } = SHORTCUTS.sidebar
+  assert.equal(keys, 'Mod+B')
+  assert.equal(pressed(press('b', { ctrlKey: true }), keys, false), true)
+  assert.equal(pressed(press('b', { metaKey: true }), keys, true), true)
+  assert.equal(pressed(press('b'), keys, false), false, 'typing a b is not a shortcut')
+  assert.equal(pressed(press('b', { ctrlKey: true }), SHORTCUTS.search.keys, false), false)
+  assert.equal(keysLabel(keys, false), 'Ctrl B')
+
+  const all = Object.values(SHORTCUTS).map((shortcut) => shortcut.keys.toLowerCase())
+  assert.equal(new Set(all).size, all.length, all.join(', '))
+})
+
 test('combinations with more to them are read the same way', () => {
   assert.equal(pressed(press('P', { ctrlKey: true, shiftKey: true }), 'Mod+Shift+P', false), true)
   assert.equal(pressed(press('p', { ctrlKey: true }), 'Mod+Shift+P', false), false)

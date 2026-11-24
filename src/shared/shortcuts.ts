@@ -10,7 +10,9 @@ export type Keys = string
 
 export const SHORTCUTS = {
   /** Puts the cursor into the box that searches the conversations. */
-  search: { keys: 'Mod+K', label: '搜索对话' }
+  search: { keys: 'Mod+K', label: '搜索对话' },
+  /** Folds the sidebar away to a strip, or opens it again. */
+  sidebar: { keys: 'Mod+B', label: '收起或展开侧边栏' }
 } as const satisfies Record<string, { keys: Keys; label: string }>
 
 export type ShortcutId = keyof typeof SHORTCUTS

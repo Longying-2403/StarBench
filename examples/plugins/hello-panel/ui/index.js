@@ -61,7 +61,7 @@ export default function setup({ React, controls, backend }) {
   }
 
   return {
-    // 对话右侧的面板。应用会在输入框下面加一个写着 title 的按钮来打开它。
+    // 对话右侧的面板。应用会在输入框上面那条栏的右端加一个写着 title 的按钮来打开它。
     panel: { title: '示例面板', component: Panel },
     // 界面被撤掉（停用或重新加载）时调用：把自己开的东西停掉。
     dispose: stopListening

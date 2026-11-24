@@ -48,11 +48,25 @@ export interface TurnOptions {
   messages: StoredMessage[]
   /** Extra system prompt text, such as the list of available skills. */
   systemExtra?: string
+  /**
+   * What the memory tells the model, which goes last in the instructions (main/memory.ts). The
+   * same at every step of a turn, and at every turn of a conversation unless the notes it sees
+   * changed: the start of the requests stays as it was, for the services' caches.
+   */
+  memory?: string
   /** A name for this conversation that tells nothing else about it; see `ModelRequest.conversation`. */
   conversation?: string
   signal: AbortSignal
   /** Read on every model request, so tools added mid-turn are picked up at the next step. */
-  tools: Pick<ToolRegistry, 'specs' | 'needsPermission' | 'execute'> & Partial<Pick<ToolRegistry, 'list' | 'accessOf'>>
+  tools: Pick<ToolRegistry, 'specs' | 'needsPermission' | 'execute'> &
+    Partial<Pick<ToolRegistry, 'list' | 'accessOf'>> & {
+      /**
+       * Whether a call has to be asked about although the conversation would let it run: a note
+       * the memory is to keep that looks as if it holds a secret or personal data. A call the
+       * conversation does not let run at all is still not run.
+       */
+      mustAsk?(name: string, rawArgs: string): boolean
+    }
   /** Asked on every model request for the fields plugins add to it, so a changed setting counts from the next step. */
   sampling?: Pick<SamplingRegistry, 'paramsFor'>
   /** Tool names the user chose to always allow; owned by the caller so it outlives one turn. */
@@ -120,8 +134,10 @@ export interface PromptParts {
   model?: { id: string; provider?: string }
   /** The person's own instructions for the provider in use. */
   custom?: CustomPrompt
-  /** What goes last, such as the list of skills. */
+  /** What goes after the instructions, such as the list of skills. */
   extra?: string
+  /** What the memory tells the model: last of all, after the skills, also where the person's own instructions stand in place of the app's. */
+  memory?: string
   /** The language the person writes in, where their writing shows it (`languageOf`): the model is asked to think in it. */
   language?: string
   /** The model can search the web with its service's own tool (`Connection.webSearch`). */
@@ -208,6 +224,7 @@ export function systemPrompt(parts: PromptParts): string {
   const custom = parts.custom?.text.trim()
   const sections = custom && parts.custom?.replace ? [custom, surroundings(parts).join('\n')] : [ownInstructions(parts), ...(custom ? [custom] : [])]
   if (parts.extra) sections.push(parts.extra)
+  if (parts.memory) sections.push(parts.memory)
   return sections.join('\n\n')
 }
 
@@ -236,13 +253,15 @@ async function runToolCall(call: ToolCall, opts: TurnOptions): Promise<string> {
   const access = opts.tools.accessOf?.(call.name) ?? (opts.tools.needsPermission(call.name) ? 'other' : 'read')
   const ruling: Ruling = rulingFor(opts.permissionMode?.() ?? DEFAULT_PERMISSION_MODE, access)
   if (ruling === 'refuse') return VIEW_ONLY_RESULT
-  if (ruling === 'ask' && !opts.alwaysAllowed.has(call.name)) {
+  // Asked about whatever was allowed for the conversation: what the call holds is what it is asked about.
+  const forced = opts.tools.mustAsk?.(call.name, call.arguments) === true
+  if (forced || (ruling === 'ask' && !opts.alwaysAllowed.has(call.name))) {
     // The answer to a question that was asked stands, whatever the setting was changed to meanwhile.
     const decision = await opts.requestPermission(call)
     // A stop while the prompt was open ends the wait; that is a cancellation, not a refusal.
     if (opts.signal.aborted) return CANCELLED
     if (decision === 'deny') return DENIED
-    if (decision === 'always') opts.alwaysAllowed.add(call.name)
+    if (decision === 'always' && !forced) opts.alwaysAllowed.add(call.name)
   }
   // The time the tool takes to run, which begins once it was allowed. Many tools take less than a millisecond.
   const started = performance.now()
@@ -289,6 +308,35 @@ async function ask(adapter: ProviderAdapter, request: ModelRequest): Promise<Mod
     if (fresh === token) throw err
     return adapter.complete(withToken(fresh))
   }
+}
+
+/**
+ * Asks a model one thing that is about a conversation and no part of it, and resolves with what
+ * it wrote: the name the conversation is to go by (title.ts). The model is given no tools and no
+ * search, and is not asked for faster answers at their price. Nobody reads the reply as it comes,
+ * so it is taken whole or not at all (`ModelRequest.unattended`). Rejects when the service
+ * refuses, or cut the reply short.
+ */
+export async function askAside(job: { connection: Connection; system: string; text: string; signal: AbortSignal; trace?: TurnOptions['trace'] }): Promise<string> {
+  const connection: Connection = { ...job.connection, fast: false, webSearch: false }
+  const watch = job.trace?.active ? watchExchange(connection) : undefined
+  const bare: ModelRequest = {
+    connection,
+    system: job.system,
+    messages: [{ role: 'user', content: job.text }],
+    tools: [],
+    unattended: true,
+    signal: job.signal,
+    onText: () => {},
+    onReasoning: () => {}
+  }
+  const reply = await ask(adapterFor(connection.kind), watch ? watch.over(bare) : bare).catch((err: unknown) => {
+    if (watch) job.trace?.record(watch.failed(err))
+    throw err
+  })
+  if (watch) job.trace?.record(watch.done(reply))
+  if (reply.stopped) throw new Error(reply.stopped)
+  return reply.message.content
 }
 
 /** What a turn, or a compaction asked for by hand, knows of the conversation it works on, as it goes. */
@@ -340,7 +388,7 @@ function samplingOf(opts: TurnOptions, connection: Connection): ModelRequest['sa
 
 /** What tells the parts of a request apart when it is weighed. */
 function hintsOf(talk: Talk): MeterHints {
-  return { custom: talk.connection.prompt?.text, skills: talk.opts.systemExtra, toolKind: toolKinds(talk.opts.tools) }
+  return { custom: talk.connection.prompt?.text, skills: talk.opts.systemExtra, memory: talk.opts.memory, toolKind: toolKinds(talk.opts.tools) }
 }
 
 /** The next request, as things stand now. */
@@ -353,6 +401,7 @@ function requestOf(talk: Talk): ModelRequest {
       model: { id: connection.model, provider: connection.providerName },
       custom: connection.prompt,
       extra: opts.systemExtra,
+      memory: opts.memory,
       language: talk.language,
       webSearch: connection.webSearch
     }),
@@ -667,6 +716,8 @@ export async function runTurn(opts: TurnOptions): Promise<void> {
       // The same, found out while the reply was being written: what came of it is dropped, and the page shows the conversation anew.
       if (reply.tooLong && !opts.signal.aborted && (await makeRoom(talk, 'refused')).done) reply = await exchange()
       const { message: assistant, stopped } = reply
+      // When it was finished: the page says it under the last reply of the turn.
+      assistant.at = Date.now()
       if (assistant.content || assistant.tool_calls || assistant.reasoning_content || assistant.web?.length) stored.push(assistant)
       opts.emit({ type: 'assistant_done' })
       opts.checkpoint()

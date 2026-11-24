@@ -8,6 +8,7 @@ import path from 'node:path'
 import type { CompactionSettings } from '../shared/compaction.ts'
 import { DEFAULT_PERMISSION_MODE } from '../shared/permissions.ts'
 import type { PermissionMode } from '../shared/permissions.ts'
+import type { Theme } from '../shared/theme.ts'
 import type { ChatGptAccount, ProviderInput, ReasoningEffort, Session, SessionHit, SessionIcon, SessionSummary, Settings } from '../shared/types.ts'
 import { isReasoningEffort, isSessionIcon, offersFastMode, searchWorksAt, webSearchService } from '../shared/types.ts'
 import { OPENAI, canUsePlan, clientIsGone, newHostId, readRecord, refreshed, renewalDue, revoke, tokensAreDead } from './chatgpt/oauth.ts'
@@ -202,6 +203,31 @@ export function setStats(on: unknown): Promise<Settings> {
 /** Whether the app keeps count of what conversations cost. */
 export async function countsStats(): Promise<boolean> {
   return (await loadStored()).stats !== false
+}
+
+/** Chooses the look of the app. `theme` arrives over IPC; the settings model checks it. */
+export function setTheme(theme: unknown): Promise<Settings> {
+  return mutate((settings) => model.setTheme(settings, theme))
+}
+
+/** The look of the app that was chosen: dark, light, or as the system is set. */
+export async function themeChoice(): Promise<Theme> {
+  return model.themeOf(await loadStored())
+}
+
+/** Switches the naming of conversations by the model on or off. `on` arrives over IPC; anything but `true` turns it off. */
+export function setTitles(on: unknown): Promise<Settings> {
+  return mutate((settings) => model.setTitles(settings, on === true))
+}
+
+/** Whether a conversation is named by the model once its first turn is over. */
+export async function namesConversations(): Promise<boolean> {
+  return (await loadStored()).titles !== false
+}
+
+/** Shows, or no longer shows, under each conversation in the list when it was last gone on with. `on` arrives over IPC; anything but `true` turns it off. */
+export function setSessionTimes(on: unknown): Promise<Settings> {
+  return mutate((settings) => model.setSessionTimes(settings, on === true))
 }
 
 /** Changes whether, and from where on, conversations are compacted by themselves. The change arrives over IPC; the settings model checks it. */
@@ -537,35 +563,77 @@ export async function searchSessions(query: string): Promise<SessionHit[]> {
   )
 }
 
+/**
+ * What is done with the file of one session is done one thing after another. A change reads the
+ * file, alters what it read and writes that back: were another change to land in between, or a
+ * deletion, or a turn saving the session from memory, one of the two would be undone, or a
+ * session that was deleted would be there again.
+ */
+const sessionQueues = new Map<string, Promise<void>>()
+
+function oneByOne<T>(id: string, work: () => Promise<T>): Promise<T> {
+  // Whatever became of what went before: the next thing is done all the same.
+  const done = (sessionQueues.get(id) ?? Promise.resolve()).then(work, work)
+  const settled = done.then(
+    () => {},
+    () => {}
+  )
+  sessionQueues.set(id, settled)
+  void settled.then(() => {
+    if (sessionQueues.get(id) === settled) sessionQueues.delete(id)
+  })
+  return done
+}
+
+const readSession = async (id: string): Promise<Session | null> => readJson<Session>(sessionFile(id))
+const writeSession = async (session: Session): Promise<void> => writeJson(sessionFile(session.id), session)
+
 export function loadSession(id: string): Promise<Session | null> {
-  return readJson<Session>(sessionFile(id))
+  return oneByOne(id, () => readSession(id))
 }
 
 export function saveSession(session: Session): Promise<void> {
-  return writeJson(sessionFile(session.id), session)
+  return oneByOne(session.id, () => writeSession(session))
 }
 
 /**
  * Changes the name, the archived mark, the icon or the permission mode of a saved session; a null
  * icon takes the icon away. `updatedAt` stays, so the list keeps its order.
  */
-export async function updateSession(
+export function updateSession(
   id: string,
   change: { title?: string; archived?: boolean; icon?: SessionIcon | null; permissionMode?: PermissionMode }
 ): Promise<void> {
-  const session = await loadSession(id)
-  if (!session) throw new Error('This session no longer exists.')
-  if (change.title !== undefined) session.title = change.title
-  if (change.archived === true) session.archived = true
-  if (change.archived === false) delete session.archived
-  if (change.icon === null) delete session.icon
-  else if (change.icon !== undefined) session.icon = change.icon
-  // The mode a conversation starts with is not written down.
-  if (change.permissionMode === DEFAULT_PERMISSION_MODE) delete session.permissionMode
-  else if (change.permissionMode !== undefined) session.permissionMode = change.permissionMode
-  await saveSession(session)
+  return oneByOne(id, async () => {
+    const session = await readSession(id)
+    if (!session) throw new Error('This session no longer exists.')
+    if (change.title !== undefined) session.title = change.title
+    if (change.archived === true) session.archived = true
+    if (change.archived === false) delete session.archived
+    if (change.icon === null) delete session.icon
+    else if (change.icon !== undefined) session.icon = change.icon
+    // The mode a conversation starts with is not written down.
+    if (change.permissionMode === DEFAULT_PERMISSION_MODE) delete session.permissionMode
+    else if (change.permissionMode !== undefined) session.permissionMode = change.permissionMode
+    await writeSession(session)
+  })
 }
 
-export async function deleteSession(id: string): Promise<void> {
-  await fs.rm(sessionFile(id), { force: true })
+/**
+ * Gives a saved session the name `to`, where it still goes by `from`: a name the person has given
+ * it since is theirs to keep, and a session that is gone stays gone. `updatedAt` stays, as with
+ * every other change of a name. Resolves with whether the name was changed.
+ */
+export function retitleSession(id: string, from: string, to: string): Promise<boolean> {
+  return oneByOne(id, async () => {
+    const session = await readSession(id)
+    if (!session || session.title !== from) return false
+    session.title = to
+    await writeSession(session)
+    return true
+  })
+}
+
+export function deleteSession(id: string): Promise<void> {
+  return oneByOne(id, () => fs.rm(sessionFile(id), { force: true }))
 }

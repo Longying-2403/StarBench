@@ -62,7 +62,7 @@ export function ModeMenu({ mode, onChange }: { mode: PermissionMode; onChange: (
         aria-haspopup="menu"
         aria-expanded={open}
         aria-label={`权限：${current.name}`}
-        title={`权限：${current.name}。${current.about}`}
+        data-tip={`权限：${current.name}。${current.about}`}
         onClick={() => setOpen((now) => !now)}
       >
         <Current />

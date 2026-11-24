@@ -310,3 +310,85 @@ export function FileIcon() {
     </svg>
   )
 }
+
+/**
+ * The star of the app's own icon (build/icon.svg), four points drawn in one piece and filled. It
+ * stands beside the app's name on the first page; its size and colour are given where it is used.
+ */
+export function StarIcon() {
+  return (
+    <svg className="star" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+      <path d="M12 1Q14.14 9.86 23 12Q14.14 14.14 12 23Q9.86 14.14 1 12Q9.86 9.86 12 1Z" />
+    </svg>
+  )
+}
+
+/** The sun: the light look of the app. */
+export function SunIcon() {
+  return (
+    <svg {...line}>
+      <circle cx="12" cy="12" r="4" />
+      <path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6 7 7M17 17l1.4 1.4M5.6 18.4 7 17M17 7l1.4-1.4" />
+    </svg>
+  )
+}
+
+/** A crescent moon: the dark look of the app. */
+export function MoonIcon() {
+  return (
+    <svg {...line}>
+      <path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z" />
+    </svg>
+  )
+}
+
+/** A screen on its stand: the look the system is set to. */
+export function MonitorIcon() {
+  return (
+    <svg {...line}>
+      <rect x="3" y="4" width="18" height="12" rx="2" />
+      <path d="M8 20h8M12 16v4" />
+    </svg>
+  )
+}
+
+/**
+ * The app's own icon, as the window and the taskbar show it (build/icon.svg): a prompt and a
+ * star on a dark ground. It keeps its colours in either look of the app. Drawn once in the page
+ * at a time, since the ground is named by an id. A test holds it to that file.
+ */
+export function AppIcon() {
+  return (
+    <svg className="app-icon" viewBox="0 0 512 512" aria-hidden="true">
+      <defs>
+        <radialGradient id="app-icon-ground" cx="346" cy="286" r="360" gradientUnits="userSpaceOnUse">
+          <stop offset="0" stopColor="#22396c" />
+          <stop offset="1" stopColor="#111b35" />
+        </radialGradient>
+      </defs>
+      <rect width="512" height="512" rx="112" fill="url(#app-icon-ground)" />
+      <polyline points="116,176 212,256 116,336" fill="none" stroke="#fff" strokeWidth="44" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M346 214Q360 272 418 286Q360 300 346 358Q332 300 274 286Q332 272 346 214Z" fill="#5b8def" />
+    </svg>
+  )
+}
+
+/** A window with its left column marked off and an arrow into that column: the sidebar folds away. */
+export function FoldIcon() {
+  return (
+    <svg {...line}>
+      <rect x="3" y="4" width="18" height="16" rx="2" />
+      <path d="M9 4v16M16 10l-2 2 2 2" />
+    </svg>
+  )
+}
+
+/** The same window with the arrow out of the column: the sidebar opens again. */
+export function UnfoldIcon() {
+  return (
+    <svg {...line}>
+      <rect x="3" y="4" width="18" height="16" rx="2" />
+      <path d="M9 4v16M14 10l2 2-2 2" />
+    </svg>
+  )
+}

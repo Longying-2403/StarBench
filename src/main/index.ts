@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, net, protocol, shell } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, nativeTheme, net, protocol, shell } from 'electron'
 import { randomUUID } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
@@ -22,8 +22,9 @@ import { knownContextWindow } from '../shared/context-windows.ts'
 import { DEFAULT_PERMISSION_MODE, isPermissionMode } from '../shared/permissions.ts'
 import type { PermissionMode } from '../shared/permissions.ts'
 import { addCompaction, addStep, addToolTime, addTurn, emptyStats } from '../shared/stats.ts'
-import { isSessionIcon } from '../shared/types.ts'
-import { builtinPrompt, compactConversation, runTurn } from './agent.ts'
+import { DEFAULT_THEME } from '../shared/theme.ts'
+import { isLocalAddress, isSessionIcon } from '../shared/types.ts'
+import { askAside, builtinPrompt, compactConversation, runTurn } from './agent.ts'
 import type { RoomOptions } from './agent.ts'
 import { attachData, attachFiles } from './attachments.ts'
 import { conversationName } from './conversation-name.ts'
@@ -33,14 +34,19 @@ import { adapterFor } from './providers/index.ts'
 import type { Connection } from './providers/index.ts'
 import { createKernel } from './kernel.ts'
 import type { Kernel } from './kernel.ts'
+import { languageOf } from './language.ts'
 import { McpManager } from './mcp.ts'
+import { MemoryService, registerMemoryIpc } from './memory.ts'
+import type { MemoryTurn } from './memory.ts'
 import { mayGrant, mayNavigate } from './page-guard.ts'
 import { PluginChannel } from './plugin-channel.ts'
 import { PluginManager } from './plugins.ts'
 import { SamplingRegistry } from './sampling.ts'
 import { SkillStore, loadSkillTool, selectedSkillPrompt, skillsPrompt } from './skills.ts'
 import * as store from './store.ts'
+import { cleanTitle, titleEffort, titlePrompt, titleRecord } from './title.ts'
 import { ToolRegistry, registerBuiltinTools } from './tools.ts'
+import { barless, windowButtons, windowGround } from './window-look.ts'
 import { TraceRegistry } from './trace.ts'
 import { findNamed, howToOpen, readImage } from './workspace-files.ts'
 
@@ -94,6 +100,19 @@ const BUILTIN_SKILLS_DIR = process.env.STARBENCH_BUILTIN_SKILLS
   : path.join(app.isPackaged ? process.resourcesPath : app.getAppPath(), 'skills')
 const skills = new SkillStore(path.join(app.getPath('userData'), 'skills'), BUILTIN_SKILLS_DIR)
 tools.register(loadSkillTool(skills), 'builtin')
+/**
+ * The notes the model keeps from one conversation to the next (memory.ts), and the commands that
+ * come with them, offered while the memory is on: beside the app's own files once it is packaged,
+ * in the repository's `memory-commands/` folder until then.
+ */
+const memory = new MemoryService({
+  dir: path.join(app.getPath('userData'), 'memory'),
+  commandsDir: path.join(app.isPackaged ? process.resourcesPath : app.getAppPath(), 'memory-commands'),
+  skills,
+  windows: process.platform === 'win32',
+  workspaces: () => store.listWorkspaces(),
+  emit: (event) => mainWindow?.webContents.send('memory:event', event)
+})
 const mcp = new McpManager({
   configFile: path.join(app.getPath('userData'), 'mcp.json'),
   tools,
@@ -204,6 +223,7 @@ const PAGE_DIR = path.join(import.meta.dirname, '../renderer')
 const DEV_PAGE_URL = app.isPackaged ? undefined : process.env.ELECTRON_RENDERER_URL
 
 function createWindow(): void {
+  const dark = nativeTheme.shouldUseDarkColors
   mainWindow = new BrowserWindow({
     width: 1200,
     height: 800,
@@ -211,7 +231,11 @@ function createWindow(): void {
     minHeight: 480,
     show: false,
     autoHideMenuBar: true,
-    backgroundColor: '#16171a',
+    // What the window shows until the page has drawn: the page's own background, in the look that holds.
+    backgroundColor: windowGround(dark),
+    // On Windows the window has no title bar. The system draws its three buttons over the page's
+    // upper right corner, and the page keeps a strip clear for them (`--window-bar` in styles.css).
+    ...(barless(process.platform) ? { titleBarStyle: 'hidden' as const, titleBarOverlay: windowButtons(dark) } : {}),
     // A packaged build shows the icon embedded in the executable; in development Electron would show its own.
     icon: app.isPackaged ? undefined : path.join(app.getAppPath(), 'build/icon.png'),
     webPreferences: {
@@ -301,6 +325,94 @@ function servePluginUi(): void {
   })
 }
 
+/**
+ * A session that is in memory to be changed, by a turn or by a compaction, as that work has it.
+ * While it lasts, what is saved of the session is saved from there, and a change made to the
+ * file would be undone by the next save. So what else changes the session meanwhile changes it
+ * here, and has it saved from here.
+ */
+const liveSessions = new Map<string, { session: Session; checkpoint(): void; /** Resolves once what was last checkpointed is in the file. */ saved(): Promise<void> }>()
+/** Sessions on their way into memory: a message for one has arrived, and its turn has not begun yet. */
+const opening = new Set<string>()
+/** A name the model wrote for a session just then: handed to the session as it comes into memory. */
+const pendingTitles = new Map<string, { from: string; to: string }>()
+
+/**
+ * Gives a session the name the model wrote for it, where it still goes by `from`, the first
+ * words of the person: a name they gave it in the meantime is theirs to keep. The page is told
+ * once the name holds.
+ */
+async function applyTitle(id: string, from: string, to: string): Promise<void> {
+  const live = liveSessions.get(id)
+  if (live) {
+    if (live.session.title !== from) return
+    live.session.title = to
+    live.checkpoint()
+    // The page asks for the list as soon as it is told, and the list is read from the files: so first the file.
+    await live.saved()
+  } else if (opening.has(id)) {
+    // Said to the page when the session takes the name up (`takeTitle`).
+    pendingTitles.set(id, { from, to })
+    return
+  } else if (!(await store.retitleSession(id, from, to))) {
+    return
+  }
+  send({ sessionId: id, event: { type: 'titled', title: to } })
+}
+
+/** Takes up a name that was written for a session while it was on its way into memory. Says whether there was one to take. */
+function takeTitle(session: Session): boolean {
+  const waiting = pendingTitles.get(session.id)
+  pendingTitles.delete(session.id)
+  if (!waiting || session.title !== waiting.from) return false
+  session.title = waiting.to
+  return true
+}
+
+/** How long the model is given to write the name of a conversation, in milliseconds. Nobody waits for it; past this it is let be. */
+const TITLE_WAIT_MS = 45_000
+
+/**
+ * Has the model in use write a name for a conversation whose first turn is over (title.ts), and
+ * gives the conversation that name. One small request by itself: it is no part of the
+ * conversation, offers the model no tools, and is not counted among what the conversation cost.
+ * Whatever goes wrong with it, the conversation keeps the name it has, and the person is told nothing.
+ */
+async function nameConversation(session: Session, connection: Connection): Promise<void> {
+  const from = session.title
+  try {
+    if (!(await store.namesConversations())) return
+    // A turn that ended without an answer, stopped or failed, names nothing: the service may not be there to ask.
+    if (!session.messages.some((message) => message.role === 'assistant')) return
+    const record = titleRecord(session.messages)
+    if (!record) return
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), TITLE_WAIT_MS)
+    try {
+      const written = await askAside({
+        connection: { ...connection, reasoningEffort: titleEffort(connection) },
+        system: titlePrompt(languageOf(session.messages)),
+        text: record,
+        signal: controller.signal,
+        trace: {
+          get active() {
+            return trace.active
+          },
+          record: (exchange) => trace.emit(exchange, session.id)
+        }
+      })
+      // What had arrived of a reply that was given up on is no title.
+      if (controller.signal.aborted) return
+      const title = cleanTitle(written)
+      if (title && title !== from) await applyTitle(session.id, from, title)
+    } finally {
+      clearTimeout(timer)
+    }
+  } catch (err) {
+    console.error('[title] no name was written for a conversation:', err instanceof Error ? err.message : err)
+  }
+}
+
 function registerIpc(): void {
   ipcMain.handle('settings:get', () => store.getSettings())
   // For the About page: the version of the app that is running.
@@ -310,6 +422,14 @@ function registerIpc(): void {
   ipcMain.handle('settings:setWebSearch', (_e, on: unknown) => store.setWebSearch(on))
   ipcMain.handle('settings:setWindow', (_e, providerId: unknown, model: unknown, tokens: unknown) => store.setContextWindow(providerId, model, tokens))
   ipcMain.handle('settings:setStats', (_e, on: unknown) => store.setStats(on))
+  ipcMain.handle('settings:setTheme', async (_e, theme: unknown) => {
+    const settings = await store.setTheme(theme)
+    // The page, and whatever is drawn in it, goes by what the window says the look is.
+    nativeTheme.themeSource = settings.theme
+    return settings
+  })
+  ipcMain.handle('settings:setTitles', (_e, on: unknown) => store.setTitles(on))
+  ipcMain.handle('settings:setSessionTimes', (_e, on: unknown) => store.setSessionTimes(on))
   ipcMain.handle('settings:setCompaction', (_e, change: unknown) => store.setCompaction(change))
   ipcMain.handle('prompt:builtin', () => builtinPrompt())
   ipcMain.handle('prompt:set', (_e, providerId: string, prompt: unknown) => store.setPrompt(providerId, prompt))
@@ -437,6 +557,15 @@ function registerIpc(): void {
     return { settings: await store.compactionSettings(), ...(window ? { window } : {}), ...(fit ? { fit } : {}) }
   }
 
+  /** The conversation and the model a turn is for, as the memory needs to know them (memory.ts). */
+  const memoryTurnOf = (session: Session, connection: Connection, room: RoomOptions): MemoryTurn => ({
+    session: session.id,
+    workspace: session.workspace,
+    provider: { id: connection.provider, ...(connection.providerName ? { name: connection.providerName } : {}), local: isLocalAddress(connection.baseURL) },
+    model: connection.model,
+    ...(room.window ? { window: room.window } : {})
+  })
+
   ipcMain.handle('workspace:pick', async () => {
     if (!mainWindow) return null
     const result = await dialog.showOpenDialog(mainWindow, { properties: ['openDirectory', 'createDirectory'] })
@@ -533,6 +662,21 @@ function registerIpc(): void {
     if (error) throw new Error(error)
   })
 
+  // The page of the memory: the notes, and how they are used. Which notes a new conversation would
+  // be shown is worked out for the model in use, with what its context holds.
+  registerMemoryIpc(ipcMain, memory, {
+    use: async () => {
+      const connection = await store.getConnection().catch(() => null)
+      if (!connection || !connection.model) return null
+      const window = (await roomOf(connection, await toldOf(connection)))?.contextWindow
+      return { provider: { id: connection.provider, name: connection.providerName ?? connection.provider, local: isLocalAddress(connection.baseURL) }, ...(window ? { window } : {}) }
+    },
+    openFolder: async (dir) => {
+      const error = await shell.openPath(dir)
+      if (error) throw new Error(error)
+    }
+  })
+
   // With which of them are at work just now, so that the list can show it.
   ipcMain.handle('sessions:list', async () => (await store.listSessions()).map((s) => (activeRuns.has(s.id) ? { ...s, running: true as const } : s)))
   // What is typed into the search box of the sidebar. Longer than a search someone types is not one.
@@ -565,6 +709,8 @@ function registerIpc(): void {
     wholeReplies.delete(id)
     noImages.delete(id)
     await store.deleteSession(id)
+    // What the memory kept of it: the notes it saw. The notes themselves stay.
+    await memory.dropSession(id).catch((err) => console.error('[memory] could not forget a deleted session:', err))
   }
   ipcMain.handle('sessions:delete', (_e, id: string) => dropSession(id))
 
@@ -596,7 +742,8 @@ function registerIpc(): void {
     return store.forgetWorkspace(dir)
   })
 
-  ipcMain.handle('agent:send', async (_e, sessionId: string | null, workspace: string, text: string, skill?: string, extras?: unknown) => {
+  /** Takes a message into its session and starts the turn that answers it. Resolves, with the session's id, once the turn has begun. */
+  const beginTurn = async (sessionId: string | null, workspace: string, text: string, skill?: string, extras?: unknown): Promise<string> => {
     const connection = await store.getConnection()
     if (!connection) throw new Error('The model service in use has no API key or sign-in yet. Open Settings to add one.')
     if (!connection.model) throw new Error('No model chosen yet. Pick one next to the message box.')
@@ -621,6 +768,8 @@ function registerIpc(): void {
       }
     }
     const current = session
+    // Nothing has been answered in it yet: once this turn is over, the model names the conversation by what it is about.
+    const unnamed = !current.messages.some((message) => message.role === 'assistant')
     // What the page shows as the mode of the conversation at this moment is what counts; where it says nothing, what the conversation had.
     const mode: PermissionMode = isPermissionMode(askedMode) ? askedMode : (current.permissionMode ?? DEFAULT_PERMISSION_MODE)
     // Writing in an archived session brings it back to the list.
@@ -631,7 +780,7 @@ function registerIpc(): void {
     if (counting) current.stats = addTurn(current.stats ?? emptyStats(current.messages.length > 0))
     // Keeps the folder list in order of use. Not worth failing the message over.
     store.rememberWorkspace(current.workspace).catch((err) => console.error('[store] could not remember the folder:', err))
-    current.messages.push({ role: 'user', content: text, ...(pickedSkill ? { skill: pickedSkill } : {}), ...(attachments.length ? { attachments } : {}) })
+    current.messages.push({ role: 'user', content: text, ...(pickedSkill ? { skill: pickedSkill } : {}), ...(attachments.length ? { attachments } : {}), at: Date.now() })
 
     const run: ActiveRun = { controller: new AbortController(), provider: connection.provider, pending: new Set(), mode }
     activeRuns.set(current.id, run)
@@ -648,17 +797,30 @@ function registerIpc(): void {
       const snapshot = structuredClone(current)
       saving = saving.then(() => store.saveSession(snapshot)).catch((err) => console.error('save failed', err))
     }
+    liveSessions.set(current.id, { session: current, checkpoint, saved: () => saving })
+    // A name the model wrote for the session while this message was on its way is taken up with it,
+    // and said to the page once it is in the file, where the list is read from.
+    const named = takeTitle(current)
     checkpoint()
+    if (named) void saving.then(() => send({ sessionId: current.id, event: { type: 'titled', title: current.title } }))
+
+    const room = await roomFor(current, connection)
+    // What the memory tells the model in this conversation, and the tools it adds: nothing of it while the memory is off for this service.
+    const remembered = await memory.forTurn(memoryTurnOf(current, connection, room), tools).catch((err: unknown) => {
+      console.error('[memory] left out of this turn:', err instanceof Error ? err.message : err)
+      return { prompt: undefined, tools }
+    })
 
     void runTurn({
       connection: asLearned(current.id, connection),
       workspace: current.workspace,
       messages: current.messages,
       systemExtra,
+      memory: remembered.prompt,
       conversation: conversationName(current.id),
-      room: await roomFor(current, connection),
+      room,
       signal: run.controller.signal,
-      tools,
+      tools: remembered.tools,
       sampling,
       // Read anew before every request: a plugin that begins to watch in the middle of a turn sees the rest of it.
       trace: {
@@ -705,16 +867,31 @@ function registerIpc(): void {
           })
           send({ sessionId: current.id, event: { type: 'permission_request', id, call } })
         })
-    }).finally(() => activeRuns.delete(current.id))
+    })
+      .finally(() => {
+        activeRuns.delete(current.id)
+        liveSessions.delete(current.id)
+      })
+      // By itself and after the turn: the person can go on with the conversation meanwhile.
+      .then(() => (unnamed ? nameConversation(current, connection) : undefined))
 
     return current.id
+  }
+
+  ipcMain.handle('agent:send', async (_e, sessionId: string | null, workspace: string, text: string, skill?: string, extras?: unknown) => {
+    // From here until its turn has begun the session is on its way into memory: a name that
+    // arrives for it meanwhile waits for it there, and is not written into a file it is being read from.
+    if (sessionId) opening.add(sessionId)
+    try {
+      return await beginTurn(sessionId, workspace, text, skill, extras)
+    } finally {
+      if (sessionId) opening.delete(sessionId)
+    }
   })
 
   // The person asks for a conversation to be compacted now. It counts as running while that is
   // done: nothing can be sent in it meanwhile, and a stop ends the writing of the summary.
-  ipcMain.handle('sessions:compact', async (_e, sessionId: unknown): Promise<CompactionReport> => {
-    const id = String(sessionId ?? '')
-    if (activeRuns.has(id)) throw new Error('This session is running. Try again when it has finished.')
+  const compactSession = async (id: string): Promise<CompactionReport> => {
     const connection = await store.getConnection()
     if (!connection) throw new Error('The model service in use has no API key or sign-in yet. Open Settings to add one.')
     if (!connection.model) throw new Error('No model chosen yet. Pick one next to the message box.')
@@ -726,15 +903,34 @@ function registerIpc(): void {
     try {
       const counting = await store.countsStats()
       let saving: Promise<void> = Promise.resolve()
+      const checkpoint = (): void => {
+        session.updatedAt = Date.now()
+        const snapshot = structuredClone(session)
+        saving = saving.then(() => store.saveSession(snapshot))
+      }
+      liveSessions.set(id, { session, checkpoint, saved: () => saving })
+      // A name the model wrote for the session just now is taken up with it. Saved as it is:
+      // a new name is no reason for the session to move up the list. The page is told once it is in the file.
+      if (takeTitle(session)) {
+        const snapshot = structuredClone(session)
+        const written = (saving = saving.then(() => store.saveSession(snapshot)))
+        void written.then(
+          () => send({ sessionId: id, event: { type: 'titled', title: snapshot.title } }),
+          () => {}
+        )
+      }
+      const room = await roomFor(session, connection)
+      const remembered = await memory.forTurn(memoryTurnOf(session, connection, room), tools).catch(() => ({ prompt: undefined, tools }))
       const report = await compactConversation({
         connection: asLearned(id, connection),
         workspace: session.workspace,
         messages: session.messages,
         // The same instructions and tools a message would go out with: they take their part of the context.
         systemExtra: skillsPrompt(await skills.list()),
-        room: await roomFor(session, connection),
+        memory: remembered.prompt,
+        room,
         signal: run.controller.signal,
-        tools,
+        tools: remembered.tools,
         sampling,
         trace: {
           get active() {
@@ -744,11 +940,7 @@ function registerIpc(): void {
         },
         alwaysAllowed: new Set(),
         emit: (event) => send({ sessionId: id, event }),
-        checkpoint: () => {
-          session.updatedAt = Date.now()
-          const snapshot = structuredClone(session)
-          saving = saving.then(() => store.saveSession(snapshot))
-        },
+        checkpoint,
         stats: counting
           ? {
               step: () => {},
@@ -766,6 +958,18 @@ function registerIpc(): void {
       return report
     } finally {
       activeRuns.delete(id)
+      liveSessions.delete(id)
+    }
+  }
+  ipcMain.handle('sessions:compact', async (_e, sessionId: unknown): Promise<CompactionReport> => {
+    const id = String(sessionId ?? '')
+    if (activeRuns.has(id)) throw new Error('This session is running. Try again when it has finished.')
+    // On its way into memory from here on, as with a message that arrives for it (see `agent:send`).
+    opening.add(id)
+    try {
+      return await compactSession(id)
+    } finally {
+      opening.delete(id)
     }
   })
 
@@ -805,16 +1009,24 @@ if (!isPrimaryInstance) {
     mainWindow.focus()
   })
 
-  void app.whenReady().then(() => {
+  void app.whenReady().then(async () => {
     registerIpc()
     servePluginUi()
     confinePageFiles()
+    // The look that was chosen holds from the first thing the window shows. Settings that cannot be read are no reason not to open.
+    nativeTheme.themeSource = await store.themeChoice().catch(() => DEFAULT_THEME)
+    // The system's buttons over the page go by the look as the page does: when another is chosen in the settings, and when the system changes its own.
+    nativeTheme.on('updated', () => {
+      if (mainWindow && barless(process.platform)) mainWindow.setTitleBarOverlay(windowButtons(nativeTheme.shouldUseDarkColors))
+    })
     createWindow()
     // Plugins load in the background so a slow or stuck one cannot delay the window.
     pluginsReady = startPlugins()
     pluginsReady.catch((err) => console.error('[plugins] failed to start:', err))
     // Only an unreadable mcp.json rejects here; the settings page shows the same error when it is saved.
     mcp.init().catch((err) => console.error('[mcp] could not load mcp.json:', err))
+    // The memory's settings, and its commands while it is on. Read again at the first turn if this fails.
+    memory.init().catch((err) => console.error('[memory] could not read its settings:', err))
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow()
     })

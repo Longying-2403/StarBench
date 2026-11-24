@@ -398,6 +398,57 @@ test('the counting of what conversations cost is on unless it was switched off',
   for (const odd of [true, 'false', 0, null]) assert.equal(model.toPublic(model.readSettings({ stats: odd })).stats, true, String(odd))
 })
 
+test('conversations are named by the model unless that was switched off', () => {
+  const fresh = model.readSettings(undefined)
+  assert.equal('titles' in fresh, false)
+  assert.equal(model.toPublic(fresh).titles, true)
+
+  const off = model.setTitles(fresh, false)
+  assert.equal(off.titles, false)
+  assert.equal(model.toPublic(off).titles, false)
+  assert.deepEqual(model.readSettings(JSON.parse(JSON.stringify(off))), off, 'kept through a save and a load')
+  assert.deepEqual(model.setTitles(off, true), fresh, 'on is how the app comes, and is not written down')
+  // Anything but an outright false in the file means on.
+  for (const odd of [true, 'false', 0, null]) assert.equal(model.toPublic(model.readSettings({ titles: odd })).titles, true, String(odd))
+})
+
+test('the list says when each conversation was gone on with unless that was switched off', () => {
+  const fresh = model.readSettings(undefined)
+  assert.equal('sessionTimes' in fresh, false)
+  assert.equal(model.toPublic(fresh).sessionTimes, true)
+
+  const off = model.setSessionTimes(fresh, false)
+  assert.equal(off.sessionTimes, false)
+  assert.equal(model.toPublic(off).sessionTimes, false)
+  assert.deepEqual(model.readSettings(JSON.parse(JSON.stringify(off))), off, 'kept through a save and a load')
+  assert.deepEqual(model.setSessionTimes(off, true), fresh, 'shown is how the app comes, and is not written down')
+  for (const odd of [true, 'false', 0, null]) assert.equal(model.toPublic(model.readSettings({ sessionTimes: odd })).sessionTimes, true, String(odd))
+  // Neither switch touches the other.
+  assert.deepEqual(model.setTitles(off, false), { ...off, titles: false })
+})
+
+test('the app goes by the system for its look unless one was chosen', () => {
+  const fresh = model.readSettings(undefined)
+  assert.equal('theme' in fresh, false)
+  assert.equal(model.toPublic(fresh).theme, 'system')
+
+  for (const look of ['light', 'dark'] as const) {
+    const chosen = model.setTheme(fresh, look)
+    assert.equal(chosen.theme, look)
+    assert.equal(model.toPublic(chosen).theme, look)
+    assert.deepEqual(model.readSettings(JSON.parse(JSON.stringify(chosen))), chosen, 'kept through a save and a load')
+    assert.deepEqual(model.setTheme(chosen, 'system'), fresh, 'going by the system is how the app comes, and is not written down')
+  }
+  // One look takes the place of the other, and nothing else in the settings is touched by the choice.
+  const counted = model.setStats(fresh, false)
+  assert.deepEqual(model.setTheme(model.setTheme(counted, 'light'), 'dark'), { ...counted, theme: 'dark' })
+
+  // The choice arrives from the page: what is no look is refused.
+  for (const odd of ['black', 'Dark', '', 1, null, undefined, {}]) assert.throws(() => model.setTheme(fresh, odd), /Unknown look/, String(odd))
+  // A file that names no look other than how the app comes is read as naming none.
+  for (const odd of ['black', 'system', true, 2, null]) assert.equal('theme' in model.readSettings({ theme: odd }), false, String(odd))
+})
+
 test('conversations are compacted by themselves at four fifths of the context unless that was changed', () => {
   const fresh = model.readSettings(undefined)
   assert.equal('compaction' in fresh, false)

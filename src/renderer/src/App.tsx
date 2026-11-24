@@ -2,7 +2,7 @@ import { Fragment, useCallback, useEffect, useReducer, useRef, useState } from '
 import type { ReactNode } from 'react'
 import { ABOUT } from '../../shared/about.ts'
 import type { Attachment } from '../../shared/attachments.ts'
-import { folderKey } from '../../shared/folders.ts'
+import { folderKey, workspaceName } from '../../shared/folders.ts'
 import { hasHidden, revealHidden } from '../../shared/hidden-chars.ts'
 import { DEFAULT_PERMISSION_MODE, VIEW_ONLY_RESULT } from '../../shared/permissions.ts'
 import type { PermissionMode } from '../../shared/permissions.ts'
@@ -23,19 +23,24 @@ import { AnswerText } from './AnswerText.tsx'
 import { AttachmentRow } from './Attachments.tsx'
 import { Composer } from './Composer.tsx'
 import { FolderMenu } from './FolderMenu.tsx'
-import { PromptIcon, WarningIcon } from './icons.tsx'
-import { itemsFromMessages, itemsReducer, lastSummaryAt } from './items.ts'
+import { FolderIcon, PromptIcon, StarIcon, WarningIcon } from './icons.tsx'
+import { whenExact, whenText } from '../../shared/when.ts'
+import { itemsFromMessages, itemsReducer, lastSummaryAt, turnEnds } from './items.ts'
 import type { Item } from './items.ts'
+import { MEMORY_DENIED_LABEL, MEMORY_TOOL_LABELS, MemoryNotice, MemorySensitiveBar, isSensitiveMemoryCall, memoryCallSummary } from './MemoryNotice.tsx'
+import { MemoryPage } from './MemoryPage.tsx'
+import type { MemoryScope } from '../../shared/memory.ts'
 import { Notice } from './Notice.tsx'
 import { PluginPanel, PluginRow, useAnnouncePlace } from './PluginUi.tsx'
 import { PluginsPage } from './PluginsPage.tsx'
 import { PromptDialog } from './PromptDialog.tsx'
-import { SettingsDialog } from './Settings.tsx'
+import { SettingsPage } from './Settings.tsx'
 import { Sidebar } from './Sidebar.tsx'
 import { StatusRow } from './StatusRow.tsx'
+import { TipLayer } from './Tips.tsx'
 import { ToastStack, notify, toasts } from './Toasts.tsx'
 import { TrustDialog } from './TrustDialog.tsx'
-import { errorText, isWindows } from './util.ts'
+import { errorText, isWindows, useNow } from './util.ts'
 
 const api = window.harness
 const LAST_WORKSPACE_KEY = 'lastWorkspace'
@@ -61,6 +66,9 @@ function parseArgs(call: ToolCall): Record<string, unknown> {
 
 /** The one argument that best identifies a tool call at a glance. */
 function callSummary(call: ToolCall): string {
+  // A note of the memory reads as where it goes, its kind and what it says.
+  const memory = memoryCallSummary(call)
+  if (memory !== null) return memory
   const args = parseArgs(call)
   const value = args.command ?? args.path ?? args.pattern ?? args.name ?? ''
   return typeof value === 'string' ? value : ''
@@ -73,7 +81,8 @@ const TOOL_LABELS: Record<string, string> = {
   edit_file: '编辑文件',
   list_dir: '列出目录',
   search: '搜索',
-  run_command: '执行命令'
+  run_command: '执行命令',
+  ...MEMORY_TOOL_LABELS
 }
 
 /** What is shown of a call's arguments: each by its name, the value as written or as JSON; with none to name, the raw text. */
@@ -103,7 +112,7 @@ function Shown({ text }: { text: string }) {
         typeof piece === 'string' ? (
           <Fragment key={i}>{piece}</Fragment>
         ) : (
-          <span key={i} title="看不见的字符" style={HIDDEN_MARK}>
+          <span key={i} data-tip="看不见的字符" style={HIDDEN_MARK}>
             {piece.hidden}
           </span>
         )
@@ -156,7 +165,10 @@ function toolStatus(output: string | undefined): { label: string; how: 'fine' | 
 }
 
 function ToolCard({ item, faded }: { item: Extract<Item, { kind: 'tool' }>; faded: boolean }) {
-  const { label: status, how } = toolStatus(item.output)
+  const told = toolStatus(item.output)
+  const { how } = told
+  // A note the person did not let the memory keep was not kept: their decision, said in those words.
+  const status = how === 'held' && item.call.name === 'remember' && item.output === 'The user denied this tool call.' ? MEMORY_DENIED_LABEL : told.label
   return (
     <details className={`tool${how === 'failed' ? ' tool-failed' : how === 'held' ? ' tool-held' : ''}${faded ? ' faded' : ''}`}>
       <summary>
@@ -206,8 +218,8 @@ const linkTo = (title: string, url: string): string => `[${title.replace(/[\\[\]
  * put between them and where they lead (Gemini API Additional Terms, "Grounding with Google
  * Search"), so they are not folded away with the search. The HTML is Google's and is drawn
  * unchanged, in a frame of its own that runs no script and cannot reach the page: all it can do
- * is ask for a link to be opened, which the app does in the browser. It follows the system's
- * light or dark look, as the page does.
+ * is ask for a link to be opened, which the app does in the browser. It follows the app's light
+ * or dark look (设置 → 外观), as the page does.
  */
 function SearchSuggestions({ html, faded }: { html: string; faded: boolean }) {
   const page = `<!doctype html><html><head><meta charset="utf-8"><meta name="color-scheme" content="light dark"><base target="_blank"><style>html,body{margin:0;padding:1px;background:transparent;overflow:hidden}</style></head><body>${html}</body></html>`
@@ -317,73 +329,107 @@ function ErrorNotice({ title, text, detail, children }: { title: string; text: s
   )
 }
 
-function Transcript({ items, workspace, onOpenSettings }: { items: Item[]; workspace: string; onOpenSettings: () => void }) {
+/** When something in the conversation happened, under it: said from now, with the exact moment for whoever asks. */
+function MessageTime({ at, now, sent, faded }: { at: number; now: number; /** Under a message of the person, at the right like the message. */ sent?: boolean; faded: boolean }) {
+  return (
+    <div className={`msg-time${sent ? ' msg-time-sent' : ''}${faded ? ' faded' : ''}`}>
+      <span data-tip={`${sent ? '发送于' : '完成于'} ${whenExact(at)}`}>{whenText(at, now)}</span>
+    </div>
+  )
+}
+
+function Transcript({
+  items,
+  workspace,
+  running,
+  onOpenSettings
+}: {
+  items: Item[]
+  workspace: string
+  /** A turn is under way: what the model has written of it so far is not finished, and has no time yet. */
+  running: boolean
+  onOpenSettings: () => void
+}) {
   // What stands above the last summary is no longer sent to the model. It stays, paler, for the person to read.
   const from = lastSummaryAt(items)
+  // Under each message of the person, when it was sent; under the last thing of each turn, when the model had finished.
+  const ends = turnEnds(items, running)
+  const now = useNow(30_000)
+
+  /** One item as it is drawn, with the moment a message of the person was sent under it. */
+  const draw = (item: Item, faded: boolean): ReactNode => {
+    const pale = faded ? ' faded' : ''
+    if (item.kind === 'mark') return <MarkLine mark={item.mark} workspace={workspace} faded={faded} />
+    if (item.kind === 'user') {
+      return (
+        <>
+          <div className={`msg msg-user${pale}`}>
+            {item.skill && <span className="chip chip-block">Skill · {item.skill}</span>}
+            {item.attachments && <AttachmentRow files={item.attachments} sent />}
+            {item.text}
+          </div>
+          {item.at !== undefined && <MessageTime at={item.at} now={now} sent faded={faded} />}
+        </>
+      )
+    }
+    if (item.kind === 'assistant') {
+      return (
+        <div className={`msg msg-assistant${pale}`}>
+          {item.reasoning && (
+            <details className="reasoning" open={item.open && !item.text}>
+              <summary>思考过程</summary>
+              <div className="reasoning-body">{item.reasoning}</div>
+            </details>
+          )}
+          {item.text && <AnswerText text={item.text} workspace={workspace} />}
+        </div>
+      )
+    }
+    if (item.kind === 'tool') return <ToolCard item={item} faded={faded} />
+    if (item.kind === 'web') return <WebCard item={item} faded={faded} workspace={workspace} />
+    if (item.kind === 'notice') {
+      return (
+        <Notice className={`msg${pale}`} role="status">
+          {item.text}
+        </Notice>
+      )
+    }
+    if (item.hint === 'chatgpt-usage') {
+      return (
+        <ErrorNotice title="ChatGPT 套餐：已达到用量上限" text="请到 ChatGPT 的设置里查看你的套餐用量，或者给这个应用设置的用量上限。" detail={item.message}>
+          <a className="btn btn-primary" href={CHATGPT_USAGE_URL} target="_blank" rel="noreferrer">
+            管理用量
+          </a>
+        </ErrorNotice>
+      )
+    }
+    if (item.hint === 'chatgpt-sign-in') {
+      return (
+        <ErrorNotice title="ChatGPT 登录已失效" text="需要重新用 ChatGPT 登录，才能继续使用套餐额度。" detail={item.message}>
+          <button className="btn btn-primary" onClick={onOpenSettings}>
+            打开设置重新登录
+          </button>
+        </ErrorNotice>
+      )
+    }
+    return (
+      <div className="msg msg-error" role="alert">
+        {item.message}
+      </div>
+    )
+  }
+
   return (
     <>
       {items.map((item, index) => {
         const faded = index < from
-        const pale = faded ? ' faded' : ''
-        if (item.kind === 'mark') return <MarkLine key={index} mark={item.mark} workspace={workspace} faded={faded} />
-        if (item.kind === 'user') {
-          return (
-            <div key={index} className={`msg msg-user${pale}`}>
-              {item.skill && <span className="chip chip-block">Skill · {item.skill}</span>}
-              {item.attachments && <AttachmentRow files={item.attachments} sent />}
-              {item.text}
-            </div>
-          )
-        }
-        if (item.kind === 'assistant') {
-          return (
-            <div key={index} className={`msg msg-assistant${pale}`}>
-              {item.reasoning && (
-                <details className="reasoning" open={item.open && !item.text}>
-                  <summary>思考过程</summary>
-                  <div className="reasoning-body">{item.reasoning}</div>
-                </details>
-              )}
-              {item.text && <AnswerText text={item.text} workspace={workspace} />}
-            </div>
-          )
-        }
-        if (item.kind === 'tool') return <ToolCard key={index} item={item} faded={faded} />
-        if (item.kind === 'web') return <WebCard key={index} item={item} faded={faded} workspace={workspace} />
-        if (item.kind === 'notice') {
-          return (
-            <Notice key={index} className={`msg${pale}`} role="status">
-              {item.text}
-            </Notice>
-          )
-        }
-        if (item.hint === 'chatgpt-usage') {
-          return (
-            <ErrorNotice
-              key={index}
-              title="ChatGPT 套餐：已达到用量上限"
-              text="请到 ChatGPT 的设置里查看你的套餐用量，或者给这个应用设置的用量上限。"
-              detail={item.message}
-            >
-              <a className="btn btn-primary" href={CHATGPT_USAGE_URL} target="_blank" rel="noreferrer">
-                管理用量
-              </a>
-            </ErrorNotice>
-          )
-        }
-        if (item.hint === 'chatgpt-sign-in') {
-          return (
-            <ErrorNotice key={index} title="ChatGPT 登录已失效" text="需要重新用 ChatGPT 登录，才能继续使用套餐额度。" detail={item.message}>
-              <button className="btn btn-primary" onClick={onOpenSettings}>
-                打开设置重新登录
-              </button>
-            </ErrorNotice>
-          )
-        }
+        const finished = ends.get(index)
         return (
-          <div key={index} className="msg msg-error" role="alert">
-            {item.message}
-          </div>
+          <Fragment key={index}>
+            {draw(item, faded)}
+            {/* Where a turn ends: when the model had finished the last thing it wrote in it. */}
+            {finished !== undefined && <MessageTime at={finished} now={now} faded={faded} />}
+          </Fragment>
         )
       })}
     </>
@@ -400,11 +446,13 @@ function PermissionBar({
   workspace: string
   onDecide: (decision: PermissionDecision) => void
 }) {
+  // A note that looks sensitive is asked about in the memory's own words (MemoryNotice.tsx).
+  if (isSensitiveMemoryCall(call)) return <MemorySensitiveBar call={call} onDecide={onDecide} />
   const label = TOOL_LABELS[call.name]
   return (
     <div className="permission" role="alertdialog" aria-label="权限确认">
       <div className="permission-title">{label ? `允许${label}？` : `允许调用工具 ${call.name}？`}</div>
-      <div className="hint" title={workspace}>
+      <div className="hint" data-tip={workspace}>
         工作文件夹：{workspace || '（未选择）'}
       </div>
       {hidesCharacters(call) && (
@@ -418,7 +466,7 @@ function PermissionBar({
           允许
         </button>
         {/* What it lets through is said on it: every later call of this kind in this conversation, until the app starts again. */}
-        <button className="btn" onClick={() => onDecide('always')} title="这个对话里之后同类的调用都直接放行，重启应用后恢复询问。">
+        <button className="btn" onClick={() => onDecide('always')} data-tip="这个对话里之后同类的调用都直接放行，重启应用后恢复询问。">
           {`本次会话不再询问「${label ?? call.name}」`}
         </button>
         <button className="btn" onClick={() => onDecide('deny')}>
@@ -430,9 +478,9 @@ function PermissionBar({
 }
 
 /**
- * The button for the person's own prompt, under the message box: it is about every message to
- * the models of the provider in use, not about the one being written. Lit when a prompt is set,
- * which changes every answer.
+ * The button for the person's own prompt, at the right end of the bar above the message box: it
+ * is about every message to the models of the provider in use, not about the one being written.
+ * Lit when a prompt is set, which changes every answer.
  */
 function PromptButton({ settings, onOpen }: { settings: Settings | null; onOpen: () => void }) {
   /** What the person wrote for the models of the provider in use, if anything. */
@@ -440,7 +488,7 @@ function PromptButton({ settings, onOpen }: { settings: Settings | null; onOpen:
   const text = !prompt ? '提示词：给当前模型服务写一段固定的要求' : prompt.replace ? '提示词：已设置，替换了内置提示' : '提示词：已设置，加在内置提示后面'
   return (
     // Does not wait for a folder or a model: what it sets counts from the next message, whenever that is.
-    <button type="button" className="btn btn-small" aria-haspopup="dialog" aria-label={text} title={text} data-set={prompt ? '' : undefined} disabled={!settings} onClick={onOpen}>
+    <button type="button" className="btn btn-small" aria-haspopup="dialog" aria-label={text} data-tip={text} data-set={prompt ? '' : undefined} disabled={!settings} onClick={onOpen}>
       <PromptIcon />
       <span>提示词</span>
     </button>
@@ -450,11 +498,12 @@ function PromptButton({ settings, onOpen }: { settings: Settings | null; onOpen:
 export function App() {
   const [settings, setSettings] = useState<Settings | null>(null)
   const [modelInfo, setModelInfo] = useState<ModelInfo | null>(null)
-  /** Counts saves of the settings dialog. */
+  /** Counts saves made on the settings page. */
   const [saves, setSaves] = useState(0)
-  const [showSettings, setShowSettings] = useState(false)
-  /** What the main part of the window shows: the conversation, or the page of the plugins lying over it. */
-  const [page, setPage] = useState<'chat' | 'plugins'>('chat')
+  /** What the main part of the window shows: the conversation, or a page lying over it: the plugins, the settings, or the memory. */
+  const [page, setPage] = useState<'chat' | 'plugins' | 'settings' | 'memory'>('chat')
+  /** The note the memory's page shows first: the one a notice above the message box was about. */
+  const [memoryFocus, setMemoryFocus] = useState<{ id: string; scope: MemoryScope; workspace?: string } | null>(null)
   /** The person's own prompt for the provider in use is being edited. */
   const [showPrompt, setShowPrompt] = useState(false)
   /** The note shown once, after the first sign-in with ChatGPT plan usage. */
@@ -483,6 +532,11 @@ export function App() {
   const [stats, setStats] = useState<SessionStats | null>(null)
   /** The model is writing the summary of the conversation, which takes a while and shows nothing. */
   const [compacting, setCompacting] = useState(false)
+  /**
+   * The app is at work on the conversation without a turn being under way: a compaction the person
+   * asked for. The last turn is over all the same, and keeps the time it was finished at.
+   */
+  const [betweenTurns, setBetweenTurns] = useState(false)
 
   // The components of plugins are told which conversation is on the page, and which model it talks to.
   useAnnouncePlace(sessionId, workspace, running, settings)
@@ -511,10 +565,13 @@ export function App() {
   useEffect(() => {
     void api.getSettings().then((s) => {
       setSettings(s)
-      if (!s.ready) setShowSettings(true)
+      // Nothing can be sent yet: the settings are where that is put right.
+      if (!s.ready) setPage('settings')
     })
     refreshSessions()
     return api.onEvent(({ sessionId: id, event }) => {
+      // A conversation was given the name the model wrote for it: nothing of a turn, and the list is all that shows it.
+      if (event.type === 'titled') return refreshSessions()
       // The switch was taken back for the model, whichever session found out; the page shows it at once.
       if (event.type === 'notice' && event.code === 'fast-mode-refused') setSettings((s) => (s ? { ...s, fastMode: false } : s))
       // A question is kept with the session that asked it, and goes when that session's turn ends.
@@ -559,7 +616,8 @@ export function App() {
       }
       // The sign-in was given up behind the page's back; what it shows about it is out of date.
       if (event.type === 'error' && event.hint === 'chatgpt-sign-in') void api.getSettings().then(setSettings)
-      dispatch({ type: 'event', event })
+      // With the time, for what the event finishes: the conversation says under a reply when it was done.
+      dispatch({ type: 'event', event, at: Date.now() })
     })
   }, [refreshSessions])
 
@@ -750,7 +808,7 @@ export function App() {
     setRunning(true)
     stickToBottom.current = true
     lastTop.current = 0
-    dispatch({ type: 'user', text, skill, attachments })
+    dispatch({ type: 'user', text, skill, attachments, at: Date.now() })
     try {
       const id = await api.send(sessionId, workspace, text, skill, { mode, ...(attachments.length ? { attachments } : {}) })
       sessionRef.current = id
@@ -808,6 +866,7 @@ export function App() {
   const compactNow = async (): Promise<void> => {
     if (!sessionId || running) return
     setRunning(true)
+    setBetweenTurns(true)
     try {
       const report = await api.compactSession(sessionId)
       if (report.problem) {
@@ -819,6 +878,7 @@ export function App() {
       notify({ kind: 'error', title: '压缩没有完成', text: errorText(err) })
     } finally {
       setRunning(false)
+      setBetweenTurns(false)
       setCompacting(false)
       refreshSessions()
     }
@@ -878,7 +938,11 @@ export function App() {
         busy={running}
         // The page knows of its own session at once; of the others the list says so.
         workingId={running ? sessionId : null}
+        // The sessions whose turn stands still until the person has answered a question of theirs.
+        waitingIds={Object.keys(prompts)}
         page={page}
+        // Until the settings are read, as the app comes: with them.
+        showTimes={settings?.sessionTimes !== false}
         onNewChat={newChat}
         onOpen={(id) => void openSession(id)}
         onRename={renameSession}
@@ -890,24 +954,33 @@ export function App() {
         onRemoveWorkspace={removeWorkspace}
         onSearch={api.searchSessions}
         onPlugins={() => setPage((now) => (now === 'plugins' ? 'chat' : 'plugins'))}
-        onSettings={() => setShowSettings(true)}
+        onMemory={() => {
+          setMemoryFocus(null)
+          setPage((now) => (now === 'memory' ? 'chat' : 'memory'))
+        }}
+        onSettings={() => setPage((now) => (now === 'settings' ? 'chat' : 'settings'))}
       />
 
       <div className="stage">
         {/* The conversation stays as it is under a page that lies over it: what was typed, and where it was scrolled to. */}
         <main className={`main ${empty ? 'main-empty' : ''}`} inert={page !== 'chat'}>
           {empty ? (
-            <h1 className="hero">
-              {/* The mark hangs at the upper right of the name and takes no room, so the name stays in the middle. */}
-              <span className="hero-name">
-                StarBench
-                <span className="hero-badge">{ABOUT.stage}</span>
+            <h1 className="hero" aria-label={`StarBench ${ABOUT.stage}`}>
+              {/* The name as typed at a prompt, the cursor behind it. The star and the mark hang at its upper right and take no room, so the name stays in the middle. */}
+              <span className="hero-name" aria-hidden="true">
+                <span className="hero-text">
+                  <span className="hero-prompt">&gt;</span>StarBench<span className="hero-cursor">_</span>
+                </span>
+                <span className="hero-marks">
+                  <StarIcon />
+                  <span className="hero-badge">{ABOUT.stage}</span>
+                </span>
               </span>
             </h1>
           ) : (
             <>
               <header className="header">
-                <span className="workspace" title={workspace}>
+                <span className="workspace" data-tip={workspace}>
                   {workspace || '未选择工作文件夹'}
                 </span>
                 {/* A session is tied to the folder it started in. */}
@@ -933,40 +1006,70 @@ export function App() {
                 // A picture takes its room only once it is read, after the answer it belongs to was drawn.
                 onLoadCapture={keepEndInView}
               >
-                <Transcript items={items} workspace={workspace} onOpenSettings={() => setShowSettings(true)} />
-                {running && !permission && <div className="working">{compacting ? '正在压缩上下文…' : '工作中…'}</div>}
+                <Transcript items={items} workspace={workspace} running={running && !betweenTurns} onOpenSettings={() => setPage('settings')} />
+                {running && !permission && (
+                  <div className="working">
+                    {/* A slash that turns in four steps, as a terminal shows that it is busy, and the cursor behind it. */}
+                    <span className="working-mark" aria-hidden="true">
+                      <span className="working-slash" />
+                      <span className="working-cursor" />
+                    </span>
+                    {compacting ? '正在压缩上下文…' : '工作中…'}
+                  </div>
+                )}
               </div>
             </>
           )}
 
           {permission && <PermissionBar call={permission.call} workspace={workspace} onDecide={decide} />}
+          {/* A note a model kept, changed or removed in this conversation: told where a question would be asked, for a while. */}
+          <MemoryNotice
+            sessionId={sessionId}
+            onOpen={(change) => {
+              setMemoryFocus(change.action === 'deleted' ? null : { id: change.entry.id, scope: change.entry.scope, ...(change.entry.workspace ? { workspace: change.entry.workspace } : {}) })
+              setPage('memory')
+            }}
+          />
 
           <div className="dock">
-            {/* Before the first message the folder is chosen right above the box it applies to. */}
-            {empty && <FolderMenu workspace={workspace} names={settings?.workspaceNames} onChoose={chooseWorkspace} />}
-            <Composer
-              blocked={blocked}
-              running={running}
-              settings={settings}
-              modelInfo={modelInfo}
-              mode={mode}
-              onModeChange={changeMode}
-              onEffortChange={changeEffort}
-              onFastChange={changeFast}
-              onWebSearchChange={changeWebSearch}
-              onSelectModel={selectModel}
-              onOpenSettings={() => setShowSettings(true)}
-              onSend={(text, skill, attachments) => void send(text, skill, attachments)}
-              onStop={() => sessionId && void api.stop(sessionId)}
-            />
-            {/* Under the box: at the left what is not about the message being written (the person's own prompt, what plugins add), in the middle what the conversation has cost. */}
-            <div className="dock-row">
-              <div className="dock-tools">
-                <PromptButton settings={settings} onOpen={() => setShowPrompt(true)} />
-                <PluginRow />
+            {/* The box stands in a frame with a bar on top of it, for what the chat is set in. That is
+                its folder: chosen there before the first message, and only said once the conversation
+                has begun, since a conversation stays in the folder it started in. */}
+            <div className="composer-frame">
+              <div className="composer-top">
+                {sessionId ? (
+                  <span className="composer-place" data-tip={`工作文件夹：${workspace}`}>
+                    <FolderIcon />
+                    <span>{workspaceName(workspace, settings?.workspaceNames, isWindows)}</span>
+                  </span>
+                ) : (
+                  <FolderMenu workspace={workspace} names={settings?.workspaceNames} onChoose={chooseWorkspace} />
+                )}
+                {/* At the right end of the bar: what is not about the message being written (the person's own prompt, what plugins add). */}
+                <div className="dock-tools">
+                  <PromptButton settings={settings} onOpen={() => setShowPrompt(true)} />
+                  <PluginRow />
+                </div>
               </div>
-              {/* Once there is a reply to count. */}
-              {settings?.stats && stats && stats.steps > 0 && !empty && (
+              <Composer
+                blocked={blocked}
+                running={running}
+                settings={settings}
+                modelInfo={modelInfo}
+                mode={mode}
+                onModeChange={changeMode}
+                onEffortChange={changeEffort}
+                onFastChange={changeFast}
+                onWebSearchChange={changeWebSearch}
+                onSelectModel={selectModel}
+                onOpenSettings={() => setPage('settings')}
+                onSend={(text, skill, attachments) => void send(text, skill, attachments)}
+                onStop={() => sessionId && void api.stop(sessionId)}
+              />
+            </div>
+            {/* Under the box, in the middle: what the conversation has cost, once there is a reply to count. */}
+            {settings?.stats && stats && stats.steps > 0 && !empty && (
+              <div className="dock-row">
                 <StatusRow
                   stats={stats}
                   modelInfo={modelInfo}
@@ -975,15 +1078,46 @@ export function App() {
                   busy={running}
                   onSetWindow={setContextWindow}
                   onCompact={() => void compactNow()}
+                  onOpenMemory={() => {
+                    setMemoryFocus(null)
+                    setPage('memory')
+                  }}
                 />
-              )}
-            </div>
+              </div>
+            )}
           </div>
         </main>
         {page === 'plugins' && (
           <section className="page" aria-labelledby="plugins-title">
-            <PluginsPage onBack={() => setPage('chat')} />
+            <PluginsPage
+              onBack={() => setPage('chat')}
+              onOpenMemory={() => {
+                setMemoryFocus(null)
+                setPage('memory')
+              }}
+            />
             {/* The model waits for an answer wherever the person is looking. */}
+            {permission && <PermissionBar call={permission.call} workspace={workspace} onDecide={decide} />}
+          </section>
+        )}
+        {page === 'settings' && settings && (
+          <section className="page" aria-labelledby="settings-title">
+            <SettingsPage
+              settings={settings}
+              onBack={() => setPage('chat')}
+              onSaved={(saved) => {
+                setSettings(saved)
+                setSaves((n) => n + 1)
+              }}
+              onWelcome={() => setWelcome(true)}
+            />
+            {/* As on the page of the plugins: a question of the model's is answered wherever the person is looking. */}
+            {permission && <PermissionBar call={permission.call} workspace={workspace} onDecide={decide} />}
+          </section>
+        )}
+        {page === 'memory' && (
+          <section className="page" aria-labelledby="memory-title">
+            <MemoryPage workspace={workspace} names={settings?.workspaceNames} providers={settings?.providers ?? []} focus={memoryFocus} onBack={() => setPage('chat')} />
             {permission && <PermissionBar call={permission.call} workspace={workspace} onDecide={decide} />}
           </section>
         )}
@@ -991,18 +1125,6 @@ export function App() {
 
       {/* A plugin's panel, when one is open: a third column, to the right of the conversation. */}
       <PluginPanel />
-
-      {showSettings && settings && (
-        <SettingsDialog
-          settings={settings}
-          onClose={() => setShowSettings(false)}
-          onSaved={(saved) => {
-            setSettings(saved)
-            setSaves((n) => n + 1)
-          }}
-          onWelcome={() => setWelcome(true)}
-        />
-      )}
 
       {showPrompt && active && <PromptDialog provider={active} onClose={() => setShowPrompt(false)} onSaved={setSettings} />}
 
@@ -1030,6 +1152,8 @@ export function App() {
 
       {/* The notices of the app, in the corner of the window over everything else. */}
       <ToastStack />
+      {/* What an element says of itself while the pointer rests on it (`data-tip`), in the app's own look. */}
+      <TipLayer />
     </div>
   )
 }

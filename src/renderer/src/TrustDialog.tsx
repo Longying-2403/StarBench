@@ -38,7 +38,7 @@ export function TrustDialog({ folder, onTrust, onCancel }: { folder: string; onT
     <div className="overlay">
       <div className="dialog dialog-small" role="alertdialog" aria-modal="true" aria-labelledby="trust-title" aria-describedby="trust-text">
         <h2 id="trust-title">信任这个文件夹吗？</h2>
-        <div className="trust-path" title={folder}>
+        <div className="trust-path" data-tip={folder}>
           <FolderIcon />
           <span>{folder}</span>
         </div>

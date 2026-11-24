@@ -45,6 +45,22 @@
   }
 }
 
+/* The two sets of colours once more, by name, for the small pictures of the app's looks under
+   设置 → 外观: each shows its look whichever one the window is in. Only what a picture is drawn
+   with is here, and a test holds it to the values above (test/theme.test.ts). */
+.theme-look[data-look='dark'] {
+  --bg: #16171a;
+  --panel: #1e2024;
+  --raised: #272a30;
+  --border: #353941;
+}
+.theme-look[data-look='light'] {
+  --bg: #f6f7f9;
+  --panel: #ffffff;
+  --raised: #eef0f3;
+  --border: #d5d9e0;
+}
+
 * {
   box-sizing: border-box;
 }
@@ -67,6 +83,49 @@ body {
   /* The window itself never scrolls. Popups keep to the room they have (see `usePopupPlace`);
      should anything still reach past the edge of the window, it is cut off there. */
   overflow: clip;
+}
+
+/* The window without a title bar of its own (Windows; `createWindow` in main/index.ts). The system
+   draws its three buttons over the upper right corner of the page and tells the page how high
+   they are. A strip of that height along the top is kept clear of everything but the sidebar,
+   which reaches up beside it; by that strip, and by the top of the sidebar, the window is moved.
+   With a title bar from the system the height is nothing, and none of this shows. */
+:root {
+  --window-bar: env(titlebar-area-height, 0px);
+}
+.stage,
+.plugin-panel {
+  margin-top: var(--window-bar);
+}
+.app::before,
+.sidebar::before {
+  content: '';
+  top: 0;
+  right: 0;
+  height: var(--window-bar);
+  -webkit-app-region: drag;
+  /* They mark a place for the system and are nothing in the page: what lies under them is pressed as ever. */
+  pointer-events: none;
+}
+.app::before {
+  position: fixed;
+  left: var(--sidebar);
+}
+.sidebar::before {
+  position: absolute;
+  left: 0;
+}
+/* What is pressed or dragged inside those strips, or may come to lie over them, is left out of them. */
+.sidebar-fold,
+.sidebar-resizer,
+.menu,
+.skill-menu,
+.plus-pop,
+.status-pop,
+.effort-panel,
+.overlay,
+.toast {
+  -webkit-app-region: no-drag;
 }
 
 /* Buttons */
@@ -146,6 +205,77 @@ body {
 .sidebar-resizer:focus-visible::after,
 .sidebar-resizer[data-dragging]::after {
   opacity: 1;
+}
+/* On top of the sidebar: the app's icon and name, and at the right the button that folds the
+   sidebar away. Where the window has no title bar of its own, this row stands in its place. */
+.sidebar-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+}
+.sidebar-mark {
+  display: inline-flex;
+  flex-shrink: 0;
+}
+.sidebar-mark .app-icon {
+  display: block;
+  width: 26px;
+  height: 26px;
+}
+.sidebar-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+/* Folds the sidebar away and, on the strip, opens it again. */
+.sidebar-fold {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+}
+.sidebar-fold:hover {
+  background: var(--raised);
+  color: var(--text);
+}
+/* The sidebar folded away (Sidebar.tsx): a strip with the app's icon, a button that opens the
+   sidebar again, the button for a new chat, and at the bottom the way to the settings. The window
+   is laid out from `--sidebar`, so what is beside the strip takes the room. What the strip does
+   not show stays as it was underneath: the list where it was scrolled to, the words of a search. */
+:root[data-sidebar-folded] {
+  --sidebar: 52px;
+}
+.sidebar-folded {
+  align-items: center;
+  padding: 12px 8px;
+}
+.sidebar-folded .sidebar-nav,
+.sidebar-folded .sessions,
+.sidebar-folded .sidebar-error,
+.sidebar-folded .sidebar-resizer {
+  display: none;
+}
+.sidebar-folded .sidebar-fold,
+.sidebar-folded .sidebar-new,
+.sidebar-folded .sidebar-settings {
+  width: 34px;
+  height: 34px;
+  padding: 0;
+}
+.sidebar-folded .sidebar-settings {
+  margin-top: auto;
 }
 /* Buttons that carry a small icon before their text. */
 .sidebar-new,
@@ -425,7 +555,8 @@ body {
   flex: 1;
   min-width: 0;
   display: flex;
-  align-items: center;
+  /* A row is its name and, under it, at least when it was gone on with: the mark stands by the name. */
+  align-items: flex-start;
   gap: 6px;
   padding: 5px 8px;
   border: 0;
@@ -449,12 +580,21 @@ body {
   white-space: nowrap;
 }
 .session-snippet,
-.session-place {
+.session-place,
+.session-time {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 12px;
   color: var(--muted);
+}
+/* When the session was last gone on with, under its name: closer to the name than a line of text would stand. */
+.session-time {
+  line-height: 1.35;
+}
+/* Beside the first line of the row, which is the name: in the middle of that line, not of the row. */
+.session-icon {
+  margin-top: 2px;
 }
 /* The words that were looked for. */
 .session-snippet mark {
@@ -625,7 +765,8 @@ body {
   padding-top: max(24px, calc(46vh - 110px));
 }
 .hero {
-  margin: 0 0 20px;
+  /* Room under the name: the message box has a bar of its own on top, and stands clear of the name by more than that bar is high. */
+  margin: 0 0 36px;
   text-align: center;
   font-size: 26px;
   font-weight: 600;
@@ -634,19 +775,50 @@ body {
   position: relative;
   display: inline-block;
 }
-/* What stage the app is at, at the upper right of its name. Out of the flow: the name stays in the middle. */
-.hero-badge {
+/* The name as it would stand in a terminal: after a prompt, in the font for code, the cursor behind it. */
+.hero-text {
+  font-family: var(--mono);
+}
+.hero-prompt {
+  color: var(--accent);
+}
+/* On and off like a terminal's cursor, without fading. The cursor of the line that says the model is working blinks the same way. */
+.hero-cursor {
+  animation: cursor-blink 1.1s steps(1) infinite;
+}
+@keyframes cursor-blink {
+  50% {
+    opacity: 0;
+  }
+}
+/* The star of the app's icon and the stage the app is at, side by side at the upper right of the
+   name. Out of the flow: the name stays in the middle. */
+.hero-marks {
   position: absolute;
   top: -2px;
-  left: calc(100% + 6px);
+  left: calc(100% + 4px);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--accent);
+}
+.hero-marks .star {
+  width: 14px;
+  height: 14px;
+}
+.hero-badge {
   padding: 0 7px;
   border: 1px solid var(--accent);
   border-radius: 999px;
-  color: var(--accent);
   font-size: 11px;
   font-weight: 600;
   line-height: 1.6;
   letter-spacing: 0.3px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .hero-cursor {
+    animation: none;
+  }
 }
 
 .transcript {
@@ -658,8 +830,57 @@ body {
   gap: 12px;
 }
 .working {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   color: var(--muted);
   font-size: 12px;
+}
+/* Before the words: a slash that turns a quarter of the way at a time, as a terminal shows that
+   it is busy, and the cursor behind it. Drawn as two bars, so both are as thick as each other. */
+.working-mark {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 14px;
+}
+.working-slash {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 12px;
+  height: 14px;
+}
+.working-slash::before {
+  content: '';
+  width: 1.5px;
+  height: 13px;
+  border-radius: 1px;
+  background: var(--accent);
+  transform: rotate(45deg);
+  /* Four places in half a turn, then the same again: / — \ | */
+  animation: working-turn 0.64s steps(4) infinite;
+}
+.working-cursor {
+  width: 8px;
+  height: 1.5px;
+  border-radius: 1px;
+  background: var(--text);
+  animation: cursor-blink 1.1s steps(1) infinite;
+}
+@keyframes working-turn {
+  from {
+    transform: rotate(45deg);
+  }
+  to {
+    transform: rotate(225deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .working-slash::before,
+  .working-cursor {
+    animation: none;
+  }
 }
 
 /* Messages */
@@ -673,6 +894,17 @@ body {
   border-radius: 10px;
   background: var(--raised);
   white-space: pre-wrap;
+}
+/* When a message was sent, under it at the right; when the model had finished a turn, under the
+   last thing of that turn at the left. Close to what it belongs to, and quiet. */
+.msg-time {
+  margin-top: -8px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--muted);
+}
+.msg-time-sent {
+  align-self: flex-end;
 }
 /* Like a notice, in the colour of errors. */
 .msg-error {
@@ -789,7 +1021,7 @@ body {
   font-family: var(--mono);
   font-size: 11.5px;
 }
-/* What plugins have in the row under the message box. It gives way when the row is full: its
+/* What plugins have on the bar above the message box. It gives way when the bar is full: its
    parts go onto further lines of their own, each staying whole and on one line, and the app's
    controls beside it keep their place. */
 .plugin-row {
@@ -1613,9 +1845,9 @@ textarea.plugin-input {
   color: var(--warn);
   background: color-mix(in srgb, var(--warn) 16%, transparent);
 }
-/* Two switches on the left (Fast Mode, web search) and room for two on the right, so the heading stays in the middle. */
+/* A switch on each side (Fast Mode at the left, web search at the right), so the heading stays in the middle and the name of the model has the room between them. */
 .effort-head.effort-head-switches {
-  grid-template-columns: 26px 26px minmax(0, 1fr) 26px 26px;
+  grid-template-columns: 26px minmax(0, 1fr) 26px;
 }
 /* Web search is on: blue, where Fast Mode is amber. */
 .effort-head .web-toggle[aria-pressed='true'] {
@@ -2097,7 +2329,8 @@ textarea.plugin-input {
   width: 32px;
   height: 32px;
   border: 1px solid var(--accent);
-  border-radius: 50%;
+  /* A square with round corners, like the "+" at the other end of the row. */
+  border-radius: 10px;
   background: var(--accent);
   color: var(--accent-text);
   cursor: pointer;
@@ -2228,7 +2461,8 @@ textarea.plugin-input {
   margin: 0;
   font-size: 16px;
 }
-.dialog label {
+.dialog label,
+.settings-pane label {
   display: flex;
   flex-direction: column;
   gap: 4px;
@@ -2468,7 +2702,7 @@ textarea.plugin-input {
 }
 /* The button for the person's own prompt, when there is one: it changes every answer, so it shows.
    The button of a plugin's panel that is open is marked the same way. (Further down, `.dock-tools`
-   says how the buttons under the message box look otherwise.) */
+   says how the buttons on the bar above the message box look otherwise.) */
 .dock-tools .btn[data-set] {
   color: var(--accent);
 }
@@ -2492,7 +2726,8 @@ textarea.plugin-input {
   font-size: 13px;
   line-height: 1.5;
 }
-.dialog label.check-row {
+.dialog label.check-row,
+.settings-pane label.check-row {
   flex-direction: row;
   align-items: center;
   gap: 8px;
@@ -2536,7 +2771,8 @@ textarea.plugin-input {
   color: var(--accent);
 }
 /* A setting of the whole app: what it is and what it does on the left, its switch on the right. */
-.dialog label.setting-row {
+.dialog label.setting-row,
+.settings-pane label.setting-row {
   flex-direction: row;
   align-items: flex-start;
   justify-content: space-between;
@@ -2576,15 +2812,18 @@ textarea.plugin-input {
   align-items: flex-end;
   gap: 3px;
 }
-.dialog .setting-box input {
+.dialog .setting-box input,
+.settings-pane .setting-box input {
   width: 84px;
   text-align: right;
   font-variant-numeric: tabular-nums;
 }
-.dialog .setting-box input:disabled {
+.dialog .setting-box input:disabled,
+.settings-pane .setting-box input:disabled {
   opacity: 0.5;
 }
-.dialog .setting-box input[aria-invalid='true'] {
+.dialog .setting-box input[aria-invalid='true'],
+.settings-pane .setting-box input[aria-invalid='true'] {
   border-color: var(--danger);
 }
 .setting-problem {
@@ -2605,7 +2844,9 @@ textarea.plugin-input {
   max-height: 220px;
 }
 .dialog select,
-.dialog input:not([type='checkbox']) {
+.dialog input:not([type='checkbox']),
+.settings-pane select,
+.settings-pane input:not([type='checkbox']) {
   padding: 6px 8px;
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -2709,7 +2950,8 @@ a.btn {
    there. An open plugin panel keeps its own column clear of them. */
 .toasts {
   position: fixed;
-  top: 12px;
+  /* Under the window's own buttons, where the window has no title bar. */
+  top: calc(12px + var(--window-bar));
   right: calc(12px + var(--plugin-panel, 0px));
   z-index: 50;
   display: flex;
@@ -2857,7 +3099,7 @@ a.btn {
   height: 28px;
   padding: 0;
   border: 1px solid var(--border);
-  border-radius: 50%;
+  border-radius: 8px;
   background: none;
   color: var(--muted);
   cursor: pointer;
@@ -3090,15 +3332,11 @@ a.btn {
   background: color-mix(in srgb, var(--accent) 8%, var(--panel));
 }
 
-/* The row under the message box. At its left the buttons that are not about the message being
-   written: the person's own prompt, and what plugins have there. In the middle, under the box,
-   what the conversation has cost (`.status-row`): in the middle for as long as the buttons leave
-   it there, and beside them once they need the room. */
+/* The row under the message box: what the conversation has cost (`.status-row`), in the middle.
+   Nothing else stands there since the buttons that were at its left went onto the bar above the box. */
 .dock-row {
-  display: grid;
-  grid-template-columns: minmax(max-content, 1fr) minmax(0, auto) minmax(0, 1fr);
-  align-items: center;
-  gap: 4px 8px;
+  display: flex;
+  justify-content: center;
   min-height: 24px;
   /* Closer to the box than the gap of the dock puts it. */
   margin-top: -2px;
@@ -3106,17 +3344,20 @@ a.btn {
 .dock-row .status-row {
   margin-top: 0;
 }
+/* At the right end of the bar above the message box: the person's own prompt, and what plugins add. */
 .dock-tools {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
+  justify-content: flex-end;
   gap: 2px 4px;
   min-width: 0;
+  margin-left: auto;
 }
 .dock-tools .plugin-row {
   gap: 2px 4px;
 }
-/* Quiet, like the numbers beside them: a drawing and a word, with a background only under the pointer. */
+/* Quiet, like the folder at the other end of the bar: a drawing and a word, with a background only under the pointer. */
 .dock-tools .btn {
   display: inline-flex;
   align-items: center;
@@ -3167,4 +3408,334 @@ a.btn {
   flex-shrink: 0;
   margin-top: 3px;
   color: var(--muted);
+}
+
+/* The app's own tooltips (Tips.tsx): what an element says of itself (`data-tip`), beside it while
+   the pointer rests on it or the keyboard is on it. The look of the word above a status widget
+   (`.status-tip`), for every place that used the system's tooltip before. */
+.tip {
+  position: fixed;
+  z-index: 1000;
+  max-width: min(340px, calc(100vw - 16px));
+  padding: 3px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--raised);
+  color: var(--text);
+  font-size: 12.5px;
+  line-height: 1.5;
+  /* A tip may hold two lines of its own (a name, and an address under it); an address breaks where it must. */
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+  box-shadow: 0 4px 14px rgb(0 0 0 / 25%);
+  pointer-events: none;
+  /* Not seen until it is placed: it is measured first. */
+  opacity: 0;
+}
+.tip[data-placed] {
+  opacity: 1;
+  transition: opacity 100ms ease;
+}
+@media (prefers-reduced-motion: reduce) {
+  .tip[data-placed] {
+    transition: none;
+  }
+}
+
+/* A session whose turn waits for the person to allow or refuse a tool call: a raised hand in the
+   place of the turning ring, in the colour of a warning, which breathes so that it is noticed. */
+.session-waiting {
+  position: absolute;
+  top: 50%;
+  left: -19px;
+  display: inline-flex;
+  width: 15px;
+  height: 15px;
+  margin-top: -7.5px;
+  color: var(--warn);
+  animation: session-wait 1.6s ease-in-out infinite;
+}
+.session-waiting svg {
+  width: 15px;
+  height: 15px;
+}
+@keyframes session-wait {
+  50% {
+    opacity: 0.45;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .session-waiting {
+    animation: none;
+  }
+}
+
+/* The message box stands in a frame with a bar on top of it. The bar holds what the chat is set
+   in: its folder now, and whatever else comes later. The box covers the frame's sides and lower
+   edge, so that the two read as one thing with a tab on top. */
+.composer-frame {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--panel) 45%, var(--bg));
+}
+.composer-top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 10px;
+  min-height: 34px;
+  padding: 3px 8px;
+  font-size: 13px;
+}
+/* The folder at the left gives way before the buttons at the right go to a line of their own. */
+.composer-top > :first-child {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+.composer-frame .composer {
+  margin: 0 -1px -1px;
+}
+/* The settings, as a page in the main part of the window (SettingsPage in Settings.tsx): its
+   sections in a column at the left, the one that is open beside them. What stands in a section
+   was written for a dialog, on the colour of a panel; here it stands on the page itself, so its
+   fields take the panel's colour, to be told from what is around them. */
+.settings-page {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 150px minmax(0, 1fr);
+  gap: 24px;
+  padding: 20px max(16px, calc((100% - 900px) / 2));
+}
+.settings-tabs {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.settings-tab {
+  padding: 6px 12px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.settings-tab:hover {
+  background: var(--raised);
+  color: var(--text);
+}
+.settings-tab[aria-selected='true'] {
+  background: var(--raised);
+  color: var(--text);
+  font-weight: 600;
+}
+.settings-pane {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+/* As tall as the page leaves it, where the dialog held every section to one height. */
+.settings-pane .tab-body {
+  flex: 1;
+  height: auto;
+  min-height: 0;
+}
+.settings-pane .tab-body .dialog-actions {
+  background: var(--bg);
+}
+.settings-pane select,
+.settings-pane input:not([type='checkbox']) {
+  background: var(--panel);
+}
+/* A question of the model's on a page that lies over the conversation: clear of the lower edge of the window. */
+.page > .permission {
+  margin-bottom: 12px;
+}
+/* The button of the page that is open, in the sidebar: marked the way the plugins' is. */
+.sidebar-settings[aria-pressed='true'] {
+  border-color: var(--accent);
+}
+/* Where the page is narrow, the sections go in a row above what they hold. */
+@media (max-width: 900px) {
+  .settings-page {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+    gap: 12px;
+  }
+  .settings-tabs {
+    flex-direction: row;
+    flex-wrap: wrap;
+  }
+}
+
+/* 设置 → 模型: what the section is for at the left, the way to another service at the right. */
+.tab-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+}
+.tab-head .hint {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+}
+/* "添加模型", and under it the list of what can be added (AddProviderMenu.tsx). The list hangs
+   from the button's right end, into the page. */
+.add-root {
+  position: relative;
+  flex-shrink: 0;
+}
+.add-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.add-menu {
+  right: 0;
+  left: auto;
+  width: min(290px, calc(100vw - var(--sidebar) - 60px));
+  /* The room is measured to the edge of the window; the section this list hangs in ends a little
+     before that (the page's own margin), and would cut off what reaches past its end. */
+  max-height: calc(var(--popup-room, 400px) - 14px);
+  overflow-y: auto;
+}
+.add-menu .menu-item-path {
+  white-space: normal;
+}
+/* What is there already, said at the right of its entry. */
+.menu-item-tag {
+  flex-shrink: 0;
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+/* The top of a page that sets up one provider: the way back, and what the page is for. */
+.form-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.form-title {
+  min-width: 0;
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 设置 → 外观: the looks to choose from, side by side, each with a small picture of the app in
+   it. The one in use has the accent's edge, twice as thick, and a tick after its name. */
+.theme-choices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.theme-choice {
+  flex: 1 1 140px;
+  max-width: 220px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.theme-choice:hover {
+  border-color: var(--accent);
+}
+.theme-choice[aria-checked='true'] {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+.theme-choice-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+}
+.theme-check {
+  display: inline-flex;
+  margin-left: auto;
+  color: var(--accent);
+}
+/* The picture: one look, or for "as the system is set" half of each. The colours are the look's own (see the top of this file). */
+.theme-picture {
+  display: flex;
+  height: 64px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  overflow: hidden;
+}
+.theme-look {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  background: var(--bg);
+}
+.theme-look-side {
+  width: 24%;
+  border-right: 1px solid var(--border);
+  background: var(--panel);
+}
+.theme-look-main {
+  position: relative;
+  flex: 1;
+}
+.theme-look-main span {
+  position: absolute;
+  height: 7px;
+  border-radius: 3px;
+}
+.theme-look-said {
+  top: 9px;
+  right: 7px;
+  width: 40%;
+  background: var(--raised);
+}
+.theme-look-answer {
+  top: 23px;
+  left: 7px;
+  width: 55%;
+  background: var(--border);
+}
+.theme-look-main .theme-look-box {
+  right: 7px;
+  bottom: 6px;
+  left: 7px;
+  height: 11px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+}
+
+/* The folder of a conversation that is under way: said, and no longer chosen. */
+.composer-place {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+  padding: 3px 10px;
+  color: var(--muted);
+}
+.composer-place svg {
+  flex-shrink: 0;
+}
+.composer-place span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
