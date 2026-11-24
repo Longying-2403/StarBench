@@ -3,6 +3,7 @@
 // into what the page shows, and never sent to a service.
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
+import { anthropicParams } from '../src/main/providers/anthropic.ts'
 import { chatMessages } from '../src/main/providers/chat.ts'
 import { geminiContents } from '../src/main/providers/gemini.ts'
 import type { Connection } from '../src/main/providers/index.ts'
@@ -113,11 +114,57 @@ test('the times of the messages are sent to no service', () => {
   const sent = {
     chat: chatMessages({ messages, connection, system: 's' }),
     responses: responsesInput({ messages, connection: { ...connection, kind: 'openai-responses' } }),
-    gemini: geminiContents({ messages, connection: { ...connection, kind: 'gemini' } })
+    gemini: geminiContents({ messages, connection: { ...connection, kind: 'gemini' } }),
+    anthropic: anthropicParams({ messages, connection: { ...connection, kind: 'anthropic' }, system: 's', tools: [], signal: new AbortController().signal, onText: () => {}, onReasoning: () => {} }, null).messages
   }
   for (const [format, body] of Object.entries(sent)) {
     const text = JSON.stringify(body)
     assert.ok(text.includes('notes.txt'), `${format}: the messages are there`)
     assert.doesNotMatch(text, /"at":/, `${format}: without their times`)
+  }
+})
+
+test('a message that went out as a plain chat says so: in a conversation that was kept, and as the page is told of it', () => {
+  const kept: StoredMessage[] = [
+    { role: 'user', content: '你好', at: 1000, plain: true },
+    { role: 'assistant', content: '你好！', at: 2000 },
+    { role: 'user', content: '看一下 notes.txt', at: 3000 }
+  ]
+  const items = itemsFromMessages(kept)
+  assert.deepEqual(items[0], { kind: 'user', text: '你好', skill: undefined, at: 1000, plain: true })
+  assert.equal('plain' in items[2], false, 'and one that went out with its tools does not')
+
+  // On the page the message is shown at once, and marked when the main process has said how it
+  // went out: the person's last message, wherever the reply to it has got to by then.
+  let live = itemsReducer([], { type: 'user', text: 'a', at: 1 })
+  live = itemsReducer(live, { type: 'event', event: { type: 'text_delta', text: 'hi' } })
+  live = itemsReducer(live, { type: 'user', text: 'b', at: 2 })
+  live = itemsReducer(live, { type: 'event', event: { type: 'text_delta', text: 'ho' } })
+  live = itemsReducer(live, { type: 'plain', at: 2 })
+  assert.deepEqual(
+    live.map((item) => (item.kind === 'user' ? [item.text, item.plain] : item.kind)),
+    [['a', undefined], 'assistant', ['b', true], 'assistant']
+  )
+  // It is said of one message, the one sent at that moment: a page that shows another conversation by then marks none of its own.
+  assert.equal(itemsReducer(live, { type: 'plain', at: 3 }), live)
+  assert.deepEqual(itemsReducer([], { type: 'plain', at: 2 }), [], 'with no message on the page there is nothing to mark')
+
+  // A call the model made all the same is told to the person in their words.
+  const told = itemsReducer([], { type: 'event', event: { type: 'notice', code: 'plain-call-dropped', message: 'The model tried to call a tool (x).' } })
+  assert.match((told[0] as Extract<Item, { kind: 'notice' }>).text, /纯对话不执行工具调用/)
+
+  // The mark is the app's own, like the times: a later turn with tools sends it to no service.
+  const connection: Connection = { provider: 'test', kind: 'openai-chat', apiKey: 'k', baseURL: 'https://example.invalid/v1', model: 'm', reasoningEffort: 'default' }
+  const messages = kept.filter((message): message is Exclude<StoredMessage, { role: 'compaction' }> => message.role !== 'compaction')
+  const sent = {
+    chat: chatMessages({ messages, connection, system: 's' }),
+    responses: responsesInput({ messages, connection: { ...connection, kind: 'openai-responses' } }),
+    gemini: geminiContents({ messages, connection: { ...connection, kind: 'gemini' } }),
+    anthropic: anthropicParams({ messages, connection: { ...connection, kind: 'anthropic' }, system: 's', tools: [], signal: new AbortController().signal, onText: () => {}, onReasoning: () => {} }, null).messages
+  }
+  for (const [format, body] of Object.entries(sent)) {
+    const text = JSON.stringify(body)
+    assert.ok(text.includes('你好'), `${format}: the messages are there`)
+    assert.doesNotMatch(text, /"plain"|"at":/, `${format}: without the mark, and without the times`)
   }
 })

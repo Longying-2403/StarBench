@@ -189,7 +189,8 @@ async function run(request: ModelRequest, withSummary: boolean): Promise<ModelRe
   try {
     const wire = {
       model: connection.model,
-      instructions: request.system,
+      // Left out where there are none: a plain chat of someone who wrote no instructions of their own.
+      ...(request.system ? { instructions: request.system } : {}),
       input: responsesInput(request),
       ...(tools.length ? { tools } : {}),
       reasoning: {

@@ -10,6 +10,7 @@ import {
   AppIcon,
   ArchiveIcon,
   ChevronDownIcon,
+  CloudDownloadIcon,
   ComposeIcon,
   FoldIcon,
   FolderIcon,
@@ -696,11 +697,13 @@ export function Sidebar({
   busy,
   page,
   showTimes,
+  update,
   onNewChat,
   onSearch,
   onPlugins,
   onMemory,
   onSettings,
+  onUpgrade,
   onRenameWorkspace,
   onArchiveWorkspace,
   onRemoveWorkspace,
@@ -721,6 +724,8 @@ export function Sidebar({
   page: 'chat' | 'plugins' | 'settings' | 'memory'
   /** Whether each session says, under its name, when it was last gone on with (设置 → 外观). */
   showTimes: boolean
+  /** The newer build that is known to be out, if there is one: the way to it stands beside the settings. */
+  update?: { name: string } | null
   /** With a folder, the new chat starts in that workspace. */
   onNewChat: (workspace?: string) => void
   /** The sessions in which the words of a search are found, in the name or in what was said. */
@@ -730,6 +735,8 @@ export function Sidebar({
   /** The same for the memory's page (MemoryPage.tsx). */
   onMemory: () => void
   onSettings: () => void
+  /** Shows the About page of the settings, where the newer build and the way to its files are. */
+  onUpgrade: () => void
 }) {
   const [collapsed, setCollapsed] = useState(readCollapsed)
   const [archivedOpen, setArchivedOpen] = useState(false)
@@ -986,17 +993,25 @@ export function Sidebar({
           {error}
         </div>
       )}
-      {/* Like the plugins: pressed once it shows the settings in the main part of the window, pressed again it goes back. */}
-      <button
-        type="button"
-        className="btn sidebar-settings"
-        aria-pressed={page === 'settings'}
-        onClick={onSettings}
-        {...(folded ? { 'aria-label': '设置', 'data-tip': '设置' } : {})}
-      >
-        <SettingsIcon />
-        {!folded && '设置'}
-      </button>
+      <div className="sidebar-foot">
+        {/* Like the plugins: pressed once it shows the settings in the main part of the window, pressed again it goes back. */}
+        <button
+          type="button"
+          className="btn sidebar-settings"
+          aria-pressed={page === 'settings'}
+          onClick={onSettings}
+          {...(folded ? { 'aria-label': '设置', 'data-tip': '设置' } : {})}
+        >
+          <SettingsIcon />
+          {!folded && '设置'}
+        </button>
+        {/* Only while a newer build is known to be out: the way to the About page, where it is named and its files are linked. */}
+        {update && (
+          <button type="button" className="btn sidebar-upgrade" aria-label={`有新版本 ${update.name}，查看`} data-tip={`有新版本 ${update.name}`} onClick={onUpgrade}>
+            <CloudDownloadIcon />
+          </button>
+        )}
+      </div>
       <Resizer />
     </aside>
   )

@@ -4,8 +4,8 @@
 // Both boxes look like the question about a tool call, and stand where it stands.
 
 import { useEffect, useRef, useState } from 'react'
-import { KIND_LABELS, NOTICE_MS, cleanText, defaultScope, findSensitive, isMemoryKind, isMemoryTool, sensitiveLabels } from '../../shared/memory.ts'
-import type { MemoryChange, MemoryKind, MemoryScope, SensitiveMatch } from '../../shared/memory.ts'
+import { KIND_LABELS, NOTICE_MS, cleanText, defaultScope, findSensitive, isMemoryKind, isMemoryTool, memoryIdOf, sensitiveAcross, sensitiveLabels } from '../../shared/memory.ts'
+import type { MemoryChange, MemoryEntry, MemoryKind, MemoryScope, SensitiveMatch } from '../../shared/memory.ts'
 import type { PermissionDecision, ToolCall } from '../../shared/types.ts'
 import { memoryApi } from './memory-api.ts'
 import { errorText } from './util.ts'
@@ -50,15 +50,18 @@ export function memoryCallSummary(call: ToolCall): string | null {
   return textOf(args.name) ? `#${textOf(args.name).replace(/^#/, '')}` : textOf(args.query)
 }
 
-/** Whether a question about a tool call is the memory's: a note that looks sensitive, which the person is asked about before it is kept. */
+/**
+ * Whether a question about a tool call is the memory's own. Its tools ask about two things only
+ * (main/memory.ts, `mustAsk`): a note that looks sensitive, before it is kept, and a change to a
+ * note the person wrote, before it is made. So every question about one of them is put in the
+ * memory's words (`MemorySensitiveBar`).
+ */
 export function isSensitiveMemoryCall(call: ToolCall): boolean {
-  if (call.name !== 'remember') return false
-  const note = noteOf(call)
-  return findSensitive(note.text).length > 0 || findSensitive(note.details).length > 0
+  return call.name === 'remember' || call.name === 'forget'
 }
 
 /** A text with what looks sensitive in it framed in red, as the question about a command frames characters that would not show. */
-function Marked({ text, matches }: { text: string; matches: readonly SensitiveMatch[] }) {
+export function Marked({ text, matches }: { text: string; matches: readonly SensitiveMatch[] }) {
   const pieces: (string | { text: string; label: string })[] = []
   let at = 0
   for (const match of matches) {
@@ -83,14 +86,21 @@ function Marked({ text, matches }: { text: string; matches: readonly SensitiveMa
 }
 
 /**
- * The question asked before a note that looks as if it holds a secret or personal data is kept:
- * where the question about a tool call stands, and like it. It waits for the answer, whatever the
- * conversation is set to. Not keeping it is the first answer.
+ * The memory's question about a call of its tools: before a model changes or removes a note the
+ * person wrote (`MemoryChangeBar`), or before it keeps one that looks as if it holds a secret or
+ * personal data. It stands where the question about a tool call stands, and looks like it. It
+ * waits for the answer, whatever the conversation is set to. Not doing it is the first answer.
  */
 export function MemorySensitiveBar({ call, onDecide }: { call: ToolCall; onDecide: (decision: PermissionDecision) => void }) {
   const note = noteOf(call)
   const inText = findSensitive(note.text)
   const inDetails = findSensitive(note.details)
+  // A key cut between the line and its details, or between this note and one kept a moment ago, has no mark of its own here.
+  const marked = inText.length > 0 || inDetails.length > 0
+  const sensitive = call.name === 'remember' && (marked || sensitiveAcross(note.text, note.details))
+  const args = argsOf(call)
+  const target = memoryIdOf(call.name === 'forget' ? args.name : args.replaces)
+  if (!sensitive && target) return <MemoryChangeBar call={call} target={target} onDecide={onDecide} />
   return (
     <div className="permission memory-sensitive" role="alertdialog" aria-label="敏感资料确认">
       <div className="permission-title">这条记忆里可能有敏感资料，要写入吗？</div>
@@ -107,7 +117,9 @@ export function MemorySensitiveBar({ call, onDecide }: { call: ToolCall; onDecid
             <Marked text={note.details} matches={inDetails} />
           </pre>
         )}
-        <div className="hint">认出的：{sensitiveLabels([...inText, ...inDetails]).join('、')}（红框）</div>
+        <div className="hint">
+          {marked ? `认出的：${sensitiveLabels([...inText, ...inDetails]).join('、')}（红框）` : '和这条的细节、或这个对话里刚写下的记忆连起来，像是一串密钥。'}
+        </div>
       </div>
       <div className="permission-actions">
         <button className="btn btn-primary" onClick={() => onDecide('deny')}>
@@ -121,24 +133,101 @@ export function MemorySensitiveBar({ call, onDecide }: { call: ToolCall; onDecid
   )
 }
 
+/** Every note there is, from the page's view of the memory: a note asked about is found by its name. */
+async function noteNamed(id: string): Promise<MemoryEntry | null> {
+  const listing = await memoryApi.list('')
+  return [...listing.global, ...listing.workspaces.flatMap((w) => w.entries)].find((entry) => entry.id === id) ?? null
+}
+
+/**
+ * The question asked before a model changes or removes a note the person wrote or changed on the
+ * page (main/memory.ts, `mustAsk`): what it says now, and what it would say. Not changing it is
+ * the first answer. Not asked where the person picked one of the memory's commands.
+ */
+function MemoryChangeBar({ call, target, onDecide }: { call: ToolCall; target: string; onDecide: (decision: PermissionDecision) => void }) {
+  const removing = call.name === 'forget'
+  const note = noteOf(call)
+  const [before, setBefore] = useState<MemoryEntry | null | undefined>(undefined)
+  useEffect(() => {
+    let current = true
+    noteNamed(target).then(
+      (found) => current && setBefore(found),
+      () => current && setBefore(null)
+    )
+    return () => {
+      current = false
+    }
+  }, [target])
+  const whose = before?.source?.user ? '这条是你在记忆页写的。' : '这条你在记忆页改过。'
+  const global = (removing ? before?.scope : note.scope) === 'global'
+  const then = removing ? '删除后，从下一轮起不再发给模型。' : `改了以后，从下一个对话起${global ? '（全局的会带进所有工作区）' : ''}都按新的内容。`
+  return (
+    <div className="permission memory-sensitive" role="alertdialog" aria-label={removing ? '删除你写的记忆' : '修改你写的记忆'}>
+      <div className="permission-title">{removing ? '模型要删除一条你自己写的记忆，同意吗？' : '模型要修改一条你自己写的记忆，同意吗？'}</div>
+      <div className="hint">
+        {whose}
+        {then}
+      </div>
+      <div className="permission-body memory-change">
+        {before === undefined ? (
+          <div className="hint">正在读取这条记忆…</div>
+        ) : (
+          <div className={`memory-sensitive-line${removing ? '' : ' memory-change-before'}`}>
+            {before && <span className={`badge memory-kind memory-kind-${before.kind}`}>{KIND_LABELS[before.kind]}</span>}
+            <span>
+              {removing ? '' : '原来：'}
+              {before ? before.text : `#${target}（找不到这条记忆）`}
+            </span>
+          </div>
+        )}
+        {!removing && (
+          <div className="memory-sensitive-line">
+            <span className={`badge memory-kind memory-kind-${note.kind}`}>{KIND_LABELS[note.kind]}</span>
+            <span>改成：{note.text}</span>
+          </div>
+        )}
+      </div>
+      <div className="permission-actions">
+        <button className="btn btn-primary" onClick={() => onDecide('deny')}>
+          {removing ? '不删' : '不改'}
+        </button>
+        <button className="btn" onClick={() => onDecide('allow')}>
+          {removing ? '同意删除' : '同意修改'}
+        </button>
+      </div>
+    </div>
+  )
+}
+
 /** A change told of, with what the person did about it here. */
 interface Row extends MemoryChange {
   undone?: boolean
+  /** A pending global note the person let hold everywhere from here. */
+  confirmed?: boolean
   problem?: string
 }
 
+/** A global note a model kept or changed that holds only in this workspace until the person lets it hold everywhere (main/memory.ts). */
+const waits = (row: Row): boolean => row.action !== 'deleted' && row.entry.pending === true && !row.undone && !row.confirmed
+
 const titleOf = (rows: readonly Row[]): string => {
   if (rows.length > 1) return `这一轮改了 ${rows.length} 条记忆`
-  const { action, entry } = rows[0]
+  const row = rows[0]
+  const { action, entry } = row
+  if (waits(row)) return action === 'saved' ? '已写入记忆，先只用在这个工作区' : '已更新记忆，先只用在这个工作区'
   const where = entry.scope === 'global' ? '全局' : '本工作区的'
   return action === 'saved' ? `已写入${where}记忆` : action === 'updated' ? `已更新${where}记忆` : `已删除一条${where}记忆`
 }
 
 const hintOf = (rows: readonly Row[]): string => {
-  if (rows.length > 1) return '新写入和改过的从下一个对话起进入清单，删掉的从下一轮起不再发给模型。'
-  const { action, entry } = rows[0]
-  if (action === 'deleted') return '从下一轮起不再发给模型。'
-  return entry.scope === 'global' ? '全局记忆会带进所有工作区的对话，从下一个对话起进入清单。' : '只在这个工作区的对话里用，从下一个对话起进入清单。'
+  if (rows.length > 1) {
+    const waiting = rows.some(waits) ? '标着"设为全局"的先只用在这个工作区，点了才进入所有工作区。' : ''
+    return `新写入和改过的从下一个对话起进入清单，删掉的从下一轮起不再发给模型。${waiting}`
+  }
+  const row = rows[0]
+  if (row.action === 'deleted') return '从下一轮起不再发给模型。'
+  if (waits(row)) return '点"设为全局"后，所有工作区的新对话才会带上它。不点的话，它一直只在这个工作区里用。'
+  return row.entry.scope === 'global' ? '全局记忆会带进所有工作区的对话，从下一个对话起进入清单。' : '只在这个工作区的对话里用，从下一个对话起进入清单。'
 }
 
 /**
@@ -202,11 +291,18 @@ export function MemoryNotice({ sessionId, onOpen }: { sessionId: string | null; 
 
   const undo = (row: Row): void => {
     memoryApi.undo(row.id).then(
-      (did) => setRows((now) => now.map((r) => (r.id === row.id ? { ...r, undone: did, ...(did ? {} : { problem: '已经撤销不了了' }) } : r))),
+      // Not undone: the note was changed again after this (main/memory.ts, `undo`).
+      (did) => setRows((now) => now.map((r) => (r.id === row.id ? { ...r, undone: did, ...(did ? {} : { problem: '撤销不了：它之后又被改过，可以先撤销后面那一步再试' }) } : r))),
       (err) => setRows((now) => now.map((r) => (r.id === row.id ? { ...r, problem: errorText(err) } : r)))
     )
   }
   const undoText = (row: Row): string => (row.undone ? (row.action === 'deleted' ? '已恢复' : '已撤销') : row.action === 'deleted' ? '恢复' : '撤销')
+  const confirm = (row: Row): void => {
+    memoryApi.confirm(row.entry.id).then(
+      () => setRows((now) => now.map((r) => (r.id === row.id ? { ...r, confirmed: true, problem: undefined } : r))),
+      (err) => setRows((now) => now.map((r) => (r.id === row.id ? { ...r, problem: errorText(err) } : r)))
+    )
+  }
   const single = rows.length === 1 ? rows[0] : null
 
   return (
@@ -230,6 +326,12 @@ export function MemoryNotice({ sessionId, onOpen }: { sessionId: string | null; 
             {!single && <span className="memory-notice-what">{row.action === 'saved' ? '写入' : row.action === 'updated' ? '更新' : '删除'} · {SCOPE_WORDS[row.entry.scope]}</span>}
             <span className={`badge memory-kind memory-kind-${row.entry.kind}`}>{KIND_LABELS[row.entry.kind]}</span>
             <span className="memory-notice-text">{row.entry.text}</span>
+            {!single && waits(row) && (
+              <button type="button" className="btn btn-small" onClick={() => confirm(row)}>
+                设为全局
+              </button>
+            )}
+            {!single && row.confirmed && <span className="memory-notice-what">已设为全局</span>}
             {!single && (
               <button type="button" className="btn btn-small" disabled={row.undone} onClick={() => undo(row)}>
                 {undoText(row)}
@@ -243,6 +345,11 @@ export function MemoryNotice({ sessionId, onOpen }: { sessionId: string | null; 
         <button className="btn btn-primary" onClick={() => onOpen(rows[rows.length - 1])}>
           查看
         </button>
+        {single && (waits(single) || single.confirmed) && (
+          <button className="btn" disabled={single.confirmed} onClick={() => confirm(single)}>
+            {single.confirmed ? '已设为全局' : '设为全局'}
+          </button>
+        )}
         {single && (
           <button className="btn" disabled={single.undone} onClick={() => undo(single)}>
             {undoText(single)}

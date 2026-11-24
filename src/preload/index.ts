@@ -1,10 +1,20 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type { MemoryApi, MemoryEvent } from '../shared/memory.ts'
 import type { HarnessApi, SessionEvent } from '../shared/types.ts'
+import type { UpdateEvent } from '../shared/update.ts'
 
 const api: HarnessApi = {
   getSettings: () => ipcRenderer.invoke('settings:get'),
   appInfo: () => ipcRenderer.invoke('app:info'),
+  updateState: () => ipcRenderer.invoke('updates:state'),
+  checkForUpdate: () => ipcRenderer.invoke('updates:check'),
+  setAutoUpdateCheck: (on) => ipcRenderer.invoke('updates:setAuto', on),
+  autoCheckForUpdate: () => ipcRenderer.invoke('updates:auto'),
+  onUpdateEvent: (listener) => {
+    const handler = (_: unknown, event: UpdateEvent): void => listener(event)
+    ipcRenderer.on('updates:event', handler)
+    return () => ipcRenderer.removeListener('updates:event', handler)
+  },
   saveProvider: (input) => ipcRenderer.invoke('providers:save', input),
   removeProvider: (id) => ipcRenderer.invoke('providers:remove', id),
   startSignIn: (options) => ipcRenderer.invoke('signin:start', options),
@@ -85,6 +95,7 @@ const memory: MemoryApi = {
   save: (input) => ipcRenderer.invoke('memory:save', input),
   remove: (ref) => ipcRenderer.invoke('memory:remove', ref),
   undo: (changeId) => ipcRenderer.invoke('memory:undo', changeId),
+  confirm: (id) => ipcRenderer.invoke('memory:confirm', id),
   setEnabled: (on) => ipcRenderer.invoke('memory:setEnabled', on),
   setBudget: (tokens) => ipcRenderer.invoke('memory:setBudget', tokens),
   setProviderMode: (providerId, mode) => ipcRenderer.invoke('memory:setProviderMode', providerId, mode),

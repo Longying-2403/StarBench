@@ -1,12 +1,37 @@
 // Reading the stored conversation, shared by every provider's request builder.
 
-import { fileBlock, imageNote } from '../../shared/attachments.ts'
+import { fileBlock, goneImageNote, imageNote } from '../../shared/attachments.ts'
 import { VIEW_ONLY_RESULT } from '../../shared/permissions.ts'
 import type { ChatMessage, WebActivity } from '../../shared/types.ts'
 import type { AssistantMessage, Connection } from './types.ts'
 
 /** The most pages of one search that are named in a note of it. */
 const NOTE_SOURCES = 8
+/** How long a title or an address may be in a note, in characters. */
+const NOTE_TITLE_MAX = 120
+const NOTE_URL_MAX = 300
+
+/**
+ * A title of a page, or a query, as it goes into a note. The note stands among the model's own
+ * words, where it is believed more than what a tool brought, and a page's author writes its title:
+ * so it stays on one line, closes no bracket of the note, carries no characters that do not show
+ * (some models read text written in invisible tag characters), and is not long.
+ */
+function noteText(text: string, max: number): string {
+  const flat = text
+    .replace(/\p{Cf}/gu, '')
+    .replace(/[\s\p{Cc}]+/gu, ' ')
+    .replace(/[[\]<>"]/g, ' ')
+    .replace(/ {2,}/g, ' ')
+    .trim()
+  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat
+}
+
+/** An address as it goes into a note: what would end a line or the note, or not show, escaped as an address escapes it. */
+function noteUrl(url: string): string {
+  const safe = url.replace(/[\s<>[\]"\p{Cc}\p{Cf}]/gu, encodeURIComponent)
+  return safe.length > NOTE_URL_MAX ? `${safe.slice(0, NOTE_URL_MAX - 1)}…` : safe
+}
 
 /**
  * What one web search or page read of a reply's own is told as, where it cannot go back in the
@@ -18,16 +43,20 @@ export function searchNote(activity: WebActivity): string {
   // Told only by the pages' titles, the model went on to doubt what it had read in them: what it
   // read is not here, and the note says so (tried with Claude, 2026-11-23).
   if (activity.kind === 'open') {
+    const page = noteUrl(activity.url ?? '')
     return activity.status === 'failed'
-      ? `[Earlier you tried to read the page ${activity.url ?? ''}, and it failed.]`
-      : `[Earlier you read the page ${activity.url ?? ''}; its content is not repeated here.]`
+      ? `[Earlier you tried to read the page ${page}, and it failed.]`
+      : `[Earlier you read the page ${page}; its content is not repeated here.]`
   }
-  const asked = (activity.queries ?? []).map((q) => `"${q}"`).join(', ')
+  const asked = (activity.queries ?? []).map((q) => `"${noteText(q, NOTE_TITLE_MAX)}"`).join(', ')
   const what = `Earlier you searched the web${asked ? ` for ${asked}` : ''}`
   if (activity.status === 'failed') return `[${what}, and the search failed.]`
   const found = (activity.sources ?? [])
     .slice(0, NOTE_SOURCES)
-    .map((s) => (s.title ? `${s.title} <${s.url}>` : `<${s.url}>`))
+    .map((s) => {
+      const title = s.title ? noteText(s.title, NOTE_TITLE_MAX) : ''
+      return title ? `${title} <${noteUrl(s.url)}>` : `<${noteUrl(s.url)}>`
+    })
     .join('; ')
   return `[${what} and read the results; they are not repeated here.${found ? ` Pages found: ${found}` : ''}]`
 }
@@ -50,7 +79,9 @@ export const INTERRUPTED = 'Error: this tool call was interrupted before it prod
  */
 export function userText(message: Extract<ChatMessage, { role: 'user' }>, connection?: Pick<Connection, 'noImages'>): string {
   const typed = message.skill ? `${message.skill.prompt}\n\n${message.content}` : message.content
-  const files = (message.attachments ?? []).flatMap((file) => (file.kind === 'text' ? [fileBlock(file)] : connection?.noImages ? [imageNote(file)] : []))
+  const files = (message.attachments ?? []).flatMap((file) =>
+    file.kind === 'text' ? [fileBlock(file)] : file.data === '' ? [goneImageNote(file)] : connection?.noImages ? [imageNote(file)] : []
+  )
   if (files.length === 0) return typed
   return typed ? `${files.join('\n\n')}\n\n${typed}` : files.join('\n\n')
 }

@@ -4,6 +4,7 @@
 // something that should not be kept. Used by the main process, which keeps the notes
 // (main/memory.ts), and by the page, which shows them. Nothing here reads or writes a file.
 
+import { folderKey } from './folders.ts'
 import { estimateTokens } from './stats.ts'
 
 /**
@@ -86,6 +87,23 @@ export interface MemoryEntry {
   /** When the person changed it on the page last, if they did. A change of theirs counts in conversations under way from their next turn. */
   byUser?: number
   source?: MemorySource
+  /**
+   * A global note a model kept or changed, waiting for the person to let it hold everywhere: until
+   * then it holds only in the workspace it was kept in (`origin`). Text in a file or on a page the
+   * model read could have asked it to keep the note, and a global note goes into every workspace.
+   */
+  pending?: boolean
+  /** The folder of the workspace a pending note was kept in. */
+  origin?: string
+}
+
+/**
+ * Whether a note holds in a conversation in `workspace`: every note of the memory's two layers
+ * does, but a pending global note only in the workspace it was kept in (`MemoryEntry.pending`).
+ */
+export function holdsIn(entry: Pick<MemoryEntry, 'pending' | 'origin'>, workspace: string, windows: boolean): boolean {
+  if (!entry.pending) return true
+  return entry.origin !== undefined && workspace !== '' && folderKey(entry.origin, windows) === folderKey(workspace, windows)
 }
 
 /** A note as a conversation keeps it from its first turn on: what its line in the instructions is made of. */
@@ -161,9 +179,15 @@ export function listLimit(budget: number, window: number | undefined, local: boo
   return budget
 }
 
-/** A note's line in the instructions. A note with details says so, so that the model knows there is more to read. */
+/**
+ * A note's line in the instructions. A note with details says so, so that the model knows there is
+ * more to read. A line made longer by hand goes in at the length a line may have, and says so the
+ * same way: its file keeps all of it, and recall reads all of it.
+ */
 export function lineOf(entry: Pick<SnapshotEntry, 'id' | 'kind' | 'text' | 'details'>): string {
-  return `- [${entry.kind}] ${entry.text} #${entry.id}${entry.details ? ' +' : ''}`
+  const cut = entry.text.length > TEXT_MAX
+  const text = cut ? `${entry.text.slice(0, TEXT_MAX - 1)}…` : entry.text
+  return `- [${entry.kind}] ${text} #${entry.id}${entry.details || cut ? ' +' : ''}`
 }
 
 const GLOBAL_HEAD = 'Notes that hold everywhere:'
@@ -264,6 +288,8 @@ export function writeEntryFile(entry: MemoryEntry): string {
   const lines = ['---', `name: ${entry.id}`, `description: ${JSON.stringify(entry.text)}`, `type: ${entry.kind}`, `created: ${new Date(entry.created).toISOString()}`, `updated: ${new Date(entry.updated).toISOString()}`]
   if (entry.byUser) lines.push(`edited-by-user: ${new Date(entry.byUser).toISOString()}`)
   if (entry.localOnly) lines.push('local-only: true')
+  if (entry.pending) lines.push('pending: true')
+  if (entry.origin !== undefined) lines.push(`origin: ${JSON.stringify(entry.origin)}`)
   const source = entry.source
   if (source?.user) lines.push('source: user')
   if (source?.conversation) lines.push(`source-conversation: ${JSON.stringify(source.conversation)}`)
@@ -297,7 +323,9 @@ const timeOf = (value: string | undefined): number | undefined => {
 
 /**
  * Reads a note's file. Null when it is not a note: no fields on top, or no line. Fields that are
- * missing or wrong are filled in as well as can be (a file may have been changed by hand).
+ * missing or wrong are filled in as well as can be (a file may have been changed by hand). A line
+ * or details made longer by hand than a note may have are kept whole: the note may be written
+ * back (an undo, a move), and what is written back is what was read.
  */
 export function readEntryFile(text: string, where: { id: string; scope: MemoryScope; workspace?: string; modified?: number }): MemoryEntry | null {
   const source = text.replace(/^﻿/, '').replace(/\r\n/g, '\n')
@@ -329,13 +357,16 @@ export function readEntryFile(text: string, where: { id: string; scope: MemorySc
     scope: where.scope,
     ...(where.workspace ? { workspace: where.workspace } : {}),
     kind,
-    text: line.slice(0, TEXT_MAX),
-    ...(details ? { details: details.slice(0, DETAILS_MAX) } : {}),
+    text: line,
+    ...(details ? { details } : {}),
     ...(fields['local-only'] === 'true' ? { localOnly: true } : {}),
     created,
     updated: timeOf(fields.updated) ?? created,
     ...(byUser ? { byUser } : {}),
-    ...(Object.keys(memorySource).length ? { source: memorySource } : {})
+    ...(Object.keys(memorySource).length ? { source: memorySource } : {}),
+    // Only a global note waits: one of a workspace holds there and nowhere else anyway.
+    ...(fields.pending === 'true' && where.scope === 'global' ? { pending: true } : {}),
+    ...(fields.origin !== undefined && where.scope === 'global' ? { origin: fields.origin } : {})
   }
 }
 
@@ -394,12 +425,29 @@ interface Pattern {
   check?: (found: string) => boolean
 }
 
+/** The run of key characters a labelled secret ends in (`LABELLED`): it has a digit, as keys do and words do not. */
+const labelledKeyHasDigit = (found: string): boolean => /\d/.test(/[A-Za-z0-9._~+/=-]{16,}$/.exec(found)?.[0] ?? '')
+
+/**
+ * A long run of key characters after a word that says it is a key, a token or a secret: what a key
+ * without a form of its own looks like in a note (a hexadecimal one, a UUID, one in small letters).
+ * A commit or a checksum is not taken for one, unless a note calls it a key.
+ */
+const LABELLED = /(?:(?<![A-Za-z])(?:api[ _-]?key|access[ _-]?key(?:[ _-]?id)?|secret(?:[ _-]?key)?|client[ _-]?secret|bearer|token|key)|密钥|秘钥|令牌|口令)\s*(?:[:：=]|是|为|為)?\s*["'“”‘’`]?[A-Za-z0-9._~+/=-]{16,}/gi
+
 /** What is looked for, the most telling first: where two overlap, the earlier one is what the page names. */
 const PATTERNS: readonly Pattern[] = [
   { kind: 'secret', label: '私钥', re: /-----BEGIN [A-Z ]*PRIVATE KEY-----/g },
   { kind: 'secret', label: 'API Key', re: /\b(?:sk-[A-Za-z0-9_-]{16,}|xai-[A-Za-z0-9]{20,}|AIza[0-9A-Za-z_-]{30,}|(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{40,}|glpat-[A-Za-z0-9_-]{20,}|xox[abposr]-[A-Za-z0-9-]{10,}|hf_[A-Za-z0-9]{30,}|(?:AKIA|ASIA)[0-9A-Z]{16})/g },
+  // Tencent Cloud, Alibaba Cloud, Volcengine, Baidu Qianfan, Stripe, Google OAuth, Groq.
+  { kind: 'secret', label: 'API Key', re: /\b(?:AKID[A-Za-z0-9]{32}|LTAI[A-Za-z0-9]{12,24}|AKLT[A-Za-z0-9_-]{20,}|bce-v3\/ALTAK-[A-Za-z0-9]+\/[A-Za-z0-9]+|(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}|ya29\.[A-Za-z0-9_-]{20,}|gsk_[A-Za-z0-9]{20,})/g },
+  // Zhipu: an id in hexadecimal and the secret, joined by a dot.
+  { kind: 'secret', label: 'API Key', re: /\b[0-9a-f]{32}\.[A-Za-z0-9]{16}\b/g },
   { kind: 'secret', label: '令牌', re: /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g },
   { kind: 'secret', label: '密码', re: /(?:password|passwd|passcode|pwd|密码|密碼|口令)\s*(?:[:：=]|是|为|為)\s*\S{4,}/gi },
+  // An address with a password in it: scheme://user:password@host.
+  { kind: 'secret', label: '密码', re: /\b[a-z][a-z0-9+.-]*:\/\/[^\s:/@]+:[^\s@/]+@[^\s/]+/gi },
+  { kind: 'secret', label: '密钥', re: LABELLED, check: labelledKeyHasDigit },
   { kind: 'personal', label: '电子邮箱', re: /[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}/g },
   { kind: 'personal', label: '身份证号', re: /\b[A-Z][12]\d{8}\b/g, check: taiwanIdValid },
   { kind: 'personal', label: '身份证号', re: /\b\d{17}[\dXx]\b/g, check: mainlandIdValid },
@@ -434,9 +482,25 @@ export function sensitiveLabels(matches: readonly SensitiveMatch[]): string[] {
   return [...new Set(matches.map((match) => match.label))]
 }
 
-/** Whether what a model asks to keep has anything in it that looks sensitive: its line or its details. */
-export function argsSensitive(args: { text?: unknown; details?: unknown }): boolean {
-  return [args.text, args.details].some((value) => typeof value === 'string' && findSensitive(value).length > 0)
+/**
+ * Whether two texts written one after the other hold something sensitive that neither holds by
+ * itself: a key cut in two, its first half at the end of `a` and the rest at the start of `b`.
+ */
+export function sensitiveAcross(a: string, b: string): boolean {
+  return findSensitive(`${a}${b}`).some((match) => match.start < a.length && match.end > a.length)
+}
+
+/**
+ * Whether what a model asks to keep has anything in it that looks sensitive: its line, its
+ * details, or the two read on from one another. `earlier` are notes kept just before in the same
+ * conversation: a key may be split between notes, so each is read on into the new one and back.
+ */
+export function argsSensitive(args: { text?: unknown; details?: unknown }, earlier: readonly string[] = []): boolean {
+  const text = typeof args.text === 'string' ? args.text : ''
+  const details = typeof args.details === 'string' ? args.details : ''
+  if ([text, details].some((value) => findSensitive(value).length > 0)) return true
+  if (sensitiveAcross(text, details)) return true
+  return earlier.some((before) => [text, details].some((part) => part !== '' && (sensitiveAcross(before, part) || sensitiveAcross(part, before))))
 }
 
 // ───────────────────────── Between the main process and the page ─────────────────────────
@@ -481,7 +545,7 @@ export interface MemoryChange {
   /** For undoing it. */
   id: string
   action: 'saved' | 'updated' | 'deleted'
-  entry: Pick<MemoryEntry, 'id' | 'scope' | 'workspace' | 'kind' | 'text'>
+  entry: Pick<MemoryEntry, 'id' | 'scope' | 'workspace' | 'kind' | 'text' | 'pending'>
 }
 
 export type MemoryEvent =
@@ -532,6 +596,8 @@ export interface MemoryApi {
   remove(ref: { id: string; scope: MemoryScope; workspace?: string }): Promise<string>
   /** Resolves with whether there was anything to undo. */
   undo(changeId: string): Promise<boolean>
+  /** Lets a pending global note hold in every workspace (`MemoryEntry.pending`). Resolves with the note as it is then. */
+  confirm(id: string): Promise<MemoryEntry>
   setEnabled(on: boolean): Promise<MemoryState>
   setBudget(tokens: number): Promise<MemoryState>
   setProviderMode(providerId: string, mode: ProviderMemoryMode): Promise<MemoryState>

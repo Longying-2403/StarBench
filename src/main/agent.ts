@@ -6,14 +6,15 @@ import { COMPACTION_DEFAULTS, compactFrom } from '../shared/compaction.ts'
 import type { CompactionSettings } from '../shared/compaction.ts'
 import { DEFAULT_PERMISSION_MODE, VIEW_ONLY_RESULT, rulingFor } from '../shared/permissions.ts'
 import type { PermissionMode, Ruling } from '../shared/permissions.ts'
-import { isLocalAddress } from '../shared/types.ts'
 import type { AgentEvent, CompactionMark, CompactionReport, CustomPrompt, PermissionDecision, StoredMessage, ToolCall } from '../shared/types.ts'
 import { STEP_SHARE, TARGET_SHARE, carriedTokens, compact, fitTokens, saysTooLong, sendable, storedWeight, windowSaid } from './compaction.ts'
 import { languageOf } from './language.ts'
+import { plainMessages, plainReply, plainWeight } from './plain.ts'
 import { ImagesRefused } from './providers/attachments.ts'
 import { adapterFor } from './providers/index.ts'
 import type { Connection, ModelReply, ModelRequest, ProviderAdapter } from './providers/index.ts'
 import { ServiceError, ToolsRefused } from './providers/types.ts'
+import { targetOf } from './sampling.ts'
 import type { SamplingRegistry } from './sampling.ts'
 import type { ToolRegistry } from './tools.ts'
 import { expected, fitParts, fitTo, halves, partsTotal, sentTokens } from '../shared/stats.ts'
@@ -56,10 +57,22 @@ export interface TurnOptions {
   memory?: string
   /** A name for this conversation that tells nothing else about it; see `ModelRequest.conversation`. */
   conversation?: string
+  /**
+   * A plain chat: the model is sent what was said and nothing of the app's. No tools go with the
+   * request, be they the app's, a plugin's, an MCP server's or the service's own search, and none
+   * is described in words for a server that takes no definitions. The instructions are the
+   * person's own for this provider and nothing else, and none at all where they wrote none: not
+   * the workspace, not the date, not the list of skills, nothing of the memory. What the
+   * conversation holds of earlier tool calls is told in words (plain.ts). The turn is one request,
+   * and a call the reply holds all the same is not run. What the person attached still goes, and
+   * so do the sampling fields and the thinking effort they chose, and the name of the
+   * conversation where a service is sent one (`conversation`): that one says nothing to the model.
+   */
+  plain?: boolean
   signal: AbortSignal
   /** Read on every model request, so tools added mid-turn are picked up at the next step. */
   tools: Pick<ToolRegistry, 'specs' | 'needsPermission' | 'execute'> &
-    Partial<Pick<ToolRegistry, 'list' | 'accessOf'>> & {
+    Partial<Pick<ToolRegistry, 'list' | 'accessOf' | 'accessFor'>> & {
       /**
        * Whether a call has to be asked about although the conversation would let it run: a note
        * the memory is to keep that looks as if it holds a secret or personal data. A call the
@@ -250,7 +263,11 @@ const DENIED = 'The user denied this tool call.'
 async function runToolCall(call: ToolCall, opts: TurnOptions): Promise<string> {
   if (opts.signal.aborted) return CANCELLED
   // What the conversation is set to says whether the call is run, asked about, or not run at all.
-  const access = opts.tools.accessOf?.(call.name) ?? (opts.tools.needsPermission(call.name) ? 'other' : 'read')
+  // Judged by the call where the tools can (a write into `.git` is more than an edit), else by the tool.
+  const access =
+    (await opts.tools.accessFor?.(call.name, call.arguments, opts.workspace)) ??
+    opts.tools.accessOf?.(call.name) ??
+    (opts.tools.needsPermission(call.name) ? 'other' : 'read')
   const ruling: Ruling = rulingFor(opts.permissionMode?.() ?? DEFAULT_PERMISSION_MODE, access)
   if (ruling === 'refuse') return VIEW_ONLY_RESULT
   // Asked about whatever was allowed for the conversation: what the call holds is what it is asked about.
@@ -260,7 +277,8 @@ async function runToolCall(call: ToolCall, opts: TurnOptions): Promise<string> {
     const decision = await opts.requestPermission(call)
     // A stop while the prompt was open ends the wait; that is a cancellation, not a refusal.
     if (opts.signal.aborted) return CANCELLED
-    if (decision === 'deny') return DENIED
+    // Only a yes runs the call: an answer of any other kind is none.
+    if (decision !== 'allow' && decision !== 'always') return DENIED
     if (decision === 'always' && !forced) opts.alwaysAllowed.add(call.name)
   }
   // The time the tool takes to run, which begins once it was allowed. Many tools take less than a millisecond.
@@ -377,13 +395,20 @@ function talkOf(opts: TurnOptions): Talk {
 
 /** What plugins add to a request to this connection. */
 function samplingOf(opts: TurnOptions, connection: Connection): ModelRequest['sampling'] {
-  return opts.sampling?.paramsFor({
-    provider: connection.provider,
-    kind: connection.kind,
-    baseURL: connection.baseURL,
-    local: isLocalAddress(connection.baseURL),
-    model: connection.model
-  })
+  return opts.sampling?.paramsFor(targetOf(connection))
+}
+
+/** The tools of a turn that has none: nothing to offer, and nothing that runs. */
+const NO_TOOLS: TurnOptions['tools'] = {
+  specs: () => [],
+  needsPermission: () => true,
+  execute: async () => 'Error: this conversation has no tools.'
+}
+
+/** What a plain chat is made from: the turn it was asked as, less the tools and what the app would add to the instructions. */
+function plainTurn(opts: TurnOptions): TurnOptions {
+  const { systemExtra: _skills, memory: _memory, ...rest } = opts
+  return { ...rest, tools: NO_TOOLS }
 }
 
 /** What tells the parts of a request apart when it is weighed. */
@@ -393,21 +418,29 @@ function hintsOf(talk: Talk): MeterHints {
 
 /** The next request, as things stand now. */
 function requestOf(talk: Talk): ModelRequest {
-  const { opts, connection } = talk
+  const { opts } = talk
+  const plain = opts.plain === true
+  // A plain chat offers no search of the service's and writes no tools into the instructions,
+  // whatever the connection was set to or has learned: the adapters go by these two.
+  const connection: Connection = plain ? { ...talk.connection, webSearch: false, textTools: false } : talk.connection
+  // What is kept, less what was compacted away.
+  const kept = sendable(opts.messages)
   return {
     connection,
-    system: systemPrompt({
-      workspace: opts.workspace,
-      model: { id: connection.model, provider: connection.providerName },
-      custom: connection.prompt,
-      extra: opts.systemExtra,
-      memory: opts.memory,
-      language: talk.language,
-      webSearch: connection.webSearch
-    }),
-    // What is kept, less what was compacted away.
-    messages: sendable(opts.messages),
-    tools: opts.tools.specs(),
+    // In a plain chat the person's own instructions, as they wrote them, or none.
+    system: plain
+      ? (connection.prompt?.text.trim() ?? '')
+      : systemPrompt({
+          workspace: opts.workspace,
+          model: { id: connection.model, provider: connection.providerName },
+          custom: connection.prompt,
+          extra: opts.systemExtra,
+          memory: opts.memory,
+          language: talk.language,
+          webSearch: connection.webSearch
+        }),
+    messages: plain ? plainMessages(kept) : kept,
+    tools: plain ? [] : opts.tools.specs(),
     sampling: samplingOf(opts, connection),
     ...(opts.conversation ? { conversation: opts.conversation } : {}),
     signal: opts.signal,
@@ -460,9 +493,14 @@ function forPage(message: StoredMessage): StoredMessage {
  * tokens with 10,900 of thinking made the next request 11,200 heavier), another none.
  */
 function weigher(talk: Talk, parts: ContextParts, weight: { tokens: number; scale: number }): { base: number; weigh(message: StoredMessage): number } {
-  const text = (message: StoredMessage): number => weight.scale * storedWeight(message)
+  // In a plain chat a message weighs what it is sent as there (plain.ts): a tool's result cut
+  // short, a reply as its text, and no thinking that comes back with it. Weighed as in a turn
+  // with tools, the messages would not add up to the request, and clearing old results would
+  // seem to free what was never sent.
+  const plain = talk.opts.plain === true
+  const text = (message: StoredMessage): number => weight.scale * (plain ? plainWeight(message) : storedWeight(message))
   const beyond = (message: StoredMessage): number =>
-    message.role === 'assistant' && message.origin?.tokens && message.origin.provider === talk.connection.provider ? Math.max(0, message.origin.tokens - text(message)) : 0
+    !plain && message.role === 'assistant' && message.origin?.tokens && message.origin.provider === talk.connection.provider ? Math.max(0, message.origin.tokens - text(message)) : 0
   let visible = 0
   let hidden = 0
   for (const message of sendable(talk.opts.messages)) {
@@ -620,7 +658,9 @@ export function compactConversation(opts: TurnOptions): Promise<CompactionReport
   return makeRoom(talkOf(opts), 'asked')
 }
 
-export async function runTurn(opts: TurnOptions): Promise<void> {
+export async function runTurn(asked: TurnOptions): Promise<void> {
+  // A plain chat has no tools from here on, whatever the caller handed over: none to offer, none to run.
+  const opts = asked.plain === true ? plainTurn(asked) : asked
   const talk = talkOf(opts)
   const stored = opts.messages
 
@@ -716,6 +756,10 @@ export async function runTurn(opts: TurnOptions): Promise<void> {
       // The same, found out while the reply was being written: what came of it is dropped, and the page shows the conversation anew.
       if (reply.tooLong && !opts.signal.aborted && (await makeRoom(talk, 'refused')).done) reply = await exchange()
       const { message: assistant, stopped } = reply
+      // A plain chat offered no tools, so a call in the reply is one nobody asked for: a server
+      // that makes them up, or a model that was trained to. It is not run and not kept, and the
+      // reply is kept as its text and nothing its service would want back (`plainReply`).
+      const dropped = opts.plain === true ? plainReply(assistant) : []
       // When it was finished: the page says it under the last reply of the turn.
       assistant.at = Date.now()
       if (assistant.content || assistant.tool_calls || assistant.reasoning_content || assistant.web?.length) stored.push(assistant)
@@ -726,7 +770,15 @@ export async function runTurn(opts: TurnOptions): Promise<void> {
         opts.emit({ type: 'error', message: stopped })
         return
       }
-      if (!assistant.tool_calls || opts.signal.aborted) return
+      if (dropped.length) {
+        opts.emit({
+          type: 'notice',
+          code: 'plain-call-dropped',
+          message: `The model tried to call a tool (${dropped.join(', ')}). This is a plain chat, which runs no tools, so the call was dropped.`
+        })
+      }
+      // The one request of a plain chat is made.
+      if (opts.plain === true || !assistant.tool_calls || opts.signal.aborted) return
 
       // Cut to fit before they are ever sent: nothing that the service has read is changed by that.
       const each = resultBudget(talk, assistant.tool_calls.length)

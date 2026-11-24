@@ -36,6 +36,33 @@ export function rulingFor(mode: PermissionMode, access: ToolAccess): Ruling {
 }
 
 /**
+ * Folders whose files other programs run commands from by themselves: git what its configuration
+ * and hooks name (`.git`), editors the tasks and settings of a folder (`.vscode`, `.idea`). A file
+ * written there is a command waiting for the next `git status`, which an editor may run unasked.
+ * So a conversation that lets files be changed without asking still asks about these.
+ */
+export const RUNS_ON_ITS_OWN: readonly string[] = ['.git', '.vscode', '.idea']
+
+/**
+ * Which folder of `RUNS_ON_ITS_OWN` a path the model wrote goes into, as far as the path as it is
+ * written tells; null for none. The parts are read as Windows reads them: letter case aside, a
+ * stream name after a colon left off (`.git::$INDEX_ALLOCATION` is `.git`), dots and spaces at the
+ * end left off (`.git.` is `.git`). Only what lies inside the workspace counts. Links, short names
+ * and second names of a file are for the main process to follow (tools.ts, `runsOnItsOwn`).
+ */
+export function runsOnItsOwnPart(workspace: string, target: string): string | null {
+  const slashes = (p: string): string => p.replace(/\\/g, '/').replace(/\/+$/, '')
+  const root = slashes(workspace).toLowerCase()
+  let inside = slashes(target)
+  if (root && inside.toLowerCase().startsWith(`${root}/`)) inside = inside.slice(root.length + 1)
+  for (const part of inside.split('/')) {
+    const name = part.replace(/:.*$/, '').replace(/[. ]+$/, '').toLowerCase()
+    if (RUNS_ON_ITS_OWN.includes(name)) return name
+  }
+  return null
+}
+
+/**
  * What the model is told in place of a result when a call was not run because the conversation
  * is view-only. The page knows such a call by this text, as it knows one the person refused.
  */

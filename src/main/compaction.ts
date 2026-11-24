@@ -165,8 +165,18 @@ interface Clearable {
   saves: number
 }
 
-/** The tool results from `start` up to `recent` that are worth clearing. */
-function clearable(messages: readonly StoredMessage[], start: number, recent: number): Clearable[] {
+type ToolResult = Extract<StoredMessage, { role: 'tool' }>
+
+/**
+ * The tool results from `start` up to `recent` that are worth clearing. `saved` says what sending
+ * the note in place of a result saves, as guessed: left out, what the two weigh as text.
+ */
+function clearable(
+  messages: readonly StoredMessage[],
+  start: number,
+  recent: number,
+  saved: (message: ToolResult, note: string) => number = (message, note) => estimateTokens(message.content) - estimateTokens(note)
+): Clearable[] {
   const names = callNames(messages, recent)
   const found: Clearable[] = []
   for (let i = start; i < recent; i++) {
@@ -174,7 +184,7 @@ function clearable(messages: readonly StoredMessage[], start: number, recent: nu
     if (message.role !== 'tool' || message.cleared !== undefined) continue
     if (NEVER_CLEARED.has(names.get(message.tool_call_id) ?? '')) continue
     const note = clearedNote(message.content)
-    const saves = estimateTokens(message.content) - estimateTokens(note)
+    const saves = saved(message, note)
     if (saves >= WORTH_CLEARING) found.push({ at: i, note, saves })
   }
   return found
@@ -538,11 +548,15 @@ export async function compact(job: CompactJob): Promise<CompactResult> {
     ...rest
   })
 
-  // First: old tool results, where clearing them is enough.
-  const old = clearable(messages, start, recent)
+  // First: old tool results, where clearing them is enough. What clearing one saves is told by
+  // the weights everything else here goes by: whoever sends the results another way than as they
+  // are kept (cut short, in a plain chat) frees less by clearing them, and has said so in `weigh`.
+  const given = job.weigh
+  const saved = given ? (message: ToolResult, note: string): number => Math.round((given(message) - given({ ...message, cleared: note })) / scale) : undefined
+  const old = clearable(messages, start, recent, saved)
   const freed = real(old.reduce((sum, entry) => sum + entry.saves, 0))
   const clear = (problem?: string): CompactResult => {
-    for (const { at: index, note } of old) (messages[index] as Extract<StoredMessage, { role: 'tool' }>).cleared = note
+    for (const { at: index, note } of old) (messages[index] as ToolResult).cleared = note
     dropThinking(messages, old[0].at)
     const mark = marked({ after: Math.max(0, used - freed), cleared: old.length })
     messages.push(mark)

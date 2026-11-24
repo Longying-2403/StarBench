@@ -86,6 +86,36 @@ test('sources are merged in order and cannot set what belongs to the app', (t) =
   assert.throws(() => registry.register('not a function' as never, 'bad'), /must be a function/)
 })
 
+test('only a plain yes makes a turn a plain chat, and a source that fails takes no tools away', (t) => {
+  const complaints = t.mock.method(console, 'error', () => {})
+  const registry = new SamplingRegistry()
+  assert.equal(registry.plainFor(target), false, 'nobody said so')
+
+  // Everything that is not `true` itself is no yes: a word, a number, an object, a promise of one.
+  const asked: SamplingTarget[] = []
+  for (const answer of ['true', 1, {}, null, undefined, false, Promise.resolve(true)]) registry.registerPlain((to) => (asked.push(to), answer), 'vague')
+  registry.registerPlain(() => {
+    throw new Error('boom')
+  }, 'broken')
+  assert.equal(registry.plainFor(target), false)
+  assert.deepEqual(asked[0], target)
+  assert.notEqual(asked[0], target, 'a source is handed a copy: what it does to it reaches nobody')
+  assert.deepEqual(
+    complaints.mock.calls.map((c) => String(c.arguments[0])),
+    ['[sampling] broken failed: boom']
+  )
+  assert.throws(() => registry.registerPlain('yes' as never, 'wrong'), /must be a function/)
+
+  // One source saying so is enough, for the models it says it for, and only while it is there.
+  const remove = registry.registerPlain((to) => to.local, 'local only')
+  assert.equal(registry.plainFor(target), true)
+  assert.equal(registry.plainFor({ ...target, local: false }), false)
+  remove()
+  assert.equal(registry.plainFor(target), false)
+  // It has no say in the fields of a request, nor those in it.
+  assert.deepEqual(registry.paramsFor(target), {})
+})
+
 test('a turn sends the fields with every request, as they are at that moment', async () => {
   const model = await fakeModel([
     [chunk({ tool_calls: [{ index: 0, id: 'c1', type: 'function', function: { name: 'list_dir', arguments: '{}' } }] })],
@@ -140,6 +170,7 @@ test('a plugin sets sampling fields for as long as it is enabled', async () => {
     `export const inject = ['sampling']
      export function apply(ctx, config) {
        ctx.sampling.provide((target) => (target.model === config.model ? { temperature: config.temperature } : undefined))
+       ctx.sampling.plain((target) => target.model === config.model && target.local)
      }`
   )
   const stateFile = path.join(base, 'plugins.json')
@@ -154,11 +185,16 @@ test('a plugin sets sampling fields for as long as it is enabled', async () => {
   assert.equal((await manager.list())[0].status, 'active')
   assert.deepEqual(sampling.paramsFor(target), { temperature: 0.3 })
   assert.deepEqual(sampling.paramsFor({ ...target, model: 'another' }), {})
+  // The same plugin says which turns are plain chats, through the same service.
+  assert.deepEqual([sampling.plainFor(target), sampling.plainFor({ ...target, model: 'another' }), sampling.plainFor({ ...target, local: false })], [true, false, false])
 
   await manager.setEnabled('tuner', false)
   assert.deepEqual(sampling.paramsFor(target), {}, 'gone when the plugin is switched off')
+  assert.equal(sampling.plainFor(target), false, 'and with it its say in what is a plain chat')
   await manager.setEnabled('tuner', true)
   assert.deepEqual(sampling.paramsFor(target), { temperature: 0.3 })
+  assert.equal(sampling.plainFor(target), true)
   await kernel.dispose()
   assert.deepEqual(sampling.paramsFor(target), {}, 'gone on shutdown')
+  assert.equal(sampling.plainFor(target), false)
 })

@@ -47,11 +47,12 @@ export function TrustDialog({ folder, onTrust, onCancel }: { folder: string; onT
         </p>
         <p className="hint">只信任你了解其内容的文件夹。之后可以在侧栏里把这个工作区删除，下次再选它时会重新询问。</p>
         {error && <Notice role="alert">{error}</Notice>}
+        {/* The no has the keyboard: an Enter meant for the message box as the question came up trusts nothing. */}
         <div className="dialog-actions">
-          <button type="button" className="btn" disabled={busy} onClick={onCancel}>
+          <button type="button" className="btn" autoFocus disabled={busy} onClick={onCancel}>
             取消
           </button>
-          <button type="button" className="btn btn-primary" autoFocus disabled={busy} onClick={trust}>
+          <button type="button" className="btn btn-primary" disabled={busy} onClick={trust}>
             信任文件夹
           </button>
         </div>

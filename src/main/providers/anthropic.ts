@@ -216,7 +216,8 @@ export function anthropicParams(request: ModelRequest, facts: ModelFacts | null)
   return {
     model: connection.model,
     max_tokens: Math.min(MAX_OUTPUT_TOKENS, facts?.maxTokens ?? MAX_OUTPUT_TOKENS),
-    system: request.system,
+    // Left out where there are none: a plain chat of someone who wrote no instructions of their own.
+    ...(request.system ? { system: request.system } : {}),
     messages: toMessages(request, withFallback, withSearch),
     // Caches the unchanging start of the conversation, which every step of a turn sends again.
     cache_control: { type: 'ephemeral' },

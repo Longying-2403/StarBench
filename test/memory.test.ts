@@ -82,8 +82,13 @@ test('a note changed by hand is read as well as can be, and a file that is no no
   assert.deepEqual(read, { id: 'ab12', scope: 'workspace', workspace: 'D:\\w', kind: 'project', text: '手写的一条: 没有引号', created: 5, updated: 5 })
   assert.equal(readEntryFile('no front matter at all', { id: 'x', scope: 'global' }), null)
   assert.equal(readEntryFile('---\ntype: user\n---\n', { id: 'x', scope: 'global' }), null, 'a note needs its line')
-  const long = readEntryFile(`---\ndescription: ${'长'.repeat(400)}\n---\n`, { id: 'x', scope: 'global' })
-  assert.equal(long?.text.length, TEXT_MAX, 'a line longer than a note may be is cut, not refused')
+  const long = readEntryFile(`---\ndescription: ${'长'.repeat(400)}\n---\n${'细'.repeat(2500)}\n`, { id: 'x', scope: 'global' })
+  // Kept whole, not refused and not cut: a note read may be written back, and nothing of it may go then.
+  assert.equal(long?.text.length, 400)
+  assert.equal(long?.details?.length, 2500)
+  // In the instructions it takes no more room than a line may, and says that recall has the rest.
+  const line = lineOf({ id: 'x', kind: 'user', text: long!.text })
+  assert.equal(line, `- [user] ${'长'.repeat(TEXT_MAX - 1)}… #x +`)
 })
 
 // ───────────────────────── What a conversation goes on seeing ─────────────────────────
@@ -382,6 +387,41 @@ test('a change can be undone: a note kept goes, one removed comes back, as the p
   const back = readEntryFile(await readFile(path.join(dir, 'global', `${kept.id}.md`), 'utf8'), { id: kept.id, scope: 'global' })
   assert.equal(back?.text, '另一条')
   assert.equal(back?.byUser, 3000)
+})
+
+test('two changes of one note are undone only from the last back: the first version does not come back', async () => {
+  let clock = 1000
+  const { memory, events } = await freshMemory({ now: () => clock })
+  const { tools } = await memory.forTurn(turnOf(), baseTools())
+  const saved = await tools.execute('remember', JSON.stringify({ text: '第一版', kind: 'project' }), ctx)
+  const id = /#(\w+)/.exec(saved)![1]
+  clock = 2000
+  await tools.execute('remember', JSON.stringify({ text: '第二版', kind: 'project', replaces: id }), ctx)
+  const [keep, change] = events.filter((e): e is Extract<MemoryEvent, { type: 'notice' }> => e.type === 'notice').map((e) => e.change)
+  const notes = async () => (await memory.list(turnOf().workspace, null)).workspaces.flatMap((w) => w.entries).filter((e) => e.id === id)
+  // The keeping first: refused, the note stays as it is.
+  assert.equal(await memory.undo(keep.id), false)
+  assert.deepEqual((await notes()).map((e) => e.text), ['第二版'])
+  // From the last back, each goes.
+  assert.equal(await memory.undo(change.id), true)
+  assert.deepEqual((await notes()).map((e) => e.text), ['第一版'])
+  assert.equal(await memory.undo(keep.id), true)
+  assert.deepEqual(await notes(), [])
+})
+
+test('a note made longer by hand comes back whole when its deletion is undone', async () => {
+  const { memory, dir, events } = await freshMemory()
+  await mkdir(path.join(dir, 'global'), { recursive: true })
+  const line = '长'.repeat(300)
+  const details = '细'.repeat(2500)
+  await writeFile(path.join(dir, 'global', 'hand.md'), `---\nname: hand\ndescription: "${line}"\ntype: user\nsource: user\n---\n${details}\n`)
+  const { tools } = await memory.forTurn(turnOf(), baseTools())
+  assert.match(await tools.execute('forget', JSON.stringify({ name: 'hand' }), ctx), /Removed note #hand/)
+  const gone = events.filter((e): e is Extract<MemoryEvent, { type: 'notice' }> => e.type === 'notice').at(-1)!
+  assert.equal(await memory.undo(gone.change.id), true)
+  const back = readEntryFile(await readFile(path.join(dir, 'global', 'hand.md'), 'utf8'), { id: 'hand', scope: 'global' })
+  assert.equal(back?.text, line)
+  assert.equal(back?.details, details)
 })
 
 test('the page sees every note, which workspaces were taken out of the list, and what a new conversation would carry', async () => {

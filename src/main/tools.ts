@@ -5,6 +5,7 @@ import { spawn } from 'node:child_process'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { Worker } from 'node:worker_threads'
+import { runsOnItsOwnPart } from '../shared/permissions.ts'
 import type { ToolAccess } from '../shared/permissions.ts'
 import { decodeOutput } from './decode.ts'
 import { system32, windowsPowerShell } from './program-path.ts'
@@ -156,6 +157,53 @@ export async function workspacePath(workspace: string, target: string): Promise<
     }
     if (!within(root, real)) throw new OutsideWorkspace(`Path leads outside the workspace through a link: ${target}`)
     return full
+  }
+}
+
+/**
+ * Whether a path the model wants to write goes into a folder whose files other programs run
+ * commands from (`RUNS_ON_ITS_OWN`, shared/permissions.ts): as it is written, by way of a link or
+ * a short name (`GIT~1`) in the workspace, or as a second name of a file there (a hard link). What
+ * cannot be told is taken to go there: all that hangs on it is that the call is asked about.
+ */
+export async function runsOnItsOwn(workspace: string, target: string): Promise<boolean> {
+  if (runsOnItsOwnPart(workspace, target) !== null) return true
+  try {
+    const full = resolveInWorkspace(workspace, target)
+    // The deepest part that exists, as the system has it: links followed, short names written out
+    // (the promise form of realpath is the system's own, as `fs.realpath.native` is).
+    const rest: string[] = []
+    let at = full
+    let real: string
+    for (;;) {
+      try {
+        real = await fs.realpath(at)
+        break
+      } catch (err) {
+        if (!notThere(err) || path.dirname(at) === at) throw err
+        rest.unshift(path.basename(at))
+        at = path.dirname(at)
+      }
+    }
+    const root = await fs.realpath(path.resolve(workspace))
+    if (runsOnItsOwnPart(root, path.join(real, ...rest)) !== null) return true
+    // A file with a second name may be one of those files under another name.
+    const stat = await fs.stat(full).catch(() => null)
+    return stat !== null && stat.isFile() && stat.nlink > 1
+  } catch (err) {
+    // Outside the workspace the tool refuses the path anyway.
+    return !(err instanceof OutsideWorkspace)
+  }
+}
+
+/** The "path" argument of a call, where it has one that is a string. */
+function pathOf(rawArgs: string): string | null {
+  try {
+    const args: unknown = JSON.parse(rawArgs || '{}')
+    const value = typeof args === 'object' && args !== null ? (args as Record<string, unknown>).path : undefined
+    return typeof value === 'string' ? value : null
+  } catch {
+    return null
   }
 }
 
@@ -538,6 +586,18 @@ export class ToolRegistry {
     const tool = this.tools.get(name)
     if (!tool || !tool.needsPermission) return 'read'
     return tool.source === 'builtin' && EDITS_WORKSPACE.has(name) ? 'edit' : 'other'
+  }
+
+  /**
+   * `accessOf` for one call. A write of the app's own into a folder whose files other programs run
+   * commands from (`runsOnItsOwn`) is more than an edit: it is asked about as any other call is,
+   * also where files may be changed without asking.
+   */
+  async accessFor(name: string, rawArgs: string, workspace: string): Promise<ToolAccess> {
+    const access = this.accessOf(name)
+    if (access !== 'edit') return access
+    const target = pathOf(rawArgs)
+    return target !== null && (await runsOnItsOwn(workspace, target)) ? 'other' : 'edit'
   }
 
   /** Runs a tool and always resolves with text; failures become an error message for the model. */

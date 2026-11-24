@@ -5,8 +5,11 @@ import type { Attachment } from '../../shared/attachments.ts'
 import type { AgentEvent, CompactionMark, ErrorHint, StoredMessage, ToolCall, WebActivity } from '../../shared/types.ts'
 
 export type Item =
-  /** `skill` is the name of a skill the user picked for the message; `attachments` are the files put with it; `at` is when it was sent. */
-  | { kind: 'user'; text: string; skill?: string; attachments?: Attachment[]; at?: number }
+  /**
+   * `skill` is the name of a skill the user picked for the message; `attachments` are the files put with it; `at` is when it was sent;
+   * `plain` says it went out as a plain chat, with no tools and nothing of the app's beside it.
+   */
+  | { kind: 'user'; text: string; skill?: string; attachments?: Attachment[]; at?: number; plain?: true }
   /** `open` is true while the model is still streaming into this message; `at` is when it had finished. */
   | { kind: 'assistant'; reasoning: string; text: string; open: boolean; at?: number }
   /**
@@ -29,7 +32,8 @@ const NOTICES: Record<Extract<AgentEvent, { type: 'notice' }>['code'], string> =
   'tools-as-text': '这个模型服务不接受工具定义，所以改用文字方式调用工具：工具的说明写进了提示词，模型在回答里写出的调用由应用识别并执行。没有学过工具调用的模型可能用不好。',
   'stream-refused': '这个模型服务在使用工具时不能边生成边显示，所以每次回答会在生成完之后一次出现。中间一段时间没有动静是正常的。',
   'compaction-failed': '上下文快满了，但没能让模型把较早的对话写成摘要，对话按现在的样子继续。',
-  'images-refused': '这个模型不能看图片，所以图片没有发给它，只告诉了它图片的文件名。换成能看图的模型后，这个对话里的图片会照常发送。'
+  'images-refused': '这个模型不能看图片，所以图片没有发给它，只告诉了它图片的文件名。换成能看图的模型后，这个对话里的图片会照常发送。',
+  'plain-call-dropped': '这条消息是以纯对话发出的，没有给模型任何工具，但它的回应里仍然带了工具调用。纯对话不执行工具调用，这次调用已经丢弃。'
 }
 
 /** A moment, as a part of an item that is only there when the moment is known. */
@@ -44,7 +48,8 @@ export function itemsFromMessages(messages: readonly StoredMessage[]): Item[] {
         text: message.content,
         skill: message.skill?.name,
         ...(message.attachments?.length ? { attachments: message.attachments } : {}),
-        ...timed(message.at)
+        ...timed(message.at),
+        ...(message.plain ? { plain: true as const } : {})
       })
     } else if (message.role === 'assistant') {
       // The service's own searches stand above what it wrote with them, as they did while it wrote.
@@ -110,6 +115,8 @@ export function turnEnds(items: readonly Item[], running: boolean): Map<number, 
 export type ItemsAction =
   | { type: 'reset'; items: Item[] }
   | { type: 'user'; text: string; skill?: string; attachments?: Attachment[]; at?: number }
+  /** The message that was sent at `at` went out as a plain chat, which the main process says once it has taken the message. */
+  | { type: 'plain'; at: number }
   | { type: 'event'; event: AgentEvent; at?: number }
 
 function appendDelta(items: Item[], field: 'reasoning' | 'text', text: string): Item[] {
@@ -124,6 +131,12 @@ export function itemsReducer(items: Item[], action: ItemsAction): Item[] {
   if (action.type === 'reset') return action.items
   if (action.type === 'user') {
     return [...items, { kind: 'user', text: action.text, skill: action.skill, ...(action.attachments?.length ? { attachments: action.attachments } : {}), ...timed(action.at) }]
+  }
+  if (action.type === 'plain') {
+    // The message it was said of, wherever the reply to it has got to meanwhile: told by the
+    // moment it was sent, so that a page which shows another conversation by now marks nothing.
+    const at = items.findLastIndex((item) => item.kind === 'user' && item.at === action.at)
+    return at < 0 ? items : items.map((item, index) => (index === at && item.kind === 'user' ? { ...item, plain: true as const } : item))
   }
 
   const { event } = action

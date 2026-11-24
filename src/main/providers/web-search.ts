@@ -129,10 +129,17 @@ export function responsesActivity(item: unknown): WebActivity | null {
 /** Claude's server tools that search or read the web, by the name the reply calls them. */
 const CLAUDE_TOOLS: Record<string, WebActivity['kind']> = { web_search: 'search', web_fetch: 'open' }
 
+/**
+ * What a table says for a name a service chose, where it has an entry of its own: a name such
+ * as `__proto__` or `constructor` finds what every object inherits, and a function or an object
+ * among the activities would break the saving of the conversation and its showing on the page.
+ */
+const entryOf = <T>(table: Record<string, T>, name: string): T | undefined => (Object.hasOwn(table, name) ? table[name] : undefined)
+
 /** A `server_tool_use` block of Claude's, once its input is known (or before, with none). Null for other server tools. */
 export function claudeCall(block: unknown, input?: unknown): WebActivity | null {
   if (!isBag(block) || block.type !== 'server_tool_use') return null
-  const kind = CLAUDE_TOOLS[String(block.name)]
+  const kind = entryOf(CLAUDE_TOOLS, String(block.name))
   const id = text(block.id)
   if (!kind || !id) return null
   const given = isBag(input) ? input : isBag(block.input) ? block.input : {}
@@ -186,7 +193,7 @@ function geminiPages(list: unknown): { url: string; error?: string }[] {
     if (!url || !isBag(entry)) continue
     const status = String(entry.urlRetrievalStatus ?? entry.url_retrieval_status ?? '')
     if (status === 'URL_RETRIEVAL_STATUS_SUCCESS') out.push({ url })
-    else out.push({ url, error: GEMINI_PAGE_ERRORS[status] ?? (status.replace(/^URL_RETRIEVAL_STATUS_/, '').toLowerCase() || 'unknown_error') })
+    else out.push({ url, error: entryOf(GEMINI_PAGE_ERRORS, status) ?? (status.replace(/^URL_RETRIEVAL_STATUS_/, '').toLowerCase() || 'unknown_error') })
   }
   return out
 }
@@ -204,7 +211,7 @@ export function geminiActivity(part: unknown): WebActivity | null {
   if (!isBag(part)) return null
   const call = isBag(part.toolCall) ? part.toolCall : undefined
   const tool = call ?? (isBag(part.toolResponse) ? part.toolResponse : undefined)
-  const kind = tool ? GEMINI_TOOLS[String(tool.toolType)] : undefined
+  const kind = tool ? entryOf(GEMINI_TOOLS, String(tool.toolType)) : undefined
   const id = tool ? text(tool.id) : undefined
   if (!tool || !kind || !id) return null
   if (call) {

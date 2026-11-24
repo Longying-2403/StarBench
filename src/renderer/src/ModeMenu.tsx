@@ -10,7 +10,7 @@ import { roomStyle, useOutsidePress, usePopupPlace } from './util.ts'
 const MODES: Record<PermissionMode, { name: string; about: string; icon: () => ReactNode }> = {
   view: { name: '仅可查看', about: '只读取和搜索文件，不修改、不执行', icon: EyeIcon },
   ask: { name: '每次询问', about: '修改文件、执行命令前都先问你', icon: HandIcon },
-  edit: { name: '工作区内修改', about: '改工作文件夹里的文件不再问，命令仍然先问', icon: PencilIcon },
+  edit: { name: '工作区内修改', about: '改工作文件夹里的文件不再问（.git、.vscode、.idea 里的除外），命令仍然先问', icon: PencilIcon },
   full: { name: '完全权限', about: '全部直接执行，不再询问；命令不限于工作文件夹', icon: UnlockIcon }
 }
 

@@ -29,6 +29,7 @@ type Item<T> = { on: boolean; value: T }
 interface Config {
   enabled: boolean
   localOnly: boolean
+  plain: boolean
   temperature: Item<number>
   top_p: Item<number>
   max_tokens: Item<number>
@@ -47,6 +48,7 @@ const params = (await import(at('ui/params.js'))) as {
   readStop(text: string): string[]
   appliesTo(config: Config, target: Reach): { applies: boolean; why?: string }
   fieldsFor(config: Config, target: Reach): Record<string, unknown> | undefined
+  plainFor(config: Config, target: { local: boolean }): { plain: boolean; why?: string }
 }
 const format = (await import(at('ui/format.js'))) as {
   seconds(ms: number): string
@@ -95,6 +97,12 @@ test('fresh from the box the panel changes nothing, and a saved config is brough
   const held = params.normalize({ temperature: on(9), top_p: on(-1), max_tokens: on(1), extra: on('x'.repeat(9000)), enabled: false, localOnly: false, record: false })
   assert.deepEqual([held.temperature.value, held.top_p.value, held.max_tokens.value, held.extra.value.length], [2, 0, 16, 8000])
   assert.deepEqual([held.enabled, held.localOnly, held.record], [false, false, false])
+  // The plain chat takes the tools away, so it is on only where it was switched on: nothing else reads as a yes.
+  assert.equal(fresh.plain, false)
+  assert.deepEqual(
+    [undefined, null, 'true', 1, {}, false, true].map((plain) => params.normalize({ plain }).plain),
+    [false, false, false, false, false, false, true]
+  )
   // Whatever is typed, the whole config fits what the app keeps for a plugin (64 KB).
   const most = params.normalize({ extra: on('\u0001'.repeat(9000)), stop: on('字'.repeat(5000)), seed: on('9'.repeat(99)) })
   assert.ok(Buffer.byteLength(JSON.stringify(most)) < 64 * 1024)
@@ -114,6 +122,20 @@ test('what is switched on becomes fields of the request, for the models it is me
   assert.deepEqual(params.appliesTo({ ...config, enabled: false }, local), { applies: false, why: 'off' })
   assert.equal(params.fieldsFor({ ...config, enabled: false }, local), undefined)
   assert.deepEqual(params.appliesTo(config, local), { applies: true })
+})
+
+test('the plain chat is a switch of its own: for the person\'s own model servers unless they say otherwise, and in every format', () => {
+  const off = params.normalize(undefined)
+  const plain = params.normalize({ plain: true })
+  assert.deepEqual(params.plainFor(off, local), { plain: false, why: 'off' })
+  assert.deepEqual(params.plainFor(plain, local), { plain: true })
+  assert.deepEqual(params.plainFor(plain, remote), { plain: false, why: 'remote' })
+  assert.deepEqual(params.plainFor({ ...plain, localOnly: false }, remote), { plain: true })
+  // It is not one of the sampling fields: their switch does not turn it off, and it adds none.
+  assert.deepEqual(params.plainFor({ ...plain, enabled: false }, local), { plain: true })
+  assert.equal(params.fieldsFor(plain, local), undefined)
+  // Whether a server is one's own has to be said outright.
+  assert.deepEqual(params.plainFor(plain, {} as never), { plain: false, why: 'remote' })
 })
 
 test('seed, stop words and the free fields are read from what was typed', () => {
@@ -336,8 +358,25 @@ test('the debug panel comes with the app, off until it is switched on, and then 
   assert.deepEqual(await call('reset'), params.DEFAULTS)
   assert.deepEqual(sampling.paramsFor(ollama), {})
 
+  // The plain chat: off as it comes, and from the panel's switch on for the next message.
+  const claude: SamplingTarget = { ...cloud, kind: 'anthropic' }
+  assert.deepEqual([sampling.plainFor(ollama), sampling.plainFor(cloud)], [false, false])
+  await call('configure', params.normalize({ plain: true }))
+  assert.deepEqual([sampling.plainFor(ollama), sampling.plainFor(cloud), sampling.plainFor(claude)], [true, false, false], 'for a model server of the person\'s own')
+  assert.deepEqual(sampling.paramsFor(ollama), {}, 'and it adds no field to a request')
+  await call('configure', params.normalize({ plain: true, localOnly: false, enabled: false }))
+  assert.deepEqual([sampling.plainFor(ollama), sampling.plainFor(cloud), sampling.plainFor(claude)], [true, true, true], 'or for every service, in every format, when they say so')
+  // What the page sends is not trusted to be in shape here either.
+  await call('configure', { plain: 'yes' })
+  assert.equal(sampling.plainFor(ollama), false)
+  await call('configure', params.normalize({ plain: true }))
+  assert.deepEqual(await call('reset'), params.DEFAULTS)
+  assert.equal(sampling.plainFor(ollama), false, 'back to how it came')
+
+  await call('configure', params.normalize({ plain: true }))
   await manager.setEnabled('debug', false)
   assert.deepEqual(sampling.paramsFor(ollama), {})
+  assert.equal(sampling.plainFor(ollama), false, 'the plugin switched off, a message goes out with its tools again')
   await kernel.dispose()
 })
 
@@ -448,6 +487,8 @@ test("the debug panel's interface draws the settings, what they do for the model
     '发给 qwen3.5:9b 的请求会带上：top_k、temperature',
     '调整采样参数=true',
     '只用于本地模型=true',
+    '纯对话（不带工具）=false',
+    '关着：消息照常发出，带着工具和 StarBench 的提示词。',
     '温度=true',
     // The slider under a switch does not say the name a second time.
     'data-control="slider" data-unseen="yes">温度=0.2',
@@ -480,4 +521,28 @@ test("the debug panel's interface draws the settings, what they do for the model
   assert.ok(draw(Readout, place()).includes('temperature = 0.2'))
   assert.equal(draw(Readout, place({ local: false })), '')
   assert.equal(draw(Readout, { ...place(), model: null }), '')
+  assert.ok(!draw(Readout, place()).includes('纯对话'), 'nothing of the plain chat while it is off')
+  // A tip in the app's own look, not the system's.
+  assert.ok(draw(Readout, place()).includes('data-tip=') && !draw(Readout, place()).includes('title='))
+
+  // With the plain chat switched on, the panel says for which model it holds, and the bar says so while it does.
+  const plainly = await setup({
+    apiVersion: 1,
+    id: 'debug',
+    React,
+    controls: { Slider: control('slider'), Switch: control('switch'), Field: control('field') },
+    backend: { call: async (name: string) => (name === 'state' ? { config: params.normalize({ plain: true }), exchanges: [] } : undefined), on: () => () => {} }
+  })
+  await new Promise((resolve) => setImmediate(resolve))
+  const plainPanel = panelOf(plainly)!.component
+  const PlainReadout = slotsOf(plainly)['composer.actions']
+  const here = draw(plainPanel, place())
+  assert.ok(here.includes('纯对话（不带工具）=true'))
+  assert.ok(here.includes('发给 qwen3.5:9b 的消息会以纯对话发出：不带任何工具'))
+  assert.ok(draw(plainPanel, place({ local: false, name: '云端' })).includes('云端 不是本机或局域网里的模型服务，发给它的消息照常带着工具。'))
+  // In a format the sampling fields do not reach, the plain chat still holds.
+  assert.ok(draw(plainPanel, place({ kind: 'anthropic', name: '本机网关' })).includes('的消息会以纯对话发出'))
+  assert.match(draw(PlainReadout, place()), /<span class="hint debug-readout debug-readout-plain" data-tip="[^"]*不带任何工具[^"]*">纯对话<\/span>$/)
+  assert.equal(draw(PlainReadout, place({ local: false })), '', 'not for a service it does not hold for')
+  assert.equal(draw(PlainReadout, { ...place(), model: null }), '')
 })

@@ -2,7 +2,7 @@
 // 这个文件运行在 StarBench 的窗口里。设置和记录都放在后台部分（../index.js），这里只负责
 // 显示和改动；怎么把设置变成请求里的字段在 params.js，怎么把记录变成文字在 format.js。
 
-import { PARAMS, appliesTo, fieldsFor, normalize, readExtra, readSeed } from './params.js'
+import { PARAMS, appliesTo, fieldsFor, normalize, plainFor, readExtra, readSeed } from './params.js'
 import { headline, messageCount, messagesText, pretty, replyText, seconds, settingsOf } from './format.js'
 
 /** 界面里留着的记录条数，和后台部分一致。 */
@@ -78,17 +78,45 @@ export default function setup({ React, controls, backend }) {
     return { tone: 'on', text: `发给 ${model.id} 的请求会带上：${Object.keys(fields).join('、')}` }
   }
 
+  /** 发给当前模型的消息是不是以纯对话发出，写成一句话。tone 的意思和上面一样。 */
+  const plainStatusOf = (config, model) => {
+    if (!model) return { tone: 'idle', text: '还没有选模型。' }
+    const reach = plainFor(config, targetOf(model))
+    if (reach.plain) {
+      return { tone: 'on', text: `发给 ${model.id} 的消息会以纯对话发出：不带任何工具，系统提示词只有你在“提示词”里给这个模型服务写的那一份，没写就没有。` }
+    }
+    if (reach.why === 'off') return { tone: 'idle', text: '关着：消息照常发出，带着工具和 StarBench 的提示词。' }
+    return { tone: 'warn', text: `${model.provider.name} 不是本机或局域网里的模型服务，发给它的消息照常带着工具。想对它也用纯对话，就关掉“只用于本地模型”。` }
+  }
+
   /**
-   * 输入框上面那条栏里的读数：有参数正在加进请求时提醒一下，面板收着也看得到。
+   * 输入框上面那条栏里的读数：消息会以纯对话发出、或者有参数正在加进请求时提醒一下，面板收着也看得到。
    * @param {import('../../../types/starbench-plugin').PluginPlaceProps} props
    */
   function Readout({ model }) {
     const { loaded, config } = useStore()
-    const fields = loaded && model ? fieldsFor(config, targetOf(model)) : undefined
-    if (!fields) return null
-    const names = Object.keys(fields)
+    if (!loaded || !model) return null
+    const plain = plainFor(config, targetOf(model)).plain
+    const fields = fieldsFor(config, targetOf(model))
+    if (!plain && !fields) return null
+    const names = Object.keys(fields ?? {})
     const detail = names.map((name) => `${name} = ${JSON.stringify(fields[name])}`).join('\n')
-    return h('span', { className: 'hint debug-readout', title: `调试面板正在给请求加上：\n${detail}` }, `已调 ${names.length} 项参数`)
+    // 说明用应用自己的提示框（data-tip），和应用里其他地方一样。
+    return h(
+      React.Fragment,
+      null,
+      plain
+        ? h(
+            'span',
+            {
+              className: 'hint debug-readout debug-readout-plain',
+              'data-tip': '调试面板开着“纯对话”：发给这个模型的消息不带任何工具，也不带 StarBench 的提示词、Skills 列表和记忆。'
+            },
+            '纯对话'
+          )
+        : null,
+      fields ? h('span', { className: 'hint debug-readout', 'data-tip': `调试面板正在给请求加上：\n${detail}` }, `已调 ${names.length} 项参数`) : null
+    )
   }
 
   /** 一段可以复制的文字：标题、“复制”按钮和内容。folded 的那种先收着，点标题展开。 */
@@ -193,6 +221,7 @@ export default function setup({ React, controls, backend }) {
     if (!loaded) return h('p', { className: problem ? 'debug-problem' : 'hint' }, problem || '正在读取…')
 
     const status = statusOf(config, model)
+    const plainStatus = plainStatusOf(config, model)
     const setItem = (name, patch) => change({ [name]: { ...config[name], ...patch } })
     // 一项参数：一个开关，打开后在它下面出现调它的控件。控件的名字开关上已经写了，不再显示一遍。
     const item = (name, label, hint, control, problemText) =>
@@ -217,10 +246,33 @@ export default function setup({ React, controls, backend }) {
       h(
         'section',
         { className: 'debug-section' },
-        h('h3', { className: 'debug-heading' }, '采样参数', h('button', { type: 'button', className: 'btn btn-small', onClick: reset }, '恢复默认')),
+        // “恢复默认”恢复的是整个面板的设置，所以放在最上面这一栏。
+        h('h3', { className: 'debug-heading' }, '适用范围', h('button', { type: 'button', className: 'btn btn-small', onClick: reset }, '恢复默认')),
+        h(Switch, {
+          label: '只用于本地模型',
+          hint: '下面的纯对话和采样参数，都只对地址在本机或局域网里的模型服务生效',
+          checked: config.localOnly,
+          onChange: (localOnly) => change({ localOnly })
+        })
+      ),
+      h(
+        'section',
+        { className: 'debug-section' },
+        h('h3', { className: 'debug-heading' }, '纯对话'),
+        h('p', { className: `debug-status debug-status-${plainStatus.tone}` }, plainStatus.text),
+        h(Switch, {
+          label: '纯对话（不带工具）',
+          hint: '不给模型任何工具，也不加 StarBench 的提示词、Skills 列表和记忆。从下一条消息起生效，发出的消息下面会标上“纯对话”',
+          checked: config.plain,
+          onChange: (plain) => change({ plain })
+        })
+      ),
+      h(
+        'section',
+        { className: 'debug-section' },
+        h('h3', { className: 'debug-heading' }, '采样参数'),
         h('p', { className: `debug-status debug-status-${status.tone}` }, status.text),
         h(Switch, { label: '调整采样参数', hint: '总开关。关掉后请求里不带下面任何一项', checked: config.enabled, onChange: (enabled) => change({ enabled }) }),
-        h(Switch, { label: '只用于本地模型', hint: '只发给地址在本机或局域网里的模型服务', checked: config.localOnly, onChange: (localOnly) => change({ localOnly }) }),
         Object.keys(PARAMS).map((name) =>
           item(
             name,

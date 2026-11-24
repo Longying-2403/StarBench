@@ -28,8 +28,9 @@ import { estimateTokens, formatCount, formatTokens } from '../../shared/stats.ts
 import { isLocalAddress } from '../../shared/types.ts'
 import type { ProviderInfo } from '../../shared/types.ts'
 import { whenExact, whenText } from '../../shared/when.ts'
-import { ChevronLeftIcon, PlusIcon, line } from './icons.tsx'
+import { ChevronLeftIcon, PlusIcon, WarningIcon, line } from './icons.tsx'
 import { memoryApi } from './memory-api.ts'
+import { Marked } from './MemoryNotice.tsx'
 import { Notice } from './Notice.tsx'
 import { Slider } from './PluginControls.tsx'
 import { errorText, isWindows, useNow } from './util.ts'
@@ -352,7 +353,8 @@ export function MemoryPage({
 
   const use = listing?.use
   const listed = useMemo(() => new Set(use?.listed ?? []), [use])
-  const inScope = (entry: MemoryEntry): boolean => entry.scope === 'global' || same(entry.workspace, workspace)
+  // A global note that waits for the person holds only in the workspace it was kept in (main/memory.ts).
+  const inScope = (entry: MemoryEntry): boolean => (entry.scope === 'global' && (!entry.pending || same(entry.origin, workspace))) || same(entry.workspace, workspace)
   const notListed = (entry: MemoryEntry): boolean =>
     Boolean(use) && use!.mode !== 'off' && inScope(entry) && (use!.provider.local || !entry.localOnly) && !listed.has(entry.id)
 
@@ -380,6 +382,27 @@ export function MemoryPage({
       (change) => setGone((now) => [{ key: keyOf(entry), change, entry }, ...now]),
       (err) => setError(errorText(err))
     )
+  }
+  /** Lets a global note a model kept hold in every workspace. */
+  const confirm = (entry: MemoryEntry): void => {
+    setError('')
+    memoryApi.confirm(entry.id).catch((err) => setError(errorText(err)))
+  }
+  /** Makes a global note a model kept a note of the workspace it was kept in. */
+  const keepHere = (entry: MemoryEntry): void => {
+    setError('')
+    memoryApi
+      .save({
+        id: entry.id,
+        from: { scope: 'global' },
+        scope: 'workspace',
+        workspace: entry.origin ?? '',
+        kind: entry.kind,
+        text: entry.text,
+        ...(entry.details ? { details: entry.details } : {}),
+        ...(entry.localOnly ? { localOnly: true } : {})
+      })
+      .catch((err) => setError(errorText(err)))
   }
   const bringBack = (key: string, change: string): void => {
     memoryApi.undo(change).then(
@@ -440,12 +463,32 @@ export function MemoryPage({
       )
     }
     const open = opened.has(key)
+    // A global note a model kept, waiting for the person: the bar and the tint of a warning.
+    const waiting = entry.scope === 'global' && entry.pending === true
+    // What looks like a key or personal data in a note already kept, framed in red as when it was asked about.
+    const inText = findSensitive(entry.text)
+    const inDetails = findSensitive(entry.details ?? '')
+    const risky = [...inText, ...inDetails]
+    const secret = risky.some((match) => match.kind === 'secret')
     return (
-      <li key={key} className="row memory-row" data-key={key} data-focus={flash === key ? '' : undefined}>
+      <li key={key} className="row memory-row" data-key={key} data-focus={flash === key ? '' : undefined} data-pending={waiting ? '' : undefined}>
         <div className="row-main">
           <div className="row-title">
             <span className={`badge memory-kind memory-kind-${entry.kind}`}>{KIND_LABELS[entry.kind]}</span>
-            <span className="memory-text">{entry.text}</span>
+            <span className="memory-text">
+              <Marked text={entry.text} matches={inText} />
+            </span>
+            {waiting && (
+              <span className="badge memory-pending" data-tip="模型写下的全局记忆。设为全局之前，只在写下它的工作区里用">
+                <WarningIcon />
+                待确认
+              </span>
+            )}
+            {risky.length > 0 && (
+              <span className="badge memory-risky" data-tip={`认出的：${sensitiveLabels(risky).join('、')}`}>
+                {secret ? '可能是密钥' : '可能有个人资料'}
+              </span>
+            )}
             {entry.localOnly && (
               <span className="badge" data-tip="只发给本机或局域网里的模型">
                 仅本地
@@ -471,15 +514,30 @@ export function MemoryPage({
                 })
               }
             >
-              {entry.details}
+              <Marked text={entry.details} matches={inDetails} />
             </div>
           )}
           <div className="row-meta">
-            {entry.scope === 'global' ? '全局' : `工作区：${workspaceName(entry.workspace ?? '', names, isWindows)}`} ·{' '}
-            <span data-tip={whenExact(entry.updated)}>{whenText(entry.updated, now)}</span>
+            {waiting
+              ? `全局（待确认，目前只在"${workspaceName(entry.origin ?? '', names, isWindows)}"里用）`
+              : entry.scope === 'global'
+                ? '全局'
+                : `工作区：${workspaceName(entry.workspace ?? '', names, isWindows)}`}{' '}
+            · <span data-tip={whenExact(entry.updated)}>{whenText(entry.updated, now)}</span>
             {sourceText(entry) && ` · ${sourceText(entry)}`}
+            {risky.length > 0 && ` · 记忆会随请求发给模型服务，${secret ? '建议删掉这条并更换 Key' : '建议删掉或改写这条'}`}
           </div>
         </div>
+        {waiting && (
+          <button type="button" className="btn btn-small" onClick={() => confirm(entry)}>
+            设为全局
+          </button>
+        )}
+        {waiting && entry.origin && (
+          <button type="button" className="btn btn-small" onClick={() => keepHere(entry)}>
+            只留在本工作区
+          </button>
+        )}
         <button type="button" className="btn btn-small" onClick={() => setEditing(key)}>
           编辑
         </button>

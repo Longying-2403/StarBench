@@ -1,6 +1,8 @@
-// The sampling settings plugins add to model requests: temperature, top_p and the like.
+// The sampling settings plugins add to model requests: temperature, top_p and the like, and
+// their say in whether a turn is a plain chat.
 // Nothing in this file depends on Electron or the plugin kernel.
 
+import { isLocalAddress } from '../shared/types.ts'
 import type { ProviderKind } from '../shared/types.ts'
 
 /** The model a request is about to go to. */
@@ -25,6 +27,18 @@ export type SamplingParams = Record<string, unknown>
 export type SamplingSource = (target: SamplingTarget) => SamplingParams | null | undefined
 
 /**
+ * Asked as a turn begins, so it answers at once. `true` has the turn be a plain chat
+ * (`TurnOptions.plain` in agent.ts): one that takes no tools and nothing of the app's along. Any
+ * other answer leaves the turn as it is: a source can take the tools away, and can do nothing else.
+ */
+export type PlainSource = (target: SamplingTarget) => unknown
+
+/** The model a connection leads to, as the sources are told of it: without its key. */
+export function targetOf(connection: { provider: string; kind: ProviderKind; baseURL: string; model: string }): SamplingTarget {
+  return { provider: connection.provider, kind: connection.kind, baseURL: connection.baseURL, local: isLocalAddress(connection.baseURL), model: connection.model }
+}
+
+/**
  * The parts of a request that are the app's own: what is said, to which model, with which tools,
  * and how the answer comes back. `n` is among them because the app reads one answer, and several
  * would arrive mixed into each other. A sampling source cannot set any of these.
@@ -34,6 +48,35 @@ export const RESERVED: ReadonlySet<string> = new Set(['model', 'messages', 'tool
 /** Everything that wants a say in how the model picks its words, whoever provided it. */
 export class SamplingRegistry {
   private sources: { ask: SamplingSource; owner: string }[] = []
+  private plain: { ask: PlainSource; owner: string }[] = []
+
+  /** Adds a source that says which turns are plain chats, and returns the function that removes it again. */
+  registerPlain(ask: PlainSource, owner: string): () => void {
+    if (typeof ask !== 'function') throw new Error('A source for plain chats must be a function')
+    const entry = { ask, owner }
+    this.plain.push(entry)
+    return () => {
+      const at = this.plain.indexOf(entry)
+      if (at >= 0) this.plain.splice(at, 1)
+    }
+  }
+
+  /**
+   * Whether a turn that goes to `target` is a plain chat: one source saying so is enough. Only
+   * `true` itself says so; a promise, a word or a number does not, and a source that throws is
+   * left out, so that a plugin's mistake takes no tools away.
+   */
+  plainFor(target: SamplingTarget): boolean {
+    let plain = false
+    for (const { ask, owner } of this.plain) {
+      try {
+        if (ask({ ...target }) === true) plain = true
+      } catch (err) {
+        console.error(`[sampling] ${owner} failed: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    }
+    return plain
+  }
 
   /** Adds a source and returns the function that removes it again. `owner` names it in error messages. */
   register(ask: SamplingSource, owner: string): () => void {

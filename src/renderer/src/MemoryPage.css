@@ -197,6 +197,37 @@
   border-color: var(--accent);
   box-shadow: 0 0 0 1px var(--accent);
 }
+/* A global note a model kept that waits for the person: the bar and the tint of a warning, as a
+   call held back has them (`.tool-held`). The bar takes four pixels more than the border it
+   replaces; the words stay in line with the rows around it. */
+.memory-row[data-pending] {
+  border-color: color-mix(in srgb, var(--warn) 40%, transparent);
+  border-left: 5px solid var(--warn);
+  background: color-mix(in srgb, var(--warn) 12%, var(--panel));
+  padding-left: 8px;
+}
+.badge.memory-pending {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border-color: var(--warn);
+  color: var(--warn);
+}
+.badge.memory-pending svg {
+  flex-shrink: 0;
+  width: 12px;
+  height: 12px;
+}
+/* A note that holds what looks like a key or personal data: the red of what is framed in it. */
+.badge.memory-risky {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+/* What a note says now, above what a model would make of it. */
+.memory-change-before > span:last-child {
+  color: var(--muted);
+  text-decoration: line-through;
+}
 .memory-gone {
   align-items: center;
   color: var(--muted);

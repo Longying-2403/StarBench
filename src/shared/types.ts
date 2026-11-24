@@ -5,6 +5,7 @@ import type { CompactionChange, CompactionSettings } from './compaction.ts'
 import type { PermissionMode } from './permissions.ts'
 import type { SessionStats } from './stats.ts'
 import type { Theme } from './theme.ts'
+import type { UpdateEvent, UpdateState } from './update.ts'
 
 export interface ToolCall {
   id: string
@@ -66,6 +67,12 @@ export type ChatMessage =
        * no service. Absent on messages from before the app wrote it down.
        */
       at?: number
+      /**
+       * Set when the message went out as a plain chat: with no tools and nothing of the app's
+       * beside it (`TurnOptions.plain` in main/agent.ts). Shown under the message, and sent to
+       * no service.
+       */
+      plain?: true
     }
   | {
       role: 'assistant'
@@ -630,6 +637,14 @@ export interface SendExtras {
   attachments?: Attachment[]
 }
 
+/** What became of a message that was sent. */
+export interface Sent {
+  /** The session it went into: a new one, where none was named. */
+  id: string
+  /** It went out as a plain chat (`plain` on the message), which is for the main process to say and not for the page. */
+  plain?: true
+}
+
 export type AgentEvent =
   | { type: 'reasoning_delta'; text: string }
   | { type: 'text_delta'; text: string }
@@ -667,7 +682,12 @@ export type AgentEvent =
    * Something the person should know that did not stop the turn. `code` is what the page words it
    * by; `detail` is what the service itself said, when that helps to look the matter up.
    */
-  | { type: 'notice'; code: 'fast-mode-refused' | 'tools-as-text' | 'stream-refused' | 'compaction-failed' | 'images-refused'; message: string; detail?: string }
+  | {
+      type: 'notice'
+      code: 'fast-mode-refused' | 'tools-as-text' | 'stream-refused' | 'compaction-failed' | 'images-refused' | 'plain-call-dropped'
+      message: string
+      detail?: string
+    }
 
 export interface SessionEvent {
   sessionId: string
@@ -698,6 +718,16 @@ export interface HarnessApi {
   getSettings(): Promise<Settings>
   /** What the running app is: its version, as it was built. */
   appInfo(): Promise<{ version: string }>
+  /** What is known about newer builds: the one running, when the app last looked, and what it found (shared/update.ts). */
+  updateState(): Promise<UpdateState>
+  /** Looks on GitHub now whether a newer build is published. Always resolves: a look that fails says so in the state. */
+  checkForUpdate(): Promise<UpdateState>
+  /** Whether the app looks by itself, once a day at most. */
+  setAutoUpdateCheck(on: boolean): Promise<UpdateState>
+  /** The page is up and listening: the app looks by itself now if the person lets it and a look is due. */
+  autoCheckForUpdate(): Promise<UpdateState>
+  /** Told when what is known about updates changes, and when a look of the app's own finds a newer build. */
+  onUpdateEvent(listener: (event: UpdateEvent) => void): () => void
   /** Adds a provider or changes one. Resolves with the updated settings. */
   saveProvider(input: ProviderInput): Promise<Settings>
   /** The last provider cannot be removed. */
@@ -808,10 +838,11 @@ export interface HarnessApi {
   /** The mark before the session's name in the list; null takes it away. */
   setSessionIcon(id: string, icon: SessionIcon | null): Promise<void>
   /**
-   * Starts a turn. Creates the session when `sessionId` is null. Resolves with the session id.
+   * Starts a turn. Creates the session when `sessionId` is null. Resolves with the session's id,
+   * and with whether the message went out as a plain chat.
    * `skill` names a skill the user picked for this message; `extras` holds what else goes with it.
    */
-  send(sessionId: string | null, workspace: string, text: string, skill?: string, extras?: SendExtras): Promise<string>
+  send(sessionId: string | null, workspace: string, text: string, skill?: string, extras?: SendExtras): Promise<Sent>
   /**
    * Opens the system dialog for picking files to put with a message, and reads those picked.
    * Resolves with nothing in it when the dialog is cancelled.

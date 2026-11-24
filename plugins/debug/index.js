@@ -1,9 +1,10 @@
-// 调试面板的后台部分：把面板上打开的采样参数加进请求，记下每次请求和回应，保存设置。
+// 调试面板的后台部分：把面板上打开的采样参数加进请求，决定消息是不是以纯对话发出，
+// 记下每次请求和回应，保存设置。
 // 界面在 ui/index.js，两边共用的设置逻辑在 ui/params.js。
 //
 // 这是随 StarBench 一起安装的内置插件，也是一个完整的例子：它只用了公开给所有插件的接口。
 
-import { fieldsFor, normalize } from './ui/params.js'
+import { fieldsFor, normalize, plainFor } from './ui/params.js'
 
 export const inject = ['sampling', 'ui', 'config', 'trace']
 
@@ -25,6 +26,10 @@ export function apply(ctx) {
 
   // 每次向模型发请求之前都会被问一次，读的是当下的设置：面板上一改，下一个请求就用新的。
   sampling.provide((target) => fieldsFor(config, target))
+
+  // 每条消息发出时被问一次：答 true，这条消息就以纯对话发出，不带任何工具，也不带应用自己的提示词。
+  // 正在进行的那一轮不受影响，面板上改了之后从下一条消息起生效。
+  sampling.plain((target) => plainFor(config, target).plain)
 
   /** 最近的往来，旧的在前。 */
   const exchanges = []

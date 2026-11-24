@@ -198,7 +198,9 @@ export function chatMessages(
 ): ApiMessage[] {
   const written = Boolean(request.connection.textTools)
   const system = written && request.tools?.length ? `${request.system}\n\n${toolsPrompt(request.tools)}` : request.system
-  const out: ApiMessage[] = [{ role: 'system', content: system }]
+  // No instructions (a plain chat of someone who wrote none) is no system message, not an empty
+  // one: a chat template makes of the two what it will, and often not the same.
+  const out: ApiMessage[] = system ? [{ role: 'system', content: system }] : []
   const names = wireNames(request.connection)
   for (const message of withToolResults(request.messages)) {
     const before = out.at(-1)

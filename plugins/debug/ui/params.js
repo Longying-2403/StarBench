@@ -16,8 +16,13 @@ export const PARAMS = {
 export const DEFAULTS = Object.freeze({
   /** 总开关。关掉后请求里不带下面任何一项。 */
   enabled: true,
-  /** 只用于自己运行的本地模型服务。 */
+  /** 只用于自己运行的本地模型服务。纯对话和采样参数都听它的。 */
   localOnly: true,
+  /**
+   * 纯对话：消息发出时不带任何工具，也不带 StarBench 的提示词、Skills 列表和记忆，
+   * 系统提示词只有用户给这个模型服务写的那一份。默认关着。
+   */
+  plain: false,
   temperature: { on: false, value: PARAMS.temperature.value },
   top_p: { on: false, value: PARAMS.top_p.value },
   max_tokens: { on: false, value: PARAMS.max_tokens.value },
@@ -55,6 +60,8 @@ export function normalize(saved) {
   return {
     enabled: from.enabled !== false,
     localOnly: from.localOnly !== false,
+    // 只有明确打开过才算：它会把工具全部拿掉，旧版本的设置里没有这一项，读出来必须是关着的。
+    plain: from.plain === true,
     temperature: number('temperature'),
     top_p: number('top_p'),
     max_tokens: number('max_tokens'),
@@ -118,6 +125,20 @@ export function appliesTo(config, target) {
   if (target.kind !== 'openai-chat') return { applies: false, why: 'kind' }
   if (config.localOnly && !target.local) return { applies: false, why: 'remote' }
   return { applies: true }
+}
+
+/**
+ * 发给某个模型的消息是不是以纯对话发出，不是的话为什么。
+ * 它和采样参数是两回事：不看“调整采样参数”那个开关，对每一种接口格式都生效；
+ * 只有“只用于本地模型”对两者都管用。
+ * @param {ReturnType<typeof normalize>} config
+ * @param {{ local: boolean }} target
+ * @returns {{ plain: true } | { plain: false, why: 'off' | 'remote' }}
+ */
+export function plainFor(config, target) {
+  if (config.plain !== true) return { plain: false, why: 'off' }
+  if (config.localOnly && target.local !== true) return { plain: false, why: 'remote' }
+  return { plain: true }
 }
 
 /**

@@ -23,6 +23,7 @@ import {
   cleanMemorySettings,
   cleanText,
   defaultScope,
+  holdsIn,
   isMemoryKind,
   isProviderMode,
   listLimit,
@@ -83,6 +84,11 @@ export interface MemoryTurn {
   model: string
   /** How many tokens the model's context holds, where that is known. */
   window?: number
+  /**
+   * The person picked one of the memory's own commands for this message (/memory-add, /memory-edit,
+   * /memory-del): what the model keeps, changes or removes in this turn is what they asked for.
+   */
+  command?: boolean
 }
 
 /** The model a list is drawn up for on the page. */
@@ -100,6 +106,9 @@ interface Done {
 
 /** How many changes are kept for undoing. */
 const KEEP_DONE = 100
+/** How long, and how many, notes of a conversation are read on into the next one it keeps, for a key split between notes. */
+const RECENT_MS = 10 * 60_000
+const RECENT_NOTES = 5
 const NOTE_FILE = /^([a-z0-9]{1,16})\.md$/
 const SESSION_ID = /^[\w-]{1,100}$/
 
@@ -145,6 +154,8 @@ export class MemoryService {
   private count = 0
   /** Changes to the notes, one after another, so that two never write over each other. */
   private queue: Promise<unknown> = Promise.resolve()
+  /** What models kept in each conversation a moment ago (`argsSensitive`): kept in memory only. */
+  private recent = new Map<string, { parts: string[]; at: number }[]>()
 
   constructor(opts: MemoryServiceOptions) {
     this.opts = opts
@@ -215,6 +226,14 @@ export class MemoryService {
     return notes
   }
 
+  /** One note as its file holds it now; null when it is not there. */
+  private async readOne(entry: Pick<MemoryEntry, 'id' | 'scope' | 'workspace'>): Promise<MemoryEntry | null> {
+    const file = this.fileOf(entry)
+    const [text, stat] = await Promise.all([fs.readFile(file, 'utf8').catch(() => null), fs.stat(file).catch(() => null)])
+    if (text === null) return null
+    return readEntryFile(text, { id: entry.id, scope: entry.scope, ...(entry.workspace ? { workspace: entry.workspace } : {}), ...(stat ? { modified: stat.mtimeMs } : {}) })
+  }
+
   /** Every workspace that has a folder of notes, with the folder it is of. */
   private async readWorkspaces(): Promise<{ folder: string; entries: MemoryEntry[] }[]> {
     const root = path.join(this.opts.dir, 'workspaces')
@@ -231,10 +250,25 @@ export class MemoryService {
     return found
   }
 
-  /** The notes a conversation in `workspace` may see: those that hold everywhere, and the workspace's own. */
+  /**
+   * The notes a conversation in `workspace` may see: those that hold everywhere, and the
+   * workspace's own. A global note still waiting for the person holds only where it was kept.
+   */
   private async notesFor(workspace: string): Promise<MemoryEntry[]> {
     const [global, own] = await Promise.all([this.readNotes(this.globalDir(), 'global'), workspace ? this.readNotes(this.workspaceDir(workspace), 'workspace', workspace) : []])
-    return [...global, ...own]
+    return [...global.filter((entry) => holdsIn(entry, workspace, this.opts.windows)), ...own]
+  }
+
+  /** What models kept in a conversation a moment ago, each line and each details on its own. */
+  private recentOf(session: string): string[] {
+    const now = this.now()
+    return (this.recent.get(session) ?? []).filter((note) => now - note.at < RECENT_MS).flatMap((note) => note.parts)
+  }
+
+  private keepRecent(session: string, text: string, details: string): void {
+    const now = this.now()
+    const kept = (this.recent.get(session) ?? []).filter((note) => now - note.at < RECENT_MS)
+    this.recent.set(session, [...kept, { parts: details ? [text, details] : [text], at: now }].slice(-RECENT_NOTES))
   }
 
   private async write(entry: MemoryEntry): Promise<void> {
@@ -278,10 +312,13 @@ export class MemoryService {
     if (mode === 'off') return { tools: base }
     const file = this.snapshotFile(turn.session)
     const kept = file ? await readJson<MemorySnapshot>(file) : null
-    const { snapshot, changed } = refreshSnapshot(kept && Array.isArray(kept.entries) ? kept : null, await this.notesFor(turn.workspace), this.now())
+    const notes = await this.notesFor(turn.workspace)
+    const { snapshot, changed } = refreshSnapshot(kept && Array.isArray(kept.entries) ? kept : null, notes, this.now())
     if (changed && file) await writeJson(file, snapshot)
     const prompt = memoryPrompt(snapshot.entries, { mode, local: turn.provider.local, limit: listLimit(this.settings.budget, turn.window, turn.provider.local) })
-    return { ...(prompt.text ? { prompt: prompt.text } : {}), tools: this.toolsFor(turn, mode, base) }
+    // The notes the person wrote or changed on the page: theirs, which a model asks before it changes or removes.
+    const personal = new Set(notes.filter((entry) => entry.source?.user || entry.byUser).map((entry) => entry.id))
+    return { ...(prompt.text ? { prompt: prompt.text } : {}), tools: this.toolsFor(turn, mode, base, personal) }
   }
 
   /** Forgets what was kept of a conversation that was deleted. */
@@ -293,10 +330,12 @@ export class MemoryService {
   /**
    * The tools of a turn: those the app has, and the memory's. A model that may only read the notes
    * gets recall alone. The memory's tools never ask, whatever the conversation is set to: keeping a
-   * note is no change to the workspace, and the person sees each one and can undo it. A note that
-   * looks as if it holds a secret or personal data is asked about first (`mustAsk`).
+   * note is no change to the workspace, and the person sees each one and can undo it. Two things
+   * are asked about first (`mustAsk`): a note that looks as if it holds a secret or personal data,
+   * and a change to a note the person wrote or changed themselves (`personal`), unless they asked
+   * for it with one of the memory's commands.
    */
-  private toolsFor(turn: MemoryTurn, mode: 'rw' | 'ro', base: TurnTools): TurnTools {
+  private toolsFor(turn: MemoryTurn, mode: 'rw' | 'ro', base: TurnTools, personal: ReadonlySet<string> = new Set()): TurnTools {
     const own = new ToolRegistry()
     for (const spec of this.toolSpecs(turn, mode)) own.register(spec, 'builtin')
     const ours = new Set(own.list().map((tool) => tool.name))
@@ -307,14 +346,22 @@ export class MemoryService {
       execute: (name, rawArgs, ctx) => (ours.has(name) ? own.execute(name, rawArgs, ctx) : base.execute(name, rawArgs, ctx)),
       list: () => [...(base.list?.() ?? []).filter((tool) => !ours.has(tool.name)), ...own.list()],
       accessOf: (name) => (ours.has(name) ? 'read' : (base.accessOf?.(name) ?? (base.needsPermission(name) ? 'other' : 'read'))),
+      accessFor: async (name, rawArgs, workspace) =>
+        ours.has(name) ? 'read' : ((await base.accessFor?.(name, rawArgs, workspace)) ?? base.accessOf?.(name) ?? (base.needsPermission(name) ? 'other' : 'read')),
       mustAsk: (name, rawArgs) => {
-        if (name !== 'remember' || !ours.has(name)) return base.mustAsk?.(name, rawArgs) ?? false
+        if (!ours.has(name)) return base.mustAsk?.(name, rawArgs) ?? false
+        if (name !== 'remember' && name !== 'forget') return false
+        let args: Record<string, unknown>
         try {
-          const args: unknown = JSON.parse(rawArgs || '{}')
-          return typeof args === 'object' && args !== null && argsSensitive(args as { text?: unknown; details?: unknown })
+          const parsed: unknown = JSON.parse(rawArgs || '{}')
+          args = typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {}
         } catch {
           return false
         }
+        // What looks sensitive, also where a key was cut in two between this note and one kept a moment ago.
+        if (name === 'remember' && argsSensitive(args, this.recentOf(turn.session))) return true
+        const target = memoryIdOf(name === 'forget' ? args.name : args.replaces)
+        return target !== '' && personal.has(target) && !turn.command
       }
     }
   }
@@ -382,7 +429,7 @@ export class MemoryService {
   }
 
   private tell(turn: MemoryTurn, changeId: string, action: MemoryChange['action'], entry: MemoryEntry): void {
-    const shown = { id: entry.id, scope: entry.scope, ...(entry.workspace ? { workspace: entry.workspace } : {}), kind: entry.kind, text: entry.text }
+    const shown = { id: entry.id, scope: entry.scope, ...(entry.workspace ? { workspace: entry.workspace } : {}), kind: entry.kind, text: entry.text, ...(entry.pending ? { pending: true } : {}) }
     this.opts.emit({ type: 'notice', sessionId: turn.session, change: { id: changeId, action, entry: shown } })
     this.opts.emit({ type: 'changed' })
   }
@@ -400,6 +447,11 @@ export class MemoryService {
       if (scope === 'workspace' && !turn.workspace) throw new Error('This conversation has no workspace; save the note with scope global.')
       const visible = await this.visibleTo(turn)
       const now = this.now()
+      // A global note a model keeps or changes holds where it was kept until the person lets it
+      // hold everywhere: a file or a page it read may have asked for it. Kept at the person's
+      // own asking, with a command of the memory's, it holds everywhere at once.
+      const waits = scope === 'global' && !turn.command ? { pending: true, origin: turn.workspace } : {}
+      const where = (entry: { pending?: boolean }): string => (entry.pending ? 'global once the user confirms it; until then only in this workspace' : scope)
       const replaces = memoryIdOf(args.replaces)
       if (replaces) {
         const before = visible.find((entry) => entry.id === replaces)
@@ -416,17 +468,20 @@ export class MemoryService {
           created: before.created,
           updated: now,
           ...(before.byUser ? { byUser: before.byUser } : {}),
-          source: this.sourceOf(turn)
+          source: this.sourceOf(turn),
+          ...waits
         }
         if (this.fileOf(before) !== this.fileOf(after)) await this.unlink(before)
         await this.write(after)
+        this.keepRecent(turn.session, text, details)
         this.tell(turn, this.remember({ action: 'updated', before, after }), 'updated', after)
-        return `Updated note #${after.id} (${scope}, ${kind}).`
+        return `Updated note #${after.id} (${where(after)}, ${kind}).`
       }
       const same = visible.find((entry) => entry.scope === scope && entry.text === text)
       if (same) return `This is already note #${same.id}; nothing was changed.`
       const entry: MemoryEntry = {
-        id: newMemoryId(new Set((await this.notesFor(turn.workspace)).map((note) => note.id))),
+        // Taken among all global notes, those waiting elsewhere as well, so that no two share a name.
+        id: newMemoryId(new Set([...(await this.readNotes(this.globalDir(), 'global')), ...(await this.notesFor(turn.workspace))].map((note) => note.id))),
         scope,
         ...(scope === 'workspace' ? { workspace: turn.workspace } : {}),
         kind,
@@ -435,11 +490,13 @@ export class MemoryService {
         ...(turn.provider.local ? { localOnly: true } : {}),
         created: now,
         updated: now,
-        source: this.sourceOf(turn)
+        source: this.sourceOf(turn),
+        ...waits
       }
       await this.write(entry)
+      this.keepRecent(turn.session, text, details)
       this.tell(turn, this.remember({ action: 'saved', after: entry }), 'saved', entry)
-      return `Saved as note #${entry.id} (${scope}, ${kind}). It is listed from the next conversation on.`
+      return `Saved as note #${entry.id} (${where(entry)}, ${kind}). It is listed from the next conversation on.`
     })
   }
 
@@ -527,7 +584,8 @@ export class MemoryService {
       const mode = this.modeOf(use.provider.id)
       const own = workspace ? (workspaces.find((w) => folderKey(w.folder, this.opts.windows) === folderKey(workspace, this.opts.windows))?.entries ?? []) : []
       const limit = listLimit(this.settings.budget, use.window, use.provider.local)
-      const prompt = mode === 'off' ? null : memoryPrompt([...global, ...own].map(toSnapshotEntry), { mode, local: use.provider.local, limit })
+      const holding = global.filter((entry) => holdsIn(entry, workspace, this.opts.windows))
+      const prompt = mode === 'off' ? null : memoryPrompt([...holding, ...own].map(toSnapshotEntry), { mode, local: use.provider.local, limit })
       const told: MemoryUse = {
         provider: use.provider,
         ...(use.window ? { window: use.window } : {}),
@@ -571,6 +629,9 @@ export class MemoryService {
           byUser: now
         }
         if (scope === 'global') delete after.workspace
+        // The person has seen the note as they saved it: a global one holds everywhere from then on.
+        delete after.pending
+        delete after.origin
         if (details) after.details = details
         else delete after.details
         if (input.localOnly === true) after.localOnly = true
@@ -600,6 +661,26 @@ export class MemoryService {
     })
   }
 
+  /**
+   * Lets a global note that waits for the person hold in every workspace (`MemoryEntry.pending`),
+   * from the next turn of each conversation on. Resolves with the note as it is then.
+   */
+  confirm(raw: unknown): Promise<MemoryEntry> {
+    return this.serial(async () => {
+      const id = memoryIdOf(raw)
+      const before = id ? await this.readOne({ id, scope: 'global' }) : null
+      if (!before) throw new Error('This note is no longer there.')
+      if (!before.pending) return before
+      const after: MemoryEntry = { ...before, byUser: this.now() }
+      delete after.pending
+      delete after.origin
+      await this.write(after)
+      this.remember({ action: 'updated', before, after })
+      this.opts.emit({ type: 'changed' })
+      return after
+    })
+  }
+
   /** A note the person deleted on the page. Resolves with the id of the change, for undoing it. */
   remove(raw: unknown): Promise<string> {
     return this.serial(async () => {
@@ -625,6 +706,16 @@ export class MemoryService {
     return this.serial(async () => {
       const done = this.done.get(changeId)
       if (!done) return false
+      // Only a note that is still as the change left it is put back. A later change to it would
+      // otherwise be lost with it, or an earlier version come back after the note was taken away:
+      // undoing a note's keeping before its later change would leave its first version there.
+      if (done.after) {
+        const now = await this.readOne(done.after)
+        if (!now || now.updated !== done.after.updated) return false
+      } else if (done.before && (await this.readOne(done.before))) {
+        // A deletion is undone while no note of that name has come in its place.
+        return false
+      }
       this.done.delete(changeId)
       if (done.after) await this.unlink(done.after)
       if (done.before) await this.write({ ...done.before, byUser: this.now() })
@@ -646,6 +737,7 @@ export function registerMemoryIpc(ipc: Handles, memory: MemoryService, deps: { u
   ipc.handle('memory:save', (_e, input: unknown) => memory.save(input))
   ipc.handle('memory:remove', (_e, ref: unknown) => memory.remove(ref))
   ipc.handle('memory:undo', (_e, id: unknown) => memory.undo(String(id ?? '')))
+  ipc.handle('memory:confirm', (_e, id: unknown) => memory.confirm(id))
   ipc.handle('memory:setEnabled', (_e, on: unknown) => memory.setEnabled(on === true))
   ipc.handle('memory:setBudget', (_e, tokens: unknown) => memory.setBudget(Number(tokens)))
   ipc.handle('memory:setProviderMode', (_e, providerId: unknown, mode: unknown) => memory.setProviderMode(String(providerId ?? ''), mode))

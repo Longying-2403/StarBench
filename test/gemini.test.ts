@@ -85,6 +85,23 @@ const connection = (extra: Partial<Connection> = {}, baseURL = 'http://127.0.0.1
   ...extra
 })
 
+const OFFICIAL = 'https://generativelanguage.googleapis.com/v1beta'
+
+/**
+ * Runs `work` with Google's own address led to the stand-in. What only Google's API is believed
+ * for, the Search Suggestions it hands over as HTML, is then kept as it would be from Google.
+ */
+async function asGoogle<T>(service: { baseURL: string }, work: () => Promise<T>): Promise<T> {
+  const realFetch = globalThis.fetch
+  globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) =>
+    realFetch(String(input instanceof Request ? input.url : input).replace(OFFICIAL, service.baseURL), init)) as typeof fetch
+  try {
+    return await work()
+  } finally {
+    globalThis.fetch = realFetch
+  }
+}
+
 /** Runs one turn with the built-in tools in a folder that holds a.txt, and reports what happened. */
 async function turn(conn: Connection, messages: ChatMessage[], more: Partial<TurnOptions> = {}) {
   const workspace = await mkdtemp(path.join(os.tmpdir(), 'starbench-gemini-'))
@@ -239,9 +256,9 @@ test("Gemini's own search: asked for with the app's tools, told as it goes, kept
       piece([{ text: '', thoughtSignature: 'T5' }], { finishReason: 'STOP', groundingMetadata: GROUNDING })
     ])
   }))
-  const conn = connection({ webSearch: true, model: 'gemini-4-hydrogen' }, service.baseURL)
+  const conn = connection({ webSearch: true, model: 'gemini-4-hydrogen' }, OFFICIAL)
   const messages: ChatMessage[] = [{ role: 'user', content: 'latest electron?' }]
-  const out = await turn(conn, messages)
+  const out = await asGoogle(service, () => turn(conn, messages))
   assert.deepEqual(out.errors, [])
 
   const [first] = service.posts()
@@ -319,7 +336,7 @@ test('page reads as Gemini 4 Hydrogen made them: a read that failed lists no pag
     ])
   }))
   const messages: ChatMessage[] = [{ role: 'user', content: 'latest typescript?' }]
-  const out = await turn(connection({ webSearch: true, model: 'gemini-4-hydrogen' }, service.baseURL), messages)
+  const out = await asGoogle(service, () => turn(connection({ webSearch: true, model: 'gemini-4-hydrogen' }, OFFICIAL), messages))
   assert.deepEqual(out.errors, [])
   assert.deepEqual((messages[1] as Assistant).web, [
     { id: 's1', kind: 'search', queries: ['typescript latest stable version npm'], status: 'done', sources: [{ url: redirect, title: 'typescript - npm' }], suggestions: '<div/>' },
@@ -333,7 +350,7 @@ test('a search told only at the end of the reply is one search of its own, with 
     body: geminiSse([piece([{ text: 'Spain won.' }]), piece([], { finishReason: 'STOP', groundingMetadata: GROUNDING })])
   }))
   const messages: ChatMessage[] = [{ role: 'user', content: 'who won euro 2024?' }]
-  const out = await turn(connection({ webSearch: true }, service.baseURL), messages)
+  const out = await asGoogle(service, () => turn(connection({ webSearch: true }, OFFICIAL), messages))
   assert.deepEqual(out.errors, [])
   const reply = messages[1] as Assistant
   assert.equal(reply.web?.length, 1)
@@ -343,6 +360,38 @@ test('a search told only at the end of the reply is one search of its own, with 
     { ...search, id: '' },
     { id: '', kind: 'search', queries: ['electron latest'], status: 'done', sources: [{ url: REDIRECT, title: 'electronjs.org' }], suggestions: GROUNDING.searchEntryPoint.renderedContent }
   )
+
+  // The same reply from another address keeps its search, but not the HTML that would be drawn with it.
+  const elsewhere: ChatMessage[] = [{ role: 'user', content: 'who won euro 2024?' }]
+  assert.deepEqual((await turn(connection({ webSearch: true }, service.baseURL), elsewhere)).errors, [])
+  const [kept] = (elsewhere[1] as Assistant).web!
+  assert.equal(kept.suggestions, undefined)
+  assert.deepEqual(kept.sources, [{ url: REDIRECT, title: 'electronjs.org' }])
+})
+
+test('a request sent on to another address is not followed there with the key', async () => {
+  const seenElsewhere: string[] = []
+  const elsewhere = http.createServer((req, res) => {
+    seenElsewhere.push(`${req.method} ${req.url} key=${String(req.headers['x-goog-api-key'] ?? '')}`)
+    req.resume()
+    res.writeHead(500).end()
+  })
+  await new Promise<void>((resolve) => elsewhere.listen(0, '127.0.0.1', resolve))
+  after(() => void elsewhere.close())
+  const to = `http://localhost:${(elsewhere.address() as AddressInfo).port}`
+  const mover = http.createServer((req, res) => {
+    req.resume()
+    req.on('end', () => res.writeHead(307, { location: `${to}${req.url}` }).end())
+  })
+  await new Promise<void>((resolve) => mover.listen(0, '127.0.0.1', resolve))
+  after(() => void mover.close())
+  const base = `http://127.0.0.1:${(mover.address() as AddressInfo).port}`
+
+  const out = await turn(connection({}, base), [{ role: 'user', content: 'SECRET CONVERSATION' }])
+  assert.equal(out.errors.length, 1)
+  assert.match(out.errors[0], new RegExp(`sent the request on to ${to.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} \\(HTTP 307\\)`))
+  await assert.rejects(adapterFor('gemini').listModels(connection({}, base)), /sent the request on/)
+  assert.deepEqual(seenElsewhere, [])
 })
 
 test("Gemini's parts of its own search, its pages and what it read, as the page is told them", () => {

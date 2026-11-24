@@ -12,7 +12,14 @@ export interface ImageAttachment {
   kind: 'image'
   name: string
   type: ImageType
+  /** The bytes, in base64. Empty for a picture whose file is no longer kept (main/session-files.ts). */
   data: string
+  /**
+   * The file the picture is kept in beside its conversation, named by the hash of its bytes
+   * (main/session-files.ts). Only the main process sets it; the session file then holds this and
+   * not the bytes.
+   */
+  file?: string
 }
 
 /** A text file, as it is sent: what it says. */
@@ -112,6 +119,11 @@ export function fileBlock(file: TextAttachment): string {
  */
 export function imageNote(file: ImageAttachment): string {
   return `[The user attached the picture "${file.name.replace(/["\]]/g, '_')}". This model cannot be shown pictures, so it is not included.]`
+}
+
+/** What the model is told of a picture whose file is no longer kept, in its place. */
+export function goneImageNote(file: ImageAttachment): string {
+  return `[The user attached the picture "${file.name.replace(/["\]]/g, '_')}" here. Its file is no longer kept, so it is not included.]`
 }
 
 /** A guess at what a picture weighs in a request, in tokens. The services count by its size in pixels; this is about what one of the largest size comes to. */

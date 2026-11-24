@@ -6,7 +6,7 @@ import type { PluginContext } from '../../types/starbench-plugin'
 import { PluginChannel } from './plugin-channel.ts'
 import type { PluginHandler } from './plugin-channel.ts'
 import { SamplingRegistry } from './sampling.ts'
-import type { SamplingSource } from './sampling.ts'
+import type { PlainSource, SamplingSource } from './sampling.ts'
 import type { ToolRegistry, ToolSpec } from './tools.ts'
 import { TraceRegistry } from './trace.ts'
 import type { ExchangeObserver } from './trace.ts'
@@ -65,6 +65,18 @@ export class SamplingService extends Service {
     const owner = this.ctx
     const name = owner.fiber.name || 'plugin'
     return owner.effect(() => this.registry.register(source, name), 'sampling source')
+  }
+
+  /**
+   * Has `source` asked as every turn begins, for as long as the calling plugin is enabled. Where
+   * it answers `true`, the turn is a plain chat: the model gets no tools and nothing of the
+   * app's beside what was said (`TurnOptions.plain` in agent.ts). That is all a source can do:
+   * take things away. Returns the function that stops it early.
+   */
+  plain(source: PlainSource): () => void {
+    const owner = this.ctx
+    const name = owner.fiber.name || 'plugin'
+    return owner.effect(() => this.registry.registerPlain(source, name), 'plain chat source')
   }
 }
 
@@ -168,7 +180,7 @@ function configsInMemory(): PluginConfigs {
 type Promised = Pick<PluginContext, 'tools' | 'sampling' | 'ui' | 'config' | 'trace'>
 type Given = {
   tools: Pick<ToolsService, 'register'>
-  sampling: Pick<SamplingService, 'provide'>
+  sampling: Pick<SamplingService, 'provide' | 'plain'>
   ui: Pick<UiService, 'handle' | 'send'>
   config: Pick<ConfigService, 'get' | 'set'>
   trace: Pick<TraceService, 'observe'>

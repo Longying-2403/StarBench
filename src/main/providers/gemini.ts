@@ -202,8 +202,32 @@ async function failureOf(response: Response): Promise<GeminiError> {
   return new GeminiError(`${said} (HTTP ${response.status})`, response.status)
 }
 
+/**
+ * A request is not followed to another address. The key goes in a header of Google's own, which
+ * fetch would carry along to wherever a redirect leads, even from https to plain http, and the
+ * conversation with it. An address that sends requests on is said so, naming only the host it
+ * sends them to: where it leads could hold anything.
+ */
+function redirected(response: Response, url: string): GeminiError | null {
+  const moved = response.type === 'opaqueredirect' || (response.status >= 300 && response.status < 400 && response.status !== 304)
+  if (!moved) return null
+  let to = ''
+  try {
+    to = new URL(response.headers.get('location') ?? '', url).origin
+  } catch {
+    to = ''
+  }
+  const where = to && to !== 'null' ? ` to ${to}` : ' elsewhere'
+  return new GeminiError(
+    `The service sent the request on${where} (HTTP ${response.status}). StarBench does not follow it there with the API key; if that is the right address, enter it in Settings.`,
+    response.status
+  )
+}
+
 async function getJson(connection: Pick<Connection, 'apiKey'>, url: string): Promise<Bag> {
-  const response = await fetch(url, { headers: headersOf(connection), signal: AbortSignal.timeout(TIMEOUT_MS) })
+  const response = await fetch(url, { headers: headersOf(connection), redirect: 'manual', signal: AbortSignal.timeout(TIMEOUT_MS) })
+  const moved = redirected(response, url)
+  if (moved) throw moved
   if (!response.ok) throw await failureOf(response)
   const body: unknown = await response.json()
   if (!isBag(body)) throw new Error('The service did not answer with what was asked for.')
@@ -438,15 +462,26 @@ async function attempt(request: ModelRequest, message: AssistantMessage): Promis
   const facts = await factsFor(connection).catch(() => null)
   const body = geminiBody(request, facts)
   probe?.sent(body)
-  const response = await fetch(`${baseOf(connection)}/${modelPath(connection.model)}:streamGenerateContent?alt=sse`, {
+  const url = `${baseOf(connection)}/${modelPath(connection.model)}:streamGenerateContent?alt=sse`
+  const response = await fetch(url, {
     method: 'POST',
     headers: headersOf(connection),
     body: JSON.stringify(body),
+    redirect: 'manual',
     signal
   })
+  const moved = redirected(response, url)
+  if (moved) throw moved
   if (!response.ok || !response.body) throw await failureOf(response)
 
   const web = new WebLog(message, request.onWebActivity)
+  // Search Suggestions are drawn as HTML (App.tsx): they are taken from Google's own API alone.
+  const fromGoogle = isGemini(baseOf(connection))
+  const told = (activity: WebActivity): WebActivity => {
+    if (fromGoogle || activity.suggestions === undefined) return activity
+    const { suggestions: _dropped, ...rest } = activity
+    return rest
+  }
   const parts: Part[] = []
   const calls: ToolCall[] = []
   /** What the activities of this reply that have no id of the service's are told under: unique to the reply. */
@@ -478,7 +513,7 @@ async function attempt(request: ModelRequest, message: AssistantMessage): Promis
       lastKind = 'other'
     } else if (part.toolCall || part.toolResponse) {
       const activity = geminiActivity(part)
-      if (activity) web.put(activity)
+      if (activity) web.put(told(activity))
       lastKind = 'other'
     } else if (typeof part.text === 'string' && part.text) {
       if (part.thought) think(part.text)
@@ -496,7 +531,7 @@ async function attempt(request: ModelRequest, message: AssistantMessage): Promis
     if (!found) return
     const last = message.web?.filter((a) => a.kind === 'search' && a.id !== found.id).at(-1)
     // A search keeps what it said itself: its queries, and the suggestions that came with it.
-    web.put(last ? { ...found, id: last.id, ...(last.queries ? { queries: last.queries } : {}), ...(last.suggestions ? { suggestions: last.suggestions } : {}) } : found)
+    web.put(told(last ? { ...found, id: last.id, ...(last.queries ? { queries: last.queries } : {}), ...(last.suggestions ? { suggestions: last.suggestions } : {}) } : found))
   }
   /** The pages read, where the parts of the service's own calls did not tell of them already. */
   const pagesRead = (metadata: unknown): void => {

@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import { test } from 'node:test'
-import { ABOUT } from '../src/shared/about.ts'
+import { ABOUT, buildLabel } from '../src/shared/about.ts'
 
 test('what the About page says of the project is what the project says of itself', async () => {
   const manifest = JSON.parse(await readFile('package.json', 'utf8')) as { homepage: string; repository: { url: string }; author: string; version: string }
@@ -24,4 +24,7 @@ test('what the About page says of the project is what the project says of itself
   assert.equal(ABOUT.stage, 'Beta')
   // Beside the version stands the revision: a whole number, counted from one.
   assert.ok(Number.isInteger(ABOUT.revision) && ABOUT.revision >= 1, String(ABOUT.revision))
+  // A build is named by both, with "-r." between them: the hyphen and the dot are the author's.
+  assert.equal(buildLabel('0.1.0', 11), '0.1.0-r.11')
+  assert.equal(buildLabel(manifest.version), `${manifest.version}-r.${ABOUT.revision}`)
 })

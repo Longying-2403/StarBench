@@ -3,7 +3,7 @@ import type { FormEvent } from 'react'
 import { CHATGPT_HELP_URL, LOCAL_SERVERS, PROVIDER_KINDS, PROVIDER_PRESETS, isLocalAddress, serviceHost } from '../../shared/types.ts'
 import { sendsKeySafely } from '../../shared/key-address.ts'
 import type { McpServerStatus, ModelChoice, ProviderInfo, ProviderKind, Settings, SkillInfo } from '../../shared/types.ts'
-import { ABOUT } from '../../shared/about.ts'
+import { ABOUT, buildLabel } from '../../shared/about.ts'
 import { CAP_MIN, SHARE_MAX, SHARE_MIN, isCap } from '../../shared/compaction.ts'
 import type { CompactionChange } from '../../shared/compaction.ts'
 import { formatTokens, readWindow } from '../../shared/stats.ts'
@@ -15,6 +15,7 @@ import type { AddChoice } from './AddProviderMenu.tsx'
 import { ChatGptButton, ChatGptPane } from './ChatGptPane.tsx'
 import { CheckIcon, ChevronLeftIcon, MonitorIcon, MoonIcon, SunIcon } from './icons.tsx'
 import { Notice } from './Notice.tsx'
+import { AutoUpdateRow, UpdateButton, UpdateStatus, useUpdates } from './UpdateCheck.tsx'
 import { errorText } from './util.ts'
 
 const api = window.harness
@@ -31,6 +32,8 @@ const TABS = [
   { id: 'about', label: '关于' }
 ] as const
 type TabId = (typeof TABS)[number]['id']
+/** A section of the settings, for whoever sends the person to one. */
+export type SettingsTab = TabId
 
 const KIND_LABELS: Record<ProviderKind, string> = {
   'openai-chat': 'OpenAI 兼容（Chat Completions）',
@@ -826,9 +829,10 @@ function AppearanceTab({ settings, onChanged }: { settings: Settings; onChanged:
   )
 }
 
-/** What the app is, which version is running, where its code is, where to report a problem, and who makes it. */
+/** What the app is, which version is running and whether a newer one is out, where its code is, where to report a problem, and who makes it. */
 function AboutTab() {
   const [version, setVersion] = useState('')
+  const updates = useUpdates()
   useEffect(() => {
     api.appInfo().then(
       (info) => setVersion(info.version),
@@ -849,8 +853,12 @@ function AboutTab() {
       <p className="about-summary">{ABOUT.summary}</p>
       <dl className="about-list">
         <dt>软件版本</dt>
-        {/* The version with its revision, as the author names a build: "0.1.0-r9". */}
-        <dd>{version ? `${version}-r${ABOUT.revision}（${ABOUT.stage}）` : '…'}</dd>
+        {/* The version with its revision, as the author names a build: "0.1.0-r.9". Beside it, the look for a newer one. */}
+        <dd className="about-version">
+          <span>{version ? `${buildLabel(version)}（${ABOUT.stage}）` : '…'}</span>
+          <UpdateButton updates={updates} />
+          <UpdateStatus updates={updates} />
+        </dd>
         <dt>GitHub 仓库</dt>
         <dd>{link(ABOUT.repo)}</dd>
         <dt>问题提交</dt>
@@ -869,6 +877,7 @@ function AboutTab() {
           </Fragment>
         ))}
       </dl>
+      <AutoUpdateRow updates={updates} />
     </div>
   )
 }
@@ -880,18 +889,28 @@ function AboutTab() {
  */
 export function SettingsPage({
   settings,
+  focus,
   onBack,
   onSaved,
   onWelcome
 }: {
   settings: Settings
+  /**
+   * The section the person was sent to: shown when the page opens, and switched to when they are
+   * sent again while it is open. A new object each time, so that being sent twice to the same
+   * section counts twice.
+   */
+  focus?: { tab: SettingsTab } | null
   /** Goes back to the conversation. */
   onBack: () => void
   onSaved: (s: Settings) => void
   /** The first ChatGPT sign-in with plan usage has just succeeded. */
   onWelcome: () => void
 }) {
-  const [tab, setTab] = useState<TabId>('model')
+  const [tab, setTab] = useState<TabId>(focus?.tab ?? 'model')
+  useEffect(() => {
+    if (focus) setTab(focus.tab)
+  }, [focus])
 
   return (
     <>

@@ -13,9 +13,10 @@ import type { ChatGptAccount, ProviderInput, ReasoningEffort, Session, SessionHi
 import { isReasoningEffort, isSessionIcon, offersFastMode, searchWorksAt, webSearchService } from '../shared/types.ts'
 import { OPENAI, canUsePlan, clientIsGone, newHostId, readRecord, refreshed, renewalDue, revoke, tokensAreDead } from './chatgpt/oauth.ts'
 import type { AuthService, LoginRecord } from './chatgpt/oauth.ts'
-import { readJson, writeJson } from './json-file.ts'
+import { readJson, writeJson, writeJsonText } from './json-file.ts'
 import type { Connection } from './providers/index.ts'
 import { ServiceError } from './providers/types.ts'
+import { dropPictures, fillPictures, sessionText } from './session-files.ts'
 import { searchSessions as searchSessionsIn, searchableOf } from './session-search.ts'
 import type { Searchable } from './session-search.ts'
 import * as model from './settings-model.ts'
@@ -264,6 +265,11 @@ export function trustFolder(folder: unknown): Promise<Settings> {
     ...model.trustFolders(settings, [dir], onWindows),
     recentWorkspaces: mergeFolders([[dir], settings.recentWorkspaces ?? []])
   }))
+}
+
+/** Whether the person said a model may read this folder (`trustFolder`). */
+export async function trusts(folder: string): Promise<boolean> {
+  return model.isTrusted(await loadStored(), folder, onWindows)
 }
 
 /** Gives a workspace a name of the person's own, or with an empty one takes it back. The name arrives over IPC; the settings model checks it. */
@@ -585,15 +591,36 @@ function oneByOne<T>(id: string, work: () => Promise<T>): Promise<T> {
   return done
 }
 
-const readSession = async (id: string): Promise<Session | null> => readJson<Session>(sessionFile(id))
-const writeSession = async (session: Session): Promise<void> => writeJson(sessionFile(session.id), session)
+/** Where the pictures of conversations are kept, a folder for each (session-files.ts). */
+export const picturesRoot = (): string => path.join(app.getPath('userData'), 'attachments')
 
+const readSession = async (id: string): Promise<Session | null> => readJson<Session>(sessionFile(id))
+// A picture kept in a file of its own is named in the session's file, and its bytes are left out.
+const writeSession = async (session: Session): Promise<void> => writeJsonText(sessionFile(session.id), sessionText(session))
+
+/** A saved session, with the pictures it names read back into it. */
 export function loadSession(id: string): Promise<Session | null> {
-  return oneByOne(id, () => readSession(id))
+  return oneByOne(id, async () => {
+    const session = await readSession(id)
+    if (session) await fillPictures(session, picturesRoot())
+    return session
+  })
 }
 
+/**
+ * The sessions deleted since the app started. A save that comes after the deletion is not made: a
+ * turn that the deletion stopped saves once more as it ends, and would bring the whole
+ * conversation back. Ids are never used twice.
+ */
+const deletedSessions = new Set<string>()
+
 export function saveSession(session: Session): Promise<void> {
-  return oneByOne(session.id, () => writeSession(session))
+  return oneByOne(session.id, () => (deletedSessions.has(session.id) ? Promise.resolve() : writeSession(session)))
+}
+
+/** `saveSession` for a session already written out (`sessionText`), as it was at that moment. */
+export function saveSessionText(id: string, text: string): Promise<void> {
+  return oneByOne(id, () => (deletedSessions.has(id) ? Promise.resolve() : writeJsonText(sessionFile(id), text)))
 }
 
 /**
@@ -635,5 +662,9 @@ export function retitleSession(id: string, from: string, to: string): Promise<bo
 }
 
 export function deleteSession(id: string): Promise<void> {
-  return oneByOne(id, () => fs.rm(sessionFile(id), { force: true }))
+  deletedSessions.add(id)
+  return oneByOne(id, async () => {
+    await fs.rm(sessionFile(id), { force: true })
+    await dropPictures(id, picturesRoot())
+  })
 }

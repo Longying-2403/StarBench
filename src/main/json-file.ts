@@ -37,11 +37,16 @@ export function readJson<T>(file: string): Promise<T | null> {
 let writeCounter = 0
 
 export async function writeJson(file: string, value: unknown): Promise<void> {
+  return writeJsonText(file, JSON.stringify(value, null, 2))
+}
+
+/** `writeJson` for a value already written out as JSON: what is saved is the value as it was when it was written out. */
+export async function writeJsonText(file: string, text: string): Promise<void> {
   await fs.mkdir(path.dirname(file), { recursive: true })
   // Write to a temp file first so a crash mid-write cannot corrupt the original.
   // The name is unique per write, so two writers of one file never share a temp file.
   const tmp = `${file}.${process.pid}.${writeCounter++}.tmp`
-  await fs.writeFile(tmp, JSON.stringify(value, null, 2), 'utf8')
+  await fs.writeFile(tmp, text, 'utf8')
   try {
     await queued(file, () => renameOver(tmp, file))
   } catch (err) {

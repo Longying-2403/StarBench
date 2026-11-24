@@ -70,6 +70,10 @@
   background: var(--accent);
   vertical-align: 1px;
 }
+/* 两段读数并排时隔开一点。 */
+.debug-readout + .debug-readout {
+  margin-left: 10px;
+}
 
 /* 一条记录。 */
 .debug-exchange {

@@ -383,6 +383,16 @@ export function FoldIcon() {
   )
 }
 
+/** A cloud with an arrow coming down out of it: a newer build is out, and this is the way to it. */
+export function CloudDownloadIcon() {
+  return (
+    <svg {...line}>
+      <path d="M6.5 17a4.5 4.5 0 0 1 .3-8.98A6 6 0 0 1 18.2 9.6 3.8 3.8 0 0 1 17.8 17" />
+      <path d="M12 12v8.5M8.8 17.3 12 20.5l3.2-3.2" />
+    </svg>
+  )
+}
+
 /** The same window with the arrow out of the column: the sidebar opens again. */
 export function UnfoldIcon() {
   return (

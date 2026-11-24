@@ -14,7 +14,8 @@ type UserMessage = Extract<ChatMessage, { role: 'user' }>
  */
 export function userImages(message: UserMessage, connection: Pick<Connection, 'noImages'>): ImageAttachment[] {
   if (connection.noImages) return []
-  return (message.attachments ?? []).filter((file): file is ImageAttachment => file.kind === 'image')
+  // A picture whose file is no longer kept has nothing to send; `userText` says so instead.
+  return (message.attachments ?? []).filter((file): file is ImageAttachment => file.kind === 'image' && file.data !== '')
 }
 
 /** A picture as an address that holds it whole, the form two of the three formats take pictures in. */

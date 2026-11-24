@@ -4,7 +4,7 @@ import { ABOUT } from '../../shared/about.ts'
 import type { Attachment } from '../../shared/attachments.ts'
 import { folderKey, workspaceName } from '../../shared/folders.ts'
 import { hasHidden, revealHidden } from '../../shared/hidden-chars.ts'
-import { DEFAULT_PERMISSION_MODE, VIEW_ONLY_RESULT } from '../../shared/permissions.ts'
+import { DEFAULT_PERMISSION_MODE, VIEW_ONLY_RESULT, runsOnItsOwnPart } from '../../shared/permissions.ts'
 import type { PermissionMode } from '../../shared/permissions.ts'
 import { formatShare, formatTokens } from '../../shared/stats.ts'
 import type { SessionStats } from '../../shared/stats.ts'
@@ -35,10 +35,12 @@ import { PluginPanel, PluginRow, useAnnouncePlace } from './PluginUi.tsx'
 import { PluginsPage } from './PluginsPage.tsx'
 import { PromptDialog } from './PromptDialog.tsx'
 import { SettingsPage } from './Settings.tsx'
+import type { SettingsTab } from './Settings.tsx'
 import { Sidebar } from './Sidebar.tsx'
 import { StatusRow } from './StatusRow.tsx'
 import { TipLayer } from './Tips.tsx'
 import { ToastStack, notify, toasts } from './Toasts.tsx'
+import { newerBuild, useUpdateNotice, useUpdates } from './UpdateCheck.tsx'
 import { TrustDialog } from './TrustDialog.tsx'
 import { errorText, isWindows, useNow } from './util.ts'
 
@@ -96,6 +98,18 @@ function shownArgs(call: ToolCall): { entries: [string, string][]; raw: string |
 function hidesCharacters(call: ToolCall): boolean {
   const { entries, raw } = shownArgs(call)
   return [raw ?? '', ...entries.flat()].some(hasHidden)
+}
+
+/**
+ * The folder a write of the app's own goes into where git or an editor runs commands from its
+ * files by itself (shared/permissions.ts), for saying why such a write is asked about; null for
+ * any other call. The main process also follows links, which the page cannot: there it may ask
+ * without this to say why.
+ */
+function runsOnItsOwnTarget(call: ToolCall, workspace: string): string | null {
+  if (call.name !== 'write_file' && call.name !== 'edit_file') return null
+  const target = parseArgs(call).path
+  return typeof target === 'string' ? runsOnItsOwnPart(workspace, target) : null
 }
 
 /** How a character that would not show is marked: its code point in a red frame. */
@@ -222,7 +236,10 @@ const linkTo = (title: string, url: string): string => `[${title.replace(/[\\[\]
  * or dark look (设置 → 外观), as the page does.
  */
 function SearchSuggestions({ html, faded }: { html: string; faded: boolean }) {
-  const page = `<!doctype html><html><head><meta charset="utf-8"><meta name="color-scheme" content="light dark"><base target="_blank"><style>html,body{margin:0;padding:1px;background:transparent;overflow:hidden}</style></head><body>${html}</body></html>`
+  // Google's suggestions are styles, drawings of their own and links. The frame fetches nothing:
+  // a picture from the web would tell its server each time the conversation is opened, past the
+  // rule that web pictures load only when pressed.
+  const page = `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:"><meta name="color-scheme" content="light dark"><base target="_blank"><style>html,body{margin:0;padding:1px;background:transparent;overflow:hidden}</style></head><body>${html}</body></html>`
   return <iframe className={`search-suggestions${faded ? ' faded' : ''}`} title="Google 搜索建议" sandbox="allow-popups" srcDoc={page} />
 }
 
@@ -249,7 +266,8 @@ function WebCard({ item, faded, workspace }: { item: Extract<Item, { kind: 'web'
         {activity.error && (
           <div className="arg">
             <div className="arg-name">原因</div>
-            <div className="hint">{WEB_ERRORS[activity.error] ?? activity.error}</div>
+            {/* A name of the service's choosing finds only the table's own entries, never what every object inherits. */}
+            <div className="hint">{(Object.hasOwn(WEB_ERRORS, activity.error) ? WEB_ERRORS[activity.error] : undefined) ?? String(activity.error)}</div>
           </div>
         )}
         {sources.length > 0 && (
@@ -330,9 +348,28 @@ function ErrorNotice({ title, text, detail, children }: { title: string; text: s
 }
 
 /** When something in the conversation happened, under it: said from now, with the exact moment for whoever asks. */
-function MessageTime({ at, now, sent, faded }: { at: number; now: number; /** Under a message of the person, at the right like the message. */ sent?: boolean; faded: boolean }) {
+function MessageTime({
+  at,
+  now,
+  sent,
+  plain,
+  faded
+}: {
+  at: number
+  now: number
+  /** Under a message of the person, at the right like the message. */
+  sent?: boolean
+  /** The message went out as a plain chat, which is said in front of its time. */
+  plain?: boolean
+  faded: boolean
+}) {
   return (
     <div className={`msg-time${sent ? ' msg-time-sent' : ''}${faded ? ' faded' : ''}`}>
+      {plain && (
+        <span className="badge msg-plain" data-tip="这条消息是以纯对话发出的：没有给模型任何工具，也没有带 StarBench 的提示词、Skills 列表和记忆。">
+          纯对话
+        </span>
+      )}
       <span data-tip={`${sent ? '发送于' : '完成于'} ${whenExact(at)}`}>{whenText(at, now)}</span>
     </div>
   )
@@ -368,7 +405,7 @@ function Transcript({
             {item.attachments && <AttachmentRow files={item.attachments} sent />}
             {item.text}
           </div>
-          {item.at !== undefined && <MessageTime at={item.at} now={now} sent faded={faded} />}
+          {item.at !== undefined && <MessageTime at={item.at} now={now} sent plain={item.plain} faded={faded} />}
         </>
       )
     }
@@ -449,6 +486,7 @@ function PermissionBar({
   // A note that looks sensitive is asked about in the memory's own words (MemoryNotice.tsx).
   if (isSensitiveMemoryCall(call)) return <MemorySensitiveBar call={call} onDecide={onDecide} />
   const label = TOOL_LABELS[call.name]
+  const runsCommands = runsOnItsOwnTarget(call, workspace)
   return (
     <div className="permission" role="alertdialog" aria-label="权限确认">
       <div className="permission-title">{label ? `允许${label}？` : `允许调用工具 ${call.name}？`}</div>
@@ -457,6 +495,11 @@ function PermissionBar({
       </div>
       {hidesCharacters(call) && (
         <Notice role="alert">这次调用里有看不见的字符，已用红框标出。显示出来的内容可能和实际执行的不一样，看清楚再决定。</Notice>
+      )}
+      {runsCommands && (
+        <Notice role="status">
+          要改的文件在 {runsCommands} 文件夹里。git 和编辑器会自己运行这类文件夹里写的命令（编辑器打开文件夹时就会运行 git），所以这类改动在“工作区内修改”模式下也会先问你。
+        </Notice>
       )}
       <div className="permission-body">
         <ToolDetails call={call} />
@@ -513,6 +556,9 @@ export function App() {
   const [workspace, setWorkspace] = useState(readLastWorkspace)
   /** What the model may do without asking in the conversation on the page. A new chat starts by asking. */
   const [mode, setMode] = useState<PermissionMode>(DEFAULT_PERMISSION_MODE)
+  /** The mode as the person set it last, for a message whose sending began before they changed it (`send`). */
+  const modeRef = useRef(mode)
+  modeRef.current = mode
   /**
    * The folder a new chat is about to be in that the app has not been in before, while the person
    * is asked whether a model may read it. `entered`: the chat is in it already (it was the folder
@@ -540,6 +586,15 @@ export function App() {
 
   // The components of plugins are told which conversation is on the page, and which model it talks to.
   useAnnouncePlace(sessionId, workspace, running, settings)
+  // A newer build that a look of the app's own finds is said in the corner of the window.
+  useUpdateNotice()
+  /** What is known about newer builds: while one is out, the way to it stands beside the settings at the foot of the sidebar. */
+  const updates = useUpdates()
+  /** The section of the settings the person was sent to. Forgotten when they leave the settings, so that the next visit starts where it always does. */
+  const [settingsFocus, setSettingsFocus] = useState<{ tab: SettingsTab } | null>(null)
+  useEffect(() => {
+    if (page !== 'settings') setSettingsFocus(null)
+  }, [page])
 
   // The event listener is registered once, so it reads the current session through a ref.
   const sessionRef = useRef<string | null>(null)
@@ -799,8 +854,11 @@ export function App() {
   /** Sets what the model may do without asking in the conversation on the page. A saved one keeps it; in one at work it counts from the next tool call. */
   const changeMode = (next: PermissionMode): void => {
     setMode(next)
-    if (!sessionId) return
-    api.setPermissionMode(sessionId, next).catch((err: unknown) => notify({ kind: 'error', title: '权限设置没有保存', text: errorText(err) }))
+    modeRef.current = next
+    if (sessionId) saveMode(sessionId, next)
+  }
+  const saveMode = (id: string, next: PermissionMode): void => {
+    api.setPermissionMode(id, next).catch((err: unknown) => notify({ kind: 'error', title: '权限设置没有保存', text: errorText(err) }))
   }
 
   const send = async (text: string, skill: string | undefined, attachments: Attachment[]): Promise<void> => {
@@ -808,11 +866,18 @@ export function App() {
     setRunning(true)
     stickToBottom.current = true
     lastTop.current = 0
-    dispatch({ type: 'user', text, skill, attachments, at: Date.now() })
+    const sentAt = Date.now()
+    dispatch({ type: 'user', text, skill, attachments, at: sentAt })
+    const sentMode = mode
     try {
-      const id = await api.send(sessionId, workspace, text, skill, { mode, ...(attachments.length ? { attachments } : {}) })
+      const { id, plain } = await api.send(sessionId, workspace, text, skill, { mode: sentMode, ...(attachments.length ? { attachments } : {}) })
+      // Whether it went out as a plain chat is for the main process to say: the message gets its mark from that.
+      if (plain) dispatch({ type: 'plain', at: sentAt })
       sessionRef.current = id
       setSessionId(id)
+      // Changed while the message was on its way: a new chat had no id to send the change with
+      // then, and the turn began with the mode it was sent with. It goes by the button from here on.
+      if (modeRef.current !== sentMode) saveMode(id, modeRef.current)
       refreshSessions()
     } catch (err) {
       setRunning(false)
@@ -959,6 +1024,12 @@ export function App() {
           setPage((now) => (now === 'memory' ? 'chat' : 'memory'))
         }}
         onSettings={() => setPage((now) => (now === 'settings' ? 'chat' : 'settings'))}
+        update={newerBuild(updates.state)}
+        onUpgrade={() => {
+          // To the About page of the settings, where the newer build is named and the page of its files is linked.
+          setSettingsFocus({ tab: 'about' })
+          setPage('settings')
+        }}
       />
 
       <div className="stage">
@@ -1104,6 +1175,7 @@ export function App() {
           <section className="page" aria-labelledby="settings-title">
             <SettingsPage
               settings={settings}
+              focus={settingsFocus}
               onBack={() => setPage('chat')}
               onSaved={(saved) => {
                 setSettings(saved)

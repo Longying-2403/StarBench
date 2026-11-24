@@ -9,6 +9,7 @@ import type {
   OpenOutcome,
   PermissionDecision,
   ProviderInput,
+  Sent,
   Session,
   SessionEvent,
   Settings,
@@ -22,10 +23,13 @@ import { knownContextWindow } from '../shared/context-windows.ts'
 import { DEFAULT_PERMISSION_MODE, isPermissionMode } from '../shared/permissions.ts'
 import type { PermissionMode } from '../shared/permissions.ts'
 import { addCompaction, addStep, addToolTime, addTurn, emptyStats } from '../shared/stats.ts'
+import { ABOUT } from '../shared/about.ts'
 import { DEFAULT_THEME } from '../shared/theme.ts'
+import { MEMORY_COMMANDS } from '../shared/memory.ts'
 import { isLocalAddress, isSessionIcon } from '../shared/types.ts'
 import { askAside, builtinPrompt, compactConversation, runTurn } from './agent.ts'
 import type { RoomOptions } from './agent.ts'
+import { setAppMenu } from './app-menu.ts'
 import { attachData, attachFiles } from './attachments.ts'
 import { conversationName } from './conversation-name.ts'
 import { SignInError, startAttempt } from './chatgpt/login.ts'
@@ -38,11 +42,13 @@ import { languageOf } from './language.ts'
 import { McpManager } from './mcp.ts'
 import { MemoryService, registerMemoryIpc } from './memory.ts'
 import type { MemoryTurn } from './memory.ts'
+import { UpdateChecker, askReleases, registerUpdateIpc } from './update-check.ts'
 import { mayGrant, mayNavigate } from './page-guard.ts'
 import { PluginChannel } from './plugin-channel.ts'
 import { PluginManager } from './plugins.ts'
-import { SamplingRegistry } from './sampling.ts'
+import { SamplingRegistry, targetOf } from './sampling.ts'
 import { SkillStore, loadSkillTool, selectedSkillPrompt, skillsPrompt } from './skills.ts'
+import { keepPictures, sessionText } from './session-files.ts'
 import * as store from './store.ts'
 import { cleanTitle, titleEffort, titlePrompt, titleRecord } from './title.ts'
 import { ToolRegistry, registerBuiltinTools } from './tools.ts'
@@ -112,6 +118,18 @@ const memory = new MemoryService({
   windows: process.platform === 'win32',
   workspaces: () => store.listWorkspaces(),
   emit: (event) => mainWindow?.webContents.send('memory:event', event)
+})
+/**
+ * The look for a newer build (update-check.ts): made when the person asks for it on the About
+ * page, and by the app itself once a day where they switched that on. Once packaged it asks
+ * GitHub and nobody else; before that, a test may name another address to ask.
+ */
+const updates = new UpdateChecker({
+  file: path.join(app.getPath('userData'), 'updates.json'),
+  version: app.getVersion(),
+  revision: ABOUT.revision,
+  ask: () => askReleases({ agent: `StarBench/${app.getVersion()}`, ...(!app.isPackaged && process.env.STARBENCH_UPDATE_TEST_SERVER ? { url: process.env.STARBENCH_UPDATE_TEST_SERVER } : {}) }),
+  emit: (event) => mainWindow?.webContents.send('updates:event', event)
 })
 const mcp = new McpManager({
   configFile: path.join(app.getPath('userData'), 'mcp.json'),
@@ -189,6 +207,15 @@ interface ActiveRun {
 }
 const activeRuns = new Map<string, ActiveRun>()
 const permissionResolvers = new Map<string, (decision: PermissionDecision) => void>()
+/**
+ * Stops a run, whoever asks for it: the person, a deletion of its session, a sign-out. A question
+ * it waits on is answered "no" as well; a run blocked on a permission prompt would otherwise never
+ * notice the stop, and its session would stay at work until the app is closed.
+ */
+function stopRun(run: ActiveRun): void {
+  run.controller.abort()
+  for (const id of [...run.pending]) permissionResolvers.get(id)?.('deny')
+}
 /** Per-session "always allow" choices; kept in memory only, so they reset on restart. */
 const alwaysAllowed = new Map<string, Set<string>>()
 /**
@@ -336,6 +363,27 @@ const liveSessions = new Map<string, { session: Session; checkpoint(): void; /**
 const opening = new Set<string>()
 /** A name the model wrote for a session just then: handed to the session as it comes into memory. */
 const pendingTitles = new Map<string, { from: string; to: string }>()
+/**
+ * A permission mode the person chose for a session on its way into memory. The work that is
+ * about to begin was handed the mode the page had a moment before, and takes this one up instead.
+ */
+const pendingModes = new Map<string, PermissionMode>()
+/** Takes up a mode chosen for the session while its work was on its way (`pendingModes`). */
+function takeMode(id: string, run: ActiveRun): void {
+  const chosen = pendingModes.get(id)
+  pendingModes.delete(id)
+  if (chosen) run.mode = chosen
+}
+/**
+ * Saves the mode of a session whose work is over, where the person changed it after the work last
+ * saved the session: after what that work saved, so that it is not undone by it.
+ */
+function keepMode(id: string, run: ActiveRun, saved: PermissionMode | undefined, after: Promise<unknown>): void {
+  if (run.mode === (saved ?? DEFAULT_PERMISSION_MODE)) return
+  void after
+    .then(() => store.updateSession(id, { permissionMode: run.mode }))
+    .catch((err: unknown) => console.error('[store] could not keep the permission mode:', err instanceof Error ? err.message : err))
+}
 
 /**
  * Gives a session the name the model wrote for it, where it still goes by `from`, the first
@@ -496,7 +544,7 @@ function registerIpc(): void {
   ipcMain.handle('signin:cancel', () => signIn?.attempt.cancel())
   ipcMain.handle('signin:out', async (_e, providerId: string) => {
     // Requests stop first, then the tokens they were using are given up.
-    for (const run of activeRuns.values()) if (run.provider === providerId) run.controller.abort()
+    for (const run of activeRuns.values()) if (run.provider === providerId) stopRun(run)
     return store.signOut(providerId)
   })
 
@@ -558,12 +606,14 @@ function registerIpc(): void {
   }
 
   /** The conversation and the model a turn is for, as the memory needs to know them (memory.ts). */
-  const memoryTurnOf = (session: Session, connection: Connection, room: RoomOptions): MemoryTurn => ({
+  /** `skill`: the one the person picked for the message, if any; one of the memory's commands says what the model may do to the notes. */
+  const memoryTurnOf = (session: Session, connection: Connection, room: RoomOptions, skill?: string): MemoryTurn => ({
     session: session.id,
     workspace: session.workspace,
     provider: { id: connection.provider, ...(connection.providerName ? { name: connection.providerName } : {}), local: isLocalAddress(connection.baseURL) },
     model: connection.model,
-    ...(room.window ? { window: room.window } : {})
+    ...(room.window ? { window: room.window } : {}),
+    ...(skill && (MEMORY_COMMANDS as readonly string[]).includes(skill) ? { command: true } : {})
   })
 
   ipcMain.handle('workspace:pick', async () => {
@@ -676,6 +726,8 @@ function registerIpc(): void {
       if (error) throw new Error(error)
     }
   })
+  // The look for a newer build, for the About page of the settings.
+  registerUpdateIpc(ipcMain, updates)
 
   // With which of them are at work just now, so that the list can show it.
   ipcMain.handle('sessions:list', async () => (await store.listSessions()).map((s) => (activeRuns.has(s.id) ? { ...s, running: true as const } : s)))
@@ -703,7 +755,8 @@ function registerIpc(): void {
   })
   /** Deletes a saved session, and with it what is kept of it for as long as the app runs. */
   const dropSession = async (id: string): Promise<void> => {
-    activeRuns.get(id)?.controller.abort()
+    const run = activeRuns.get(id)
+    if (run) stopRun(run)
     alwaysAllowed.delete(id)
     textTools.delete(id)
     wholeReplies.delete(id)
@@ -743,14 +796,24 @@ function registerIpc(): void {
   })
 
   /** Takes a message into its session and starts the turn that answers it. Resolves, with the session's id, once the turn has begun. */
-  const beginTurn = async (sessionId: string | null, workspace: string, text: string, skill?: string, extras?: unknown): Promise<string> => {
+  const beginTurn = async (sessionId: string | null, workspace: string, text: string, skill?: string, extras?: unknown): Promise<Sent> => {
     const connection = await store.getConnection()
     if (!connection) throw new Error('The model service in use has no API key or sign-in yet. Open Settings to add one.')
     if (!connection.model) throw new Error('No model chosen yet. Pick one next to the message box.')
     if (sessionId && activeRuns.has(sessionId)) throw new Error('This session is already running.')
+    // Whether the message goes out as a plain chat, with no tools and nothing of the app's beside
+    // it (`TurnOptions.plain`): a plugin says so, for this model, and the page has no say in it.
+    // Asked once, as the message is sent, and that is what the turn is.
+    const plain = sampling.plainFor(targetOf(connection))
+    // The memory's commands are carried out with the memory's tools, and a plain chat has none: sent
+    // all the same, the model would be told to keep a note it cannot keep, and might say it did.
+    if (plain && skill && (MEMORY_COMMANDS as readonly string[]).includes(skill)) {
+      throw new Error('This message would go out as a plain chat, which has no tools, and the memory commands need tools to read or change a note. Switch the plain chat off in the debug panel, or send the message without the command.')
+    }
     // Loaded before anything is saved, so a skill that vanished fails the send instead of the turn.
     const pickedSkill = skill ? { name: skill, prompt: selectedSkillPrompt(skill, await skills.load(skill)) } : undefined
-    const systemExtra = skillsPrompt(await skills.list())
+    // A plain chat is told of no skills. One the person picked for the message is part of what they say, and goes.
+    const systemExtra = plain ? undefined : skillsPrompt(await skills.list())
     // What goes with the message arrives from the page, and is checked like everything that does.
     const { mode: askedMode, attachments: given } = typeof extras === 'object' && extras !== null ? (extras as { mode?: unknown; attachments?: unknown }) : {}
     const attachments = readAttachments(given)
@@ -758,6 +821,11 @@ function registerIpc(): void {
 
     let session: Session | null = sessionId ? await store.loadSession(sessionId) : null
     if (!session) {
+      // The page asks before a new chat goes into a folder (TrustDialog.tsx); a message that comes
+      // from anywhere else is held to the same: a folder that is there, named in full, and trusted.
+      const there = typeof workspace === 'string' && path.isAbsolute(workspace) && (await fs.stat(workspace).then((s) => s.isDirectory(), () => false))
+      if (!there) throw new Error('A new chat needs a folder that exists, named by its full path.')
+      if (!(await store.trusts(workspace))) throw new Error('This folder has not been trusted yet. Choose it again to be asked whether a model may read it.')
       session = {
         id: randomUUID(),
         // A message that is files and no words is named after the first of them.
@@ -780,10 +848,22 @@ function registerIpc(): void {
     if (counting) current.stats = addTurn(current.stats ?? emptyStats(current.messages.length > 0))
     // Keeps the folder list in order of use. Not worth failing the message over.
     store.rememberWorkspace(current.workspace).catch((err) => console.error('[store] could not remember the folder:', err))
-    current.messages.push({ role: 'user', content: text, ...(pickedSkill ? { skill: pickedSkill } : {}), ...(attachments.length ? { attachments } : {}), at: Date.now() })
+    current.messages.push({
+      role: 'user',
+      content: text,
+      ...(pickedSkill ? { skill: pickedSkill } : {}),
+      ...(attachments.length ? { attachments } : {}),
+      at: Date.now(),
+      // Kept with the message: the conversation shows which of its messages went out that way.
+      ...(plain ? { plain: true as const } : {})
+    })
+    // Its pictures go into files of their own, once; so do those of a session saved before that was done.
+    // Where that fails, they stay in the session's file as before.
+    await keepPictures(current, store.picturesRoot()).catch((err: unknown) => console.error('[store] pictures stay in the session file:', err instanceof Error ? err.message : err))
 
     const run: ActiveRun = { controller: new AbortController(), provider: connection.provider, pending: new Set(), mode }
     activeRuns.set(current.id, run)
+    takeMode(current.id, run)
     let allowed = alwaysAllowed.get(current.id)
     if (!allowed) alwaysAllowed.set(current.id, (allowed = new Set()))
 
@@ -794,8 +874,10 @@ function registerIpc(): void {
       // The mode as it is now: the person may have changed it while the turn ran. The one a conversation starts with is not written down.
       if (run.mode === DEFAULT_PERMISSION_MODE) delete current.permissionMode
       else current.permissionMode = run.mode
-      const snapshot = structuredClone(current)
-      saving = saving.then(() => store.saveSession(snapshot)).catch((err) => console.error('save failed', err))
+      // Written out now, as it is now. The pictures of the session are named, not copied: they are
+      // in files of their own, written once (session-files.ts), and not again at every step.
+      const text = sessionText(current)
+      saving = saving.then(() => store.saveSessionText(current.id, text)).catch((err) => console.error('save failed', err))
     }
     liveSessions.set(current.id, { session: current, checkpoint, saved: () => saving })
     // A name the model wrote for the session while this message was on its way is taken up with it,
@@ -806,10 +888,13 @@ function registerIpc(): void {
 
     const room = await roomFor(current, connection)
     // What the memory tells the model in this conversation, and the tools it adds: nothing of it while the memory is off for this service.
-    const remembered = await memory.forTurn(memoryTurnOf(current, connection, room), tools).catch((err: unknown) => {
-      console.error('[memory] left out of this turn:', err instanceof Error ? err.message : err)
-      return { prompt: undefined, tools }
-    })
+    // And nothing of it in a plain chat, where the memory is not asked at all: no note is read for the turn, and none can be written in it.
+    const remembered = plain
+      ? { prompt: undefined, tools }
+      : await memory.forTurn(memoryTurnOf(current, connection, room, pickedSkill?.name), tools).catch((err: unknown) => {
+          console.error('[memory] left out of this turn:', err instanceof Error ? err.message : err)
+          return { prompt: undefined, tools }
+        })
 
     void runTurn({
       connection: asLearned(current.id, connection),
@@ -819,6 +904,7 @@ function registerIpc(): void {
       memory: remembered.prompt,
       conversation: conversationName(current.id),
       room,
+      plain,
       signal: run.controller.signal,
       tools: remembered.tools,
       sampling,
@@ -871,11 +957,12 @@ function registerIpc(): void {
       .finally(() => {
         activeRuns.delete(current.id)
         liveSessions.delete(current.id)
+        keepMode(current.id, run, current.permissionMode, saving)
       })
       // By itself and after the turn: the person can go on with the conversation meanwhile.
       .then(() => (unnamed ? nameConversation(current, connection) : undefined))
 
-    return current.id
+    return { id: current.id, ...(plain ? { plain: true as const } : {}) }
   }
 
   ipcMain.handle('agent:send', async (_e, sessionId: string | null, workspace: string, text: string, skill?: string, extras?: unknown) => {
@@ -885,7 +972,10 @@ function registerIpc(): void {
     try {
       return await beginTurn(sessionId, workspace, text, skill, extras)
     } finally {
-      if (sessionId) opening.delete(sessionId)
+      if (sessionId) {
+        opening.delete(sessionId)
+        pendingModes.delete(sessionId)
+      }
     }
   })
 
@@ -900,22 +990,28 @@ function registerIpc(): void {
     // No tool runs while a conversation is compacted, so its mode has nothing to say here; it is kept as the session has it.
     const run: ActiveRun = { controller: new AbortController(), provider: connection.provider, pending: new Set(), mode: session.permissionMode ?? DEFAULT_PERMISSION_MODE }
     activeRuns.set(id, run)
+    takeMode(id, run)
+    let saving: Promise<void> = Promise.resolve()
     try {
       const counting = await store.countsStats()
-      let saving: Promise<void> = Promise.resolve()
       const checkpoint = (): void => {
         session.updatedAt = Date.now()
-        const snapshot = structuredClone(session)
-        saving = saving.then(() => store.saveSession(snapshot))
+        // A mode the person chose meanwhile is saved with it, as a turn saves it.
+        if (run.mode === DEFAULT_PERMISSION_MODE) delete session.permissionMode
+        else session.permissionMode = run.mode
+        // Written out now, as it is now; its pictures are named, not copied (session-files.ts).
+        const text = sessionText(session)
+        saving = saving.then(() => store.saveSessionText(id, text))
       }
       liveSessions.set(id, { session, checkpoint, saved: () => saving })
       // A name the model wrote for the session just now is taken up with it. Saved as it is:
       // a new name is no reason for the session to move up the list. The page is told once it is in the file.
       if (takeTitle(session)) {
-        const snapshot = structuredClone(session)
-        const written = (saving = saving.then(() => store.saveSession(snapshot)))
+        const text = sessionText(session)
+        const title = session.title
+        const written = (saving = saving.then(() => store.saveSessionText(id, text)))
         void written.then(
-          () => send({ sessionId: id, event: { type: 'titled', title: snapshot.title } }),
+          () => send({ sessionId: id, event: { type: 'titled', title } }),
           () => {}
         )
       }
@@ -959,6 +1055,7 @@ function registerIpc(): void {
     } finally {
       activeRuns.delete(id)
       liveSessions.delete(id)
+      keepMode(id, run, session.permissionMode, saving.catch(() => {}))
     }
   }
   ipcMain.handle('sessions:compact', async (_e, sessionId: unknown): Promise<CompactionReport> => {
@@ -970,18 +1067,18 @@ function registerIpc(): void {
       return await compactSession(id)
     } finally {
       opening.delete(id)
+      pendingModes.delete(id)
     }
   })
 
   ipcMain.handle('agent:stop', (_e, sessionId: string) => {
     const run = activeRuns.get(sessionId)
-    if (!run) return
-    run.controller.abort()
-    // A run blocked on a permission prompt would otherwise never notice the stop.
-    for (const id of [...run.pending]) permissionResolvers.get(id)?.('deny')
+    if (run) stopRun(run)
   })
 
-  ipcMain.handle('permission:respond', (_e, id: string, decision: PermissionDecision) => {
+  ipcMain.handle('permission:respond', (_e, id: string, decision: unknown) => {
+    // One of the three answers there are; anything else from the page answers nothing, and the question waits on.
+    if (decision !== 'allow' && decision !== 'always' && decision !== 'deny') return
     permissionResolvers.get(id)?.(decision)
   })
 
@@ -992,8 +1089,13 @@ function registerIpc(): void {
     if (!isPermissionMode(mode)) throw new Error('This is not one of the permission modes.')
     const id = String(sessionId ?? '')
     const run = activeRuns.get(id)
-    if (run) run.mode = mode
-    else await store.updateSession(id, { permissionMode: mode })
+    if (run) {
+      run.mode = mode
+      return
+    }
+    // Work on its way to the session was handed the mode the page had when it was asked for: it takes this one up as it begins.
+    if (opening.has(id)) pendingModes.set(id, mode)
+    await store.updateSession(id, { permissionMode: mode })
   })
 }
 
@@ -1010,6 +1112,7 @@ if (!isPrimaryInstance) {
   })
 
   void app.whenReady().then(async () => {
+    setAppMenu(app.isPackaged)
     registerIpc()
     servePluginUi()
     confinePageFiles()
@@ -1027,6 +1130,8 @@ if (!isPrimaryInstance) {
     mcp.init().catch((err) => console.error('[mcp] could not load mcp.json:', err))
     // The memory's settings, and its commands while it is on. Read again at the first turn if this fails.
     memory.init().catch((err) => console.error('[memory] could not read its settings:', err))
+    // While the app stays open it looks for a newer build again once a day has gone by, where the person lets it. The first look is asked for by the page when it is up (updates:auto).
+    setInterval(() => void updates.check('app'), 6 * 60 * 60 * 1000).unref()
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow()
     })

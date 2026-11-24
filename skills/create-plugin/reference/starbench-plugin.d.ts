@@ -221,9 +221,19 @@ export interface PluginContext {
   tools: {
     register(spec: ToolSpec): () => void
   }
-  /** `inject: ['sampling']`：给发往模型的请求加上温度这一类参数。每次请求前都会问一次，必须立刻回答。 */
+  /** `inject: ['sampling']`：对发往模型的请求有发言权的服务。两个函数都必须立刻回答，不能是异步的。 */
   sampling: {
+    /** 给请求加上温度这一类参数。每次请求前都会问一次。 */
     provide(source: (target: SamplingTarget) => Record<string, unknown> | null | undefined): () => void
+    /**
+     * 让发给某些模型的消息以“纯对话”发出。每条消息发出时问一次，返回 `true`（必须正好是 `true`）就算。
+     *
+     * 纯对话里，模型拿不到任何工具（应用自带的、插件的、MCP 的、服务自己的联网搜索都没有），
+     * 应用也不加自己的提示词、Skills 列表和记忆：系统提示词只有用户给这个模型服务写的那一份，没写就没有。
+     * 对话里以前的工具调用改用文字转述，模型在回应里写出的工具调用不会执行，发出的消息下面会标上“纯对话”。
+     * 这个函数只能把东西去掉，不能往请求里加任何东西。
+     */
+    plain(source: (target: SamplingTarget) => boolean): () => void
   }
   /** `inject: ['ui']`：通往这个插件自己的界面（`ui/index.js` 里的 `api.backend`）。 */
   ui: {
