@@ -6,6 +6,11 @@
 >
 > **0.1.0-r.8 及更早的版本有九个安全问题，0.1.0-r.9 起已经修复；0.1.0-r.11 及更早的版本还有九个安全和隐私问题，0.1.0-r.12 起也都已修复。** 还在用这些版本时，请不要把来路不明的文件夹（下载的压缩包、别人的仓库）选作工作文件夹；新版本里处理这类文件夹，也请保持"每次询问"，不要用"工作区内修改"或"完全权限"。详见[已知问题](KNOWN_ISSUES.md)。
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/screenshot-dark.png">
+  <img alt="StarBench 的对话界面：模型先列出目录、读了几个文件，再说明 todo.py 里 done 命令的编号为什么差一" src="docs/images/screenshot-light.png">
+</picture>
+
 ## 目录
 
 - [功能](#功能)
@@ -571,7 +576,7 @@ electron-builder.yml   打包配置
 - 插件能放界面的位置还只有两个（输入框上面那条栏的右端和对话右侧的面板）；没有统一的插件设置页，修改代码后要手动点"重新加载"
 - 添加到消息里的文件只支持图片和文本文件，PDF 和 Office 文档还不行；已信任的文件夹还没有单独的管理页（删除工作区会取消信任）；没有"自动审查"式的权限模式
 - MCP 的 OAuth 登录、resources 和 prompts
-- macOS 和 Linux 的安装包、代码签名、自动更新、应用图标
+- macOS 和 Linux 的安装包、代码签名、自动更新
 
 ## 许可证
 
