@@ -1,6 +1,7 @@
 // Folder paths as the app compares and shows them. Used by both the main process and the page.
 
 import type { SessionSummary } from './types.ts'
+import { projectFolder } from './worktree.ts'
 
 /**
  * What makes two spellings the same folder: a trailing separator never matters, and on
@@ -46,15 +47,18 @@ export interface WorkspaceGroup {
 /**
  * Sorts sessions into their workspaces. Groups come in order of their most recent session,
  * and so do the sessions inside each group; `sessions` is expected most recent first. A group
- * goes by the name the person gave its workspace, where `names` holds one.
+ * goes by the name the person gave its workspace, where `names` holds one. A session that works
+ * in a worktree of a repository stands with the repository's (`projectFolder`): a worktree is no
+ * workspace of its own.
  */
 export function groupByWorkspace(sessions: readonly SessionSummary[], windows: boolean, names?: Readonly<Record<string, string>>): WorkspaceGroup[] {
   const groups = new Map<string, WorkspaceGroup>()
   for (const session of sessions) {
-    const key = folderKey(session.workspace, windows)
+    const folder = projectFolder(session)
+    const key = folderKey(folder, windows)
     let group = groups.get(key)
     if (!group) {
-      group = { key, workspace: session.workspace, name: workspaceName(session.workspace, names, windows), sessions: [] }
+      group = { key, workspace: folder, name: workspaceName(folder, names, windows), sessions: [] }
       groups.set(key, group)
     }
     group.sessions.push(session)

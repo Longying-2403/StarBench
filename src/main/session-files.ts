@@ -6,20 +6,24 @@
 // folder, and the session file names it. In memory a session keeps the bytes as before, so the
 // page and the request builders see no difference: they are read back when a session is loaded,
 // and left out when it is written. A session written before this holds its pictures in itself
-// until a turn of it runs again, which moves them out.
+// until a turn of it runs again, which moves them out. The PDFs of a conversation are kept the same
+// way, as `<sha256>.pdf`; "picture" below stands for them too.
 //
 // Nothing in this file depends on Electron.
 
 import { createHash } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
-import type { ImageAttachment } from '../shared/attachments.ts'
+import type { ImageAttachment, PdfAttachment } from '../shared/attachments.ts'
 import type { Session } from '../shared/types.ts'
 
-const EXTENSIONS: Record<ImageAttachment['type'], string> = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp' }
+/** What is kept in a file of its own beside its conversation: pictures, and PDFs, which are kept the same way. */
+type Kept = ImageAttachment | PdfAttachment
 
-/** What a picture's file is called: the hash of its bytes, so that the same picture is kept once. */
-const FILE_NAME = /^[0-9a-f]{64}\.(png|jpg|gif|webp)$/
+const EXTENSIONS: Record<Kept['type'], string> = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp', 'application/pdf': 'pdf' }
+
+/** What a picture's file is called: the hash of its bytes, so that the same picture is kept once. A PDF's likewise. */
+const FILE_NAME = /^[0-9a-f]{64}\.(png|jpg|gif|webp|pdf)$/
 
 /** The folder of one session's pictures. Session ids arrive over IPC, so they are checked like their file names. */
 export function picturesDir(root: string, sessionId: string): string {
@@ -27,10 +31,11 @@ export function picturesDir(root: string, sessionId: string): string {
   return path.join(root, sessionId)
 }
 
-function* picturesOf(session: Pick<Session, 'messages'>): Generator<ImageAttachment> {
+/** The pictures and the PDFs of a session: what is kept in files of their own. */
+function* picturesOf(session: Pick<Session, 'messages'>): Generator<Kept> {
   for (const message of session.messages) {
     if (message.role !== 'user') continue
-    for (const file of message.attachments ?? []) if (file.kind === 'image') yield file
+    for (const file of message.attachments ?? []) if (file.kind === 'image' || file.kind === 'pdf') yield file
   }
 }
 
@@ -56,8 +61,12 @@ export async function keepPictures(session: Pick<Session, 'id' | 'messages'>, ro
   }
 }
 
-const keptPicture = (value: unknown): value is ImageAttachment =>
-  typeof value === 'object' && value !== null && (value as { kind?: unknown }).kind === 'image' && typeof (value as { file?: unknown }).file === 'string' && FILE_NAME.test((value as { file: string }).file)
+const keptPicture = (value: unknown): value is Kept =>
+  typeof value === 'object' &&
+  value !== null &&
+  ((value as { kind?: unknown }).kind === 'image' || (value as { kind?: unknown }).kind === 'pdf') &&
+  typeof (value as { file?: unknown }).file === 'string' &&
+  FILE_NAME.test((value as { file: string }).file)
 
 /** A session as its file holds it: a picture that has a file of its own is named there, and its bytes are left out. */
 export function sessionText(session: Session): string {

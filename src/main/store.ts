@@ -5,12 +5,15 @@
 import { app, safeStorage } from 'electron'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
+import { readsPdfs } from '../shared/attachments.ts'
 import type { CompactionSettings } from '../shared/compaction.ts'
 import { DEFAULT_PERMISSION_MODE } from '../shared/permissions.ts'
 import type { PermissionMode } from '../shared/permissions.ts'
 import type { Theme } from '../shared/theme.ts'
 import type { ChatGptAccount, ProviderInput, ReasoningEffort, Session, SessionHit, SessionIcon, SessionSummary, Settings } from '../shared/types.ts'
 import { isReasoningEffort, isSessionIcon, offersFastMode, searchWorksAt, webSearchService } from '../shared/types.ts'
+import { readFailures } from '../shared/failures.ts'
+import { projectFolder, readMerges, readWorktree, worktreeOfFolder } from '../shared/worktree.ts'
 import { OPENAI, canUsePlan, clientIsGone, newHostId, readRecord, refreshed, renewalDue, revoke, tokensAreDead } from './chatgpt/oauth.ts'
 import type { AuthService, LoginRecord } from './chatgpt/oauth.ts'
 import { placeForSignIn } from './chatgpt/accounts.ts'
@@ -117,7 +120,7 @@ let trustSeeded: Promise<void> | undefined
 function seedTrust(): Promise<void> {
   trustSeeded ??= (async () => {
     if ((await loadStored()).trustedFolders) return
-    const used = (await listSessions()).map((s) => s.workspace)
+    const used = (await listSessions()).map(projectFolder)
     await mutate((settings) => (settings.trustedFolders ? settings : model.trustFolders(settings, [...(settings.recentWorkspaces ?? []), ...used], onWindows)))
   })().catch((err) => {
     // Not a reason to go without settings: every folder is then asked about, which is the careful side.
@@ -236,6 +239,11 @@ export function setSessionTimes(on: unknown): Promise<Settings> {
   return mutate((settings) => model.setSessionTimes(settings, on === true))
 }
 
+/** Has the Enter key in the message box send the message, or make a new line. `key` arrives over IPC; anything but `'newline'` is sending. */
+export function setEnterKey(key: unknown): Promise<Settings> {
+  return mutate((settings) => model.setEnterKey(settings, key === 'newline' ? 'newline' : 'send'))
+}
+
 /** Whether the links of a site open without the question first (`WebPlace.site`). */
 export async function trustsSite(site: string): Promise<boolean> {
   return model.trustsSite(await loadStored(), site)
@@ -297,6 +305,26 @@ export async function trusts(folder: string): Promise<boolean> {
   return model.isTrusted(await loadStored(), folder, onWindows)
 }
 
+/**
+ * Writes down the person's yes to git being run in a repository (main/git.ts). The folder arrives
+ * over IPC, so it has to be a whole path; it also has to be one a model may read.
+ */
+export function allowGit(folder: unknown): Promise<Settings> {
+  const dir = typeof folder === 'string' ? folder.trim() : ''
+  if (!dir || !path.isAbsolute(dir)) return Promise.reject(new Error('No folder was named.'))
+  return mutate((settings) => model.allowGit(settings, dir, onWindows))
+}
+
+/** Takes that back. */
+export function forgetGit(folder: unknown): Promise<Settings> {
+  return mutate((settings) => model.forgetGit(settings, typeof folder === 'string' ? folder : '', onWindows))
+}
+
+/** Whether the person said git may be run in this repository (`allowGit`). */
+export async function allowsGit(folder: string): Promise<boolean> {
+  return model.allowsGit(await loadStored(), folder, onWindows)
+}
+
 /** Gives a workspace a name of the person's own, or with an empty one takes it back. The name arrives over IPC; the settings model checks it. */
 export function nameWorkspace(folder: string, name: unknown): Promise<Settings> {
   return mutate((settings) => model.nameWorkspace(settings, folder, name, onWindows))
@@ -307,10 +335,13 @@ export function forgetWorkspace(folder: string): Promise<Settings> {
   return mutate((settings) => model.forgetWorkspace(settings, folder, onWindows))
 }
 
-/** The saved sessions that ran in a folder, archived ones among them, most recent first. */
+/**
+ * The saved sessions that ran in a folder, archived ones among them, most recent first. A session
+ * that works in a worktree of a repository is one of the repository's (`projectFolder`).
+ */
 export async function sessionsIn(folder: string): Promise<SessionSummary[]> {
   const key = folderKey(folder)
-  return (await listSessions()).filter((s) => folderKey(s.workspace) === key)
+  return (await listSessions()).filter((s) => folderKey(projectFolder(s)) === key)
 }
 
 /**
@@ -320,10 +351,13 @@ export async function sessionsIn(folder: string): Promise<SessionSummary[]> {
 export async function listWorkspaces(): Promise<string[]> {
   const stored = await loadStored()
   // What was put away does not bring its folder back by itself: a workspace taken out of the list stays out.
-  const fromSessions = (await listSessions()).filter((s) => !s.archived).map((s) => s.workspace)
+  // Of a session in a worktree it is the repository that is offered, not the worktree's own folder.
+  const fromSessions = (await listSessions()).filter((s) => !s.archived).map(projectFolder)
   const existing: string[] = []
   for (const dir of mergeFolders([stored.recentWorkspaces ?? [], fromSessions], Infinity)) {
     if (existing.length >= MAX_RECENT_FOLDERS) break
+    // A build of before the worktrees remembered the folder of one as a workspace of its own, when it was given such a conversation to go on with.
+    if (worktreeOfFolder(dir, onWindows)) continue
     const isFolder = await fs.stat(dir).then((s) => s.isDirectory(), () => false)
     if (isFolder) existing.push(dir)
   }
@@ -337,7 +371,7 @@ async function decryptKey(provider: StoredProvider): Promise<string> {
     decrypted = await safeStorage.decryptStringAsync(Buffer.from(provider.encryptedKey ?? '', 'base64'))
   } catch {
     // Typically a profile copied from another computer or user account: the OS key differs.
-    throw new Error('The saved API key could not be decrypted on this computer. Enter it again in Settings.')
+    throw new Error(model.KEY_UNREADABLE)
   }
   if (decrypted.shouldReEncrypt) {
     // The OS rotated its key. Failing to re-save is harmless: the old value still decrypts.
@@ -445,7 +479,9 @@ export async function getConnection(providerId?: string): Promise<Connection | n
     // Asked for only where it exists: a service that does not know the request field would refuse the request.
     ...(model.fastOf(provider) && offersFastMode(provider) ? { fast: true } : {}),
     // Likewise: the search tool goes only to a service that has it, and while the thinking allows it (DeepSeek's).
-    ...(model.searchOf(provider) && searchWorksAt(webSearchService(provider), model.effortOf(provider)) ? { webSearch: true } : {})
+    ...(model.searchOf(provider) && searchWorksAt(webSearchService(provider), model.effortOf(provider)) ? { webSearch: true } : {}),
+    // And PDFs as they are only to a service that reads them; any other model is told where they lie.
+    ...(readsPdfs(provider) ? { pdfs: true } : {})
   }
   if (provider.auth === 'chatgpt') {
     const record = await loginOf(provider)
@@ -549,11 +585,14 @@ export async function listSessions(): Promise<SessionSummary[]> {
       const kept = listed.get(name)
       if (kept?.stamp === stamp) return kept.summary
       const session = await readJson<Session>(file)
+      // In the list a session stands with the repository its worktree is of, where its file names one that reads like one.
+      const worktree = session ? readWorktree(session.worktree) : undefined
       const summary: SessionSummary | null = session
         ? {
             id: session.id,
             title: session.title,
             workspace: session.workspace,
+            ...(worktree ? { worktree } : {}),
             updatedAt: session.updatedAt,
             ...(session.archived ? { archived: session.archived } : {}),
             // A file can hold a name this version does not know; the list then shows no mark.
@@ -638,7 +677,7 @@ const writeSession = async (session: Session): Promise<void> => writeJsonText(se
 export function loadSession(id: string): Promise<Session | null> {
   return oneByOne(id, async () => {
     const session = await readSession(id)
-    if (session) await fillPictures(session, picturesRoot())
+    if (session) await fillPictures(tidied(session), picturesRoot())
     return session
   })
 }
@@ -680,6 +719,47 @@ export function updateSession(
     else if (change.permissionMode !== undefined) session.permissionMode = change.permissionMode
     await writeSession(session)
   })
+}
+
+/**
+ * Changes a saved session in a way its own work does not: `change` is handed the session as its
+ * file has it, and what it leaves is written back. `updatedAt` stays, so the list keeps its
+ * order. Only for a session that is not in memory to be changed by a turn; one that is, is
+ * changed there and saved from there.
+ */
+export function changeSession(id: string, change: (session: Session) => void): Promise<void> {
+  return oneByOne(id, async () => {
+    const session = await readSession(id)
+    if (!session) throw new Error('This session no longer exists.')
+    change(tidied(session))
+    await writeSession(session)
+  })
+}
+
+/** Reads something off a saved session as its file has it, without the pictures it names. Null for a session that is gone. */
+export function peekSession<T>(id: string, read: (session: Session) => T): Promise<T | null> {
+  return oneByOne(id, async () => {
+    const session = await readSession(id)
+    return session ? read(tidied(session)) : null
+  })
+}
+
+/**
+ * What a session's file says of a worktree and of its merges, held to what the app writes there
+ * (`readWorktree`, `readMerges`): a file can be changed by hand, and both are acted on.
+ */
+function tidied(session: Session): Session {
+  const worktree = readWorktree(session.worktree)
+  if (worktree) session.worktree = worktree
+  else delete session.worktree
+  const merges = worktree ? readMerges(session.merges) : []
+  if (merges.length > 0) session.merges = merges
+  else delete session.merges
+  // The turns that ended in an error: shown, and nothing else is done with them.
+  const failures = readFailures(session.failures)
+  if (failures.length > 0) session.failures = failures
+  else delete session.failures
+  return session
 }
 
 /**

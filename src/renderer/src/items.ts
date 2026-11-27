@@ -2,7 +2,9 @@
 // incrementally from streamed agent events.
 
 import type { Attachment } from '../../shared/attachments.ts'
-import type { AgentEvent, CompactionMark, ErrorHint, StoredMessage, ToolCall, WebActivity } from '../../shared/types.ts'
+import type { TurnFailure } from '../../shared/failures.ts'
+import type { AgentEvent, CompactionMark, ErrorHint, Session, StoredMessage, ToolCall, WebActivity } from '../../shared/types.ts'
+import type { MergeRecord } from '../../shared/worktree.ts'
 
 export type Item =
   /**
@@ -25,6 +27,8 @@ export type Item =
   | { kind: 'notice'; text: string }
   /** A place where the conversation was compacted: a line across it, which says what was done there. */
   | { kind: 'mark'; mark: CompactionMark }
+  /** The work of the conversation's worktree was merged into the main folder: a record of it, at the end of the turn it was made in. */
+  | { kind: 'merge'; record: MergeRecord }
 
 /** What the notices say, by the code they come with. */
 const NOTICES: Record<Extract<AgentEvent, { type: 'notice' }>['code'], string> = {
@@ -34,6 +38,8 @@ const NOTICES: Record<Extract<AgentEvent, { type: 'notice' }>['code'], string> =
   'stream-refused': '这个模型服务在使用工具时不能边生成边显示，所以每次回答会在生成完之后一次出现。中间一段时间没有动静是正常的。',
   'compaction-failed': '上下文快满了，但没能让模型把较早的对话写成摘要，对话按现在的样子继续。',
   'images-refused': '这个模型不能看图片，所以图片没有发给它，只告诉了它图片的文件名。换成能看图的模型后，这个对话里的图片会照常发送。',
+  'documents-refused': '模型服务没有接受 PDF（常见原因是页数太多、请求太大、文件损坏，或者这个模型不读 PDF，以服务的原话为准），所以这次改成只告诉模型 PDF 文件的位置，重新发了一次。这个对话里，这个模型之后也只收到位置；换成别的模型后，PDF 会照常直接发送。',
+  'document-too-long': '这条消息里有一份 PDF 页数太多，估计放不进这个模型的上下文，所以没有直接发送，只告诉了模型文件的位置（模型可以用工具分段去读）。换成上下文更大的模型后，它会照常直接发送。',
   'plain-call-dropped': '这条消息是以纯对话发出的，没有给模型任何工具，但它的回应里仍然带了工具调用。纯对话不执行工具调用，这次调用已经丢弃。'
 }
 
@@ -94,6 +100,68 @@ export function itemsFromMessages(messages: readonly StoredMessage[]): Item[] {
     }
   }
   return items
+}
+
+/**
+ * What a conversation keeps beside its messages and shows among them: the merges of its
+ * worktree, and the errors that ended turns. Each belongs to a turn, and stands at its end.
+ */
+interface Beside {
+  /** The turn of the person's message of that number. */
+  turn: number
+  item: Extract<Item, { kind: 'merge' | 'error' }>
+}
+
+const isBeside = (item: Item): item is Beside['item'] => item.kind === 'merge' || item.kind === 'error'
+
+/**
+ * Puts one of them where it belongs: at the end of its turn, after whatever that turn holds by
+ * now, and so after one of the same turn that was put there before it. One of before the first
+ * message stands first; one of a turn that is not there stands last.
+ */
+function placeBeside(items: readonly Item[], placed: Beside): Item[] {
+  let turns = 0
+  // The first thing of the turn after it: it goes in front of that.
+  const next = items.findIndex((item) => item.kind === 'user' && ++turns > placed.turn)
+  const at = next < 0 ? items.length : next
+  return [...items.slice(0, at), placed.item, ...items.slice(at)]
+}
+
+/** The merges and the errors a page shows, in the order it shows them, each with the turn it belongs to. */
+function besideOf(items: readonly Item[]): Beside[] {
+  const beside: Beside[] = []
+  let turns = 0
+  for (const item of items) {
+    if (item.kind === 'user') turns++
+    // A merge knows its turn; an error is of the turn it stands in.
+    else if (item.kind === 'merge') beside.push({ turn: item.record.turn, item })
+    else if (item.kind === 'error') beside.push({ turn: turns, item })
+  }
+  return beside
+}
+
+/** What was said, with the merges and the errors put in their places, in the order given. Those that were there are taken out first. */
+function withBeside(items: readonly Item[], beside: readonly Beside[]): Item[] {
+  return beside.reduce<Item[]>(placeBeside, items.filter((item) => !isBeside(item)))
+}
+
+/** An error that ended a turn, as it is shown. */
+const errorItem = (failure: Pick<TurnFailure, 'message' | 'hint' | 'provider'>): Extract<Item, { kind: 'error' }> => ({
+  kind: 'error',
+  message: failure.message,
+  ...(failure.hint ? { hint: failure.hint, ...(failure.provider ? { provider: failure.provider } : {}) } : {})
+})
+
+/**
+ * A conversation as its file has it: what was said, and in their places what is kept beside it,
+ * the merges of its worktree and the errors that ended turns, in the order they happened.
+ */
+export function itemsFromSession(session: Pick<Session, 'messages' | 'merges' | 'failures'>): Item[] {
+  const beside: (Beside & { at: number })[] = [
+    ...(session.merges ?? []).map((record) => ({ at: record.at, turn: record.turn, item: { kind: 'merge' as const, record } })),
+    ...(session.failures ?? []).map((failure) => ({ at: failure.at, turn: failure.turn, item: errorItem(failure) }))
+  ]
+  return withBeside(itemsFromMessages(session.messages), beside.sort((a, b) => a.at - b.at))
 }
 
 /**
@@ -175,9 +243,13 @@ export function itemsReducer(items: Item[], action: ItemsAction): Item[] {
       return event.text || event.reasoning ? [...rest, { kind: 'assistant', reasoning: event.reasoning, text: event.text, open: true }] : rest
     }
     case 'assistant_done':
-    case 'turn_end':
+    case 'turn_end': {
       // What was being written is finished, and that is when it was.
-      return items.map((i) => (i.kind === 'assistant' && i.open ? { ...i, open: false, ...timed(action.at) } : i))
+      const closed = items.map((i): Item => (i.kind === 'assistant' && i.open ? { ...i, open: false, ...timed(action.at) } : i))
+      // A merge the model made in the turn stood where it was made while the turn went on. Now it
+      // goes to the end of the turn, where it stands when the conversation is read from its file.
+      return event.type === 'turn_end' && closed.some((i) => i.kind === 'merge') ? withBeside(closed, besideOf(closed)) : closed
+    }
     case 'tool_start':
       return [...items, { kind: 'tool', call: event.call, ...timed(action.at) }]
     case 'tool_result':
@@ -193,9 +265,17 @@ export function itemsReducer(items: Item[], action: ItemsAction): Item[] {
     }
     case 'compacted':
       // The conversation as it is kept now, with the mark in its place and the cleared results
-      // told as such. What the page showed beyond the conversation itself (a notice, an error, the
-      // beginning of a reply that was given up) is not part of it.
-      return itemsFromMessages(event.messages)
+      // told as such. What the page showed beyond the conversation itself (a notice, the beginning
+      // of a reply that was given up) is not part of it. The merges of its worktree and the errors
+      // that ended turns are: they are kept beside the messages, and stay where they were.
+      return withBeside(itemsFromMessages(event.messages), besideOf(items))
+    case 'merged': {
+      // Told once more of one it shows already (the page read the conversation from its file meanwhile), it shows it once.
+      const others = besideOf(items).filter((kept) => !(kept.item.kind === 'merge' && kept.item.record.id === event.record.id))
+      return withBeside(items, [...others, { turn: event.record.turn, item: { kind: 'merge', record: event.record } }])
+    }
+    case 'merge_undone':
+      return items.map((i) => (i.kind === 'merge' && i.record.id === event.id ? { kind: 'merge', record: { ...i.record, undone: event.at } } : i))
     case 'compaction_counted':
       // The service's count of what the compaction left, in place of the guess on its line.
       return items.map((i) => {

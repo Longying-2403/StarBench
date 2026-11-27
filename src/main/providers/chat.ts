@@ -5,7 +5,7 @@ import OpenAI from 'openai'
 import { isGemini, isLocalAddress, routesByConversation } from '../../shared/types.ts'
 import type { ToolCall } from '../../shared/types.ts'
 import { fetchModelInfo, listModels } from '../models.ts'
-import { ImagesRefused, carriesImages, imageUrl, refusesImages, userImages } from './attachments.ts'
+import { DocumentsRefused, ImagesRefused, carriesDocuments, carriesImages, imageUrl, pdfUrl, refusesDocuments, refusesImages, userDocuments, userImages } from './attachments.ts'
 import { refusesEffort } from './effort.ts'
 import { newReply, replayOf, userText, withSearchNote, withToolResults } from './history.ts'
 import { ThinkTags } from './think-tags.ts'
@@ -207,8 +207,11 @@ export function chatMessages(
     const before = out.at(-1)
     if (message.role === 'user') {
       const text = userText(message, request.connection)
-      // Pictures make the message a list of parts: the text, then each picture as an address that holds it.
-      const images = userImages(message, request.connection).map((image): UserPart => ({ type: 'image_url', image_url: { url: imageUrl(image) } }))
+      // Pictures and PDFs make the message a list of parts: the text, then each picture and each PDF as an address that holds it.
+      const images = [
+        ...userImages(message, request.connection).map((image): UserPart => ({ type: 'image_url', image_url: { url: imageUrl(image) } })),
+        ...userDocuments(message, request.connection).map((pdf): UserPart => ({ type: 'file', file: { filename: pdf.name, file_data: pdfUrl(pdf) } }))
+      ]
       if (before?.role === 'user') {
         if (typeof before.content === 'string' && images.length === 0) before.content = `${before.content}\n\n${text}`
         else before.content = [...partsOf(before.content), ...partsOf(text), ...images]
@@ -395,6 +398,8 @@ export const chatAdapter: ProviderAdapter = {
       if (signal.aborted) return err
       // The caller can send the message again with the tools described in the instructions.
       if (wired && refusesTools(err)) return new ToolsRefused((err as Error).message)
+      // Or, where it was the PDFs that were turned down, with those told of by where they lie.
+      if (carriesDocuments(request) && refusesDocuments(err)) return new DocumentsRefused((err as Error).message)
       // Or, where it was the pictures that were turned down, with those told in words.
       if (carriesImages(request) && refusesImages(err)) return new ImagesRefused((err as Error).message)
       // A model server on one's own machine that does not answer is, as a rule, one that was not started.

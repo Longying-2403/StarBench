@@ -61,3 +61,28 @@ export function keysLabel(keys: Keys, mac: boolean): string {
   if (mac) return `${mod ? '⌘' : ''}${alt ? '⌥' : ''}${shift ? '⇧' : ''}${name}`
   return [...(mod ? ['Ctrl'] : []), ...(alt ? ['Alt'] : []), ...(shift ? ['Shift'] : []), name].join(' ')
 }
+
+/** The combination as it is written in a sentence: `Ctrl+Enter`, and `⌘Enter` on a Mac. */
+export function keysInText(keys: Keys, mac: boolean): string {
+  return mac ? keysLabel(keys, true) : keysLabel(keys, false).split(' ').join('+')
+}
+
+/**
+ * What the Enter key does in the message box (设置 → 通用). `send`, as the app comes: it sends the
+ * message, and Shift+Enter makes a new line. `newline`: it makes a new line, as in any other text,
+ * and the message is sent with `SEND_KEYS` or with the button.
+ */
+export type EnterKey = 'send' | 'newline'
+
+/** What sends a message where the Enter key makes a new line: Ctrl+Enter, and ⌘Enter on a Mac. */
+export const SEND_KEYS: Keys = 'Mod+Enter'
+
+/**
+ * Whether a key press in the message box sends the message, as the Enter key is set. Where Enter
+ * sends, it does so with any modifier but Shift, which is left to the box for a new line. Where it
+ * makes a new line, only `SEND_KEYS` send, with exactly their modifiers.
+ */
+export function sendsMessage(event: KeyPress, enter: EnterKey, mac: boolean): boolean {
+  if (event.key !== 'Enter') return false
+  return enter === 'send' ? !event.shiftKey : pressed(event, SEND_KEYS, mac)
+}

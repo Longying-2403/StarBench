@@ -38,6 +38,30 @@ export function FolderIcon() {
   )
 }
 
+/** A line with a branch leaving it: a worktree, which is a checkout of a repository on a git branch of its own. */
+export function BranchIcon() {
+  return (
+    <svg {...line}>
+      <circle cx="6" cy="5" r="2.5" />
+      <circle cx="6" cy="19" r="2.5" />
+      <circle cx="18" cy="8" r="2.5" />
+      <path d="M6 7.5v9M18 10.5c0 4.5-12 2-12 6" />
+    </svg>
+  )
+}
+
+/** A branch coming back into its line: the work of a worktree merged into the main folder. */
+export function MergeIcon() {
+  return (
+    <svg {...line}>
+      <circle cx="6" cy="5" r="2.5" />
+      <circle cx="6" cy="19" r="2.5" />
+      <circle cx="18" cy="14" r="2.5" />
+      <path d="M6 7.5v9M6 7.5c0 4.5 4.5 6.5 9.5 6.5" />
+    </svg>
+  )
+}
+
 export function BoltIcon() {
   return (
     <svg {...line}>

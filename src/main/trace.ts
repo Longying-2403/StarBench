@@ -45,7 +45,9 @@ export interface ExchangeWatch {
 
 /** From how long on the data of a picture is left out of a record. Nothing that short is one worth leaving out. */
 const PICTURE_FROM = 512
-const leftOut = (characters: number): string => `[${characters} characters of picture data, left out of this record]`
+const leftOut = (characters: number, what = 'picture'): string => `[${characters} characters of ${what} data, left out of this record]`
+/** Whether a part of a request, or an attachment, is a PDF and not a picture: by the kind of its data, each format its own way. */
+const isPdfPart = (part: Record<string, unknown>): boolean => part.kind === 'pdf' || part.media_type === 'application/pdf' || part.mimeType === 'application/pdf'
 
 /**
  * A copy of what a request holds, for the record, without the pictures the person attached: one
@@ -56,8 +58,10 @@ const leftOut = (characters: number): string => `[${characters} characters of pi
  */
 export function withoutPictures(value: unknown): unknown {
   if (typeof value === 'string') {
-    const comma = value.length > PICTURE_FROM && /^data:image\/[\w.+-]+;base64,/i.test(value) ? value.indexOf(',') : -1
-    return comma < 0 ? value : `${value.slice(0, comma + 1)}${leftOut(value.length - comma - 1)}`
+    // A PDF goes as such an address too (`file_data` in OpenAI's formats).
+    const kind = value.length > PICTURE_FROM ? /^data:(?:(image)\/[\w.+-]+|application\/(pdf));base64,/i.exec(value) : null
+    const comma = kind ? value.indexOf(',') : -1
+    return comma < 0 ? value : `${value.slice(0, comma + 1)}${leftOut(value.length - comma - 1, kind?.[2] ? 'PDF' : 'picture')}`
   }
   if (Array.isArray(value)) return value.map(withoutPictures)
   if (typeof value !== 'object' || value === null) return value
@@ -65,9 +69,10 @@ export function withoutPictures(value: unknown): unknown {
   // What is no plain object is copied the way everything was before.
   if (proto !== Object.prototype && proto !== null) return structuredClone(value)
   const part = value as Record<string, unknown>
-  const picture = part.kind === 'image' || part.type === 'base64' || typeof part.media_type === 'string' || typeof part.mimeType === 'string'
+  const picture = part.kind === 'image' || part.kind === 'pdf' || part.type === 'base64' || typeof part.media_type === 'string' || typeof part.mimeType === 'string'
+  const what = isPdfPart(part) ? 'PDF' : 'picture'
   return Object.fromEntries(
-    Object.entries(part).map(([key, held]) => [key, picture && key === 'data' && typeof held === 'string' && held.length > PICTURE_FROM ? leftOut(held.length) : withoutPictures(held)])
+    Object.entries(part).map(([key, held]) => [key, picture && key === 'data' && typeof held === 'string' && held.length > PICTURE_FROM ? leftOut(held.length, what) : withoutPictures(held)])
   )
 }
 

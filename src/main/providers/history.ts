@@ -1,8 +1,11 @@
 // Reading the stored conversation, shared by every provider's request builder.
 
-import { fileBlock, goneImageNote, imageNote } from '../../shared/attachments.ts'
+import { fileBlock, fileNote, goneImageNote, imageNote, pdfNote } from '../../shared/attachments.ts'
+import { pdfWithheld } from './attachments.ts'
+import type { PdfReach } from './attachments.ts'
 import { VIEW_ONLY_RESULT } from '../../shared/permissions.ts'
 import type { ChatMessage, WebActivity } from '../../shared/types.ts'
+import { cutAt } from '../../shared/well-formed.ts'
 import type { AssistantMessage, Connection } from './types.ts'
 
 /** The most pages of one search that are named in a note of it. */
@@ -24,13 +27,13 @@ function noteText(text: string, max: number): string {
     .replace(/[[\]<>"]/g, ' ')
     .replace(/ {2,}/g, ' ')
     .trim()
-  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat
+  return flat.length > max ? `${cutAt(flat, max - 1)}…` : flat
 }
 
 /** An address as it goes into a note: what would end a line or the note, or not show, escaped as an address escapes it. */
 function noteUrl(url: string): string {
   const safe = url.replace(/[\s<>[\]"\p{Cc}\p{Cf}]/gu, encodeURIComponent)
-  return safe.length > NOTE_URL_MAX ? `${safe.slice(0, NOTE_URL_MAX - 1)}…` : safe
+  return safe.length > NOTE_URL_MAX ? `${cutAt(safe, NOTE_URL_MAX - 1)}…` : safe
 }
 
 /**
@@ -73,14 +76,30 @@ export const INTERRUPTED = 'Error: this tool call was interrupted before it prod
 
 /**
  * What the model reads of a user message. A picked skill's text goes in front of what was typed,
- * and in front of both the text files the person attached, each under its name. Pictures are not
- * text and go their own way (`userImages` in attachments.ts), except to a model that takes none
- * (`Connection.noImages`): that one is told here that there was a picture it cannot see.
+ * and in front of both the text files the person attached, each under its name, and what is told
+ * of the other files they attached, whose content does not go (`fileNote`). Pictures and PDFs are
+ * not text and go their own way (`userImages` and `userDocuments` in attachments.ts), except to a
+ * model that takes none: that one is told here that there was a picture it cannot see
+ * (`Connection.noImages`), or where a PDF lies and why it is not sent (`pdfWithheld`).
  */
-export function userText(message: Extract<ChatMessage, { role: 'user' }>, connection?: Pick<Connection, 'noImages'>): string {
+export function userText(message: Extract<ChatMessage, { role: 'user' }>, connection?: Pick<Connection, 'noImages'> & PdfReach): string {
   const typed = message.skill ? `${message.skill.prompt}\n\n${message.content}` : message.content
+  const pdfTold = (file: Extract<NonNullable<typeof message.attachments>[number], { kind: 'pdf' }>): string[] => {
+    const why = pdfWithheld(file, connection)
+    return why ? [pdfNote(file, why)] : []
+  }
   const files = (message.attachments ?? []).flatMap((file) =>
-    file.kind === 'text' ? [fileBlock(file)] : file.data === '' ? [goneImageNote(file)] : connection?.noImages ? [imageNote(file)] : []
+    file.kind === 'text'
+      ? [fileBlock(file)]
+      : file.kind === 'file'
+        ? [fileNote(file)]
+        : file.kind === 'pdf'
+          ? pdfTold(file)
+          : file.data === ''
+            ? [goneImageNote(file)]
+            : connection?.noImages
+              ? [imageNote(file)]
+              : []
   )
   if (files.length === 0) return typed
   return typed ? `${files.join('\n\n')}\n\n${typed}` : files.join('\n\n')

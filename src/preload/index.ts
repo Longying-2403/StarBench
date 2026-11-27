@@ -1,8 +1,10 @@
-import { contextBridge, ipcRenderer } from 'electron'
+import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type { MemoryApi, MemoryEvent } from '../shared/memory.ts'
 import type { HarnessApi, SessionEvent } from '../shared/types.ts'
 import type { UpdateEvent } from '../shared/update.ts'
 import type { UsageApi, UsageEvent } from '../shared/usage.ts'
+import type { WorktreeApi } from '../shared/worktree.ts'
+import type { Settings } from '../shared/types.ts'
 
 const api: HarnessApi = {
   getSettings: () => ipcRenderer.invoke('settings:get'),
@@ -32,6 +34,7 @@ const api: HarnessApi = {
   setTheme: (theme) => ipcRenderer.invoke('settings:setTheme', theme),
   setTitles: (on) => ipcRenderer.invoke('settings:setTitles', on),
   setSessionTimes: (on) => ipcRenderer.invoke('settings:setSessionTimes', on),
+  setEnterKey: (key) => ipcRenderer.invoke('settings:setEnterKey', key),
   setCompaction: (change) => ipcRenderer.invoke('settings:setCompaction', change),
   getModelInfo: () => ipcRenderer.invoke('models:info'),
   builtinPrompt: () => ipcRenderer.invoke('prompt:builtin'),
@@ -79,6 +82,13 @@ const api: HarnessApi = {
   send: (sessionId, workspace, text, skill, extras) => ipcRenderer.invoke('agent:send', sessionId, workspace, text, skill, extras),
   pickAttachments: () => ipcRenderer.invoke('attachments:pick'),
   readAttachments: (files) => ipcRenderer.invoke('attachments:read', files),
+  pathOf: (file) => {
+    try {
+      return webUtils.getPathForFile(file)
+    } catch {
+      return ''
+    }
+  },
   setPermissionMode: (sessionId, mode) => ipcRenderer.invoke('permission:setMode', sessionId, mode),
   compactSession: (sessionId) => ipcRenderer.invoke('sessions:compact', sessionId),
   stop: (sessionId) => ipcRenderer.invoke('agent:stop', sessionId),
@@ -129,3 +139,16 @@ const usage: UsageApi = {
 }
 
 contextBridge.exposeInMainWorld('usage', usage)
+
+/** The page's way to the worktrees of repositories (main/worktree-ipc.ts). */
+const worktrees: WorktreeApi<Settings> = {
+  repo: (folder) => ipcRenderer.invoke('worktrees:repo', folder),
+  allow: (folder) => ipcRenderer.invoke('worktrees:allow', folder),
+  forget: (folder) => ipcRenderer.invoke('worktrees:forget', folder),
+  state: (sessionId) => ipcRenderer.invoke('worktrees:state', sessionId),
+  merge: (sessionId) => ipcRenderer.invoke('worktrees:merge', sessionId),
+  undo: (sessionId, mergeId) => ipcRenderer.invoke('worktrees:undo', sessionId, mergeId),
+  remove: (sessionId, opts) => ipcRenderer.invoke('worktrees:remove', sessionId, opts)
+}
+
+contextBridge.exposeInMainWorld('worktrees', worktrees)

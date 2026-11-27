@@ -1,18 +1,29 @@
 import { Fragment, useEffect, useRef, useState } from 'react'
 import type { KeyboardEvent } from 'react'
-import { MAX_ATTACHMENTS, MAX_IMAGE_FILE_BYTES } from '../../shared/attachments.ts'
-import type { Attachment, AttachmentsRead } from '../../shared/attachments.ts'
+import { HEAD_BYTES, MAX_ATTACHMENTS, MAX_IMAGE_FILE_BYTES } from '../../shared/attachments.ts'
+import type { Attachment, AttachmentsRead, FileAttachment } from '../../shared/attachments.ts'
 import type { PermissionMode } from '../../shared/permissions.ts'
+import { SEND_KEYS, keysInText, sendsMessage } from '../../shared/shortcuts.ts'
 import type { ModelInfo, ReasoningEffort, Settings, SkillInfo } from '../../shared/types.ts'
-import { AttachmentRow, attachable, problemsText } from './Attachments.tsx'
+import { AttachmentRow, attachable, largeText, problemsText } from './Attachments.tsx'
 import { ModeMenu } from './ModeMenu.tsx'
 import { ModelControl } from './ModelControl.tsx'
 import { PlusMenu } from './PlusMenu.tsx'
 import { notify } from './Toasts.tsx'
 import { EnterIcon, StopIcon } from './icons.tsx'
-import { errorText, roomStyle, usePopupPlace } from './util.ts'
+import { errorText, isMac, roomStyle, usePopupPlace } from './util.ts'
 
 const api = window.harness
+
+/**
+ * The files of a drop or a paste, each with whether it is a folder. A folder comes as a file of its
+ * own that cannot be read, and only the entries of the event, while it lasts, tell it from one.
+ */
+function droppedFiles(data: DataTransfer): { file: File; folder: boolean }[] {
+  const entries = [...data.items].filter((item) => item.kind === 'file').map((item) => item.webkitGetAsEntry?.() ?? null)
+  // The entries stand in the order of the files; where their number differs, nothing is told by them.
+  return [...data.files].map((file, i) => ({ file, folder: entries.length === data.files.length && entries[i]?.isDirectory === true }))
+}
 
 /**
  * The message box: the text, with the files put with it above it, and under it a row of what
@@ -83,6 +94,9 @@ export function Composer({
     return matches[index - 1].userOnly && !matches[index].userOnly ? 'Skills' : null
   }
   const activeIndex = Math.min(active, Math.max(matches.length - 1, 0))
+  /** What the Enter key does here (设置 → 通用), and what sends the message: Enter, or Ctrl+Enter where Enter makes a new line. */
+  const enter = settings?.enterKey ?? 'send'
+  const sendKeys = enter === 'send' ? 'Enter' : keysInText(SEND_KEYS, isMac)
 
   // Below the box while it sits in the middle of a new chat and the whole menu fits there, above
   // it once it is at the bottom. `.skill-menu` is 300px at its tallest and sits 6px from the box.
@@ -103,29 +117,42 @@ export function Composer({
     inputRef.current?.focus()
   }
 
-  /** Puts files that were read with the message, as far as they can go with one, and says of the others why not. */
+  /**
+   * Puts files that were read with the message, as far as they can go with one, and says of the
+   * others why not. A text or a picture too large for its content to go is put with it all the
+   * same, as a file whose place is told, and the person is told so.
+   */
   const attach = async (reading: Promise<AttachmentsRead>): Promise<void> => {
     try {
       const { files: more, problems } = await attachable(await reading, MAX_ATTACHMENTS - held.current)
       if (more.length) setFiles((now) => [...now, ...more].slice(0, MAX_ATTACHMENTS))
       if (problems.length) notify({ kind: 'error', title: problems.length > 1 ? `${problems.length} 个文件没有添加` : '有一个文件没有添加', text: problemsText(problems) })
+      const large = more.filter((file): file is FileAttachment => file.kind === 'file' && file.tooLarge !== undefined)
+      if (large.length) notify({ kind: 'warning', title: large.length > 1 ? `${large.length} 个文件过大` : '文件过大', text: largeText(large) })
     } catch (err) {
       notify({ kind: 'error', title: '添加文件没有成功', text: errorText(err) })
     }
     inputRef.current?.focus()
   }
 
-  /** Files dropped on the box or pasted into it: handed to the main process as their bytes, to be read the way picked ones are. */
-  const attachDropped = (dropped: File[]): Promise<void> =>
+  /**
+   * Files dropped on the box or pasted into it: handed to the main process as their bytes, with
+   * how large they are and where they lie, to be read the way picked ones are.
+   */
+  const attachDropped = (dropped: { file: File; folder: boolean }[]): Promise<void> =>
     attach(
       (async (): Promise<AttachmentsRead> => {
         const problems: AttachmentsRead['problems'] = []
-        const given: { name: string; data: ArrayBuffer }[] = []
-        for (const file of dropped) {
+        const given: { name: string; data: ArrayBuffer; size: number; path: string }[] = []
+        for (const { file, folder } of dropped) {
+          if (folder) {
+            problems.push({ name: file.name, reason: 'folder' })
+            continue
+          }
           try {
-            // One too large to be anything that is sent is not read at all. A folder cannot be read, and says so here.
-            if (file.size > MAX_IMAGE_FILE_BYTES) problems.push({ name: file.name, reason: 'too-large' })
-            else given.push({ name: file.name, data: await file.arrayBuffer() })
+            // One larger than any picture that is read whole is read only as far as it takes to tell what it is: its content does not go with the message.
+            const data = await (file.size > MAX_IMAGE_FILE_BYTES ? file.slice(0, HEAD_BYTES) : file).arrayBuffer()
+            given.push({ name: file.name, data, size: file.size, path: api.pathOf(file) })
           } catch {
             problems.push({ name: file.name, reason: 'unreadable' })
           }
@@ -167,7 +194,8 @@ export function Composer({
         }
       }
     }
-    if (e.key === 'Enter' && !e.shiftKey) {
+    // What does not send is left to the box: a new line for Shift+Enter, and for Enter where it is set to make one.
+    if (sendsMessage(e, enter, isMac)) {
       e.preventDefault()
       submit()
     }
@@ -198,7 +226,7 @@ export function Composer({
         setDropping(false)
         if (blocked || e.dataTransfer.files.length === 0) return
         e.preventDefault()
-        void attachDropped([...e.dataTransfer.files])
+        void attachDropped(droppedFiles(e.dataTransfer))
       }}
     >
       {visible && (
@@ -248,9 +276,9 @@ export function Composer({
         onPaste={(e) => {
           if (e.clipboardData.files.length === 0) return
           e.preventDefault()
-          void attachDropped([...e.clipboardData.files])
+          void attachDropped(droppedFiles(e.clipboardData))
         }}
-        placeholder={blocked || '输入消息，Shift+Enter 换行，输入 / 选择 Skill'}
+        placeholder={blocked || `输入消息，${enter === 'send' ? `${keysInText('Shift+Enter', isMac)} 换行` : `${sendKeys} 发送`}，输入 / 选择 Skill`}
         disabled={Boolean(blocked)}
         rows={1}
         aria-label="消息"
@@ -290,7 +318,7 @@ export function Composer({
             onClick={submit}
             disabled={Boolean(blocked) || (!draft.trim() && files.length === 0)}
             aria-label="发送"
-            data-tip="发送（Enter）"
+            data-tip={`发送（${sendKeys}）`}
           >
             <EnterIcon />
           </button>

@@ -6,9 +6,11 @@ import { SHORTCUTS, keysLabel } from '../../shared/shortcuts.ts'
 import { SESSION_ICONS } from '../../shared/types.ts'
 import type { SessionHit, SessionIcon, SessionSummary } from '../../shared/types.ts'
 import { whenExact, whenText } from '../../shared/when.ts'
+import { projectFolder } from '../../shared/worktree.ts'
 import {
   AppIcon,
   ArchiveIcon,
+  BranchIcon,
   ChevronDownIcon,
   CloudDownloadIcon,
   ComposeIcon,
@@ -394,7 +396,7 @@ function SessionRow({
               {session.title}
             </span>
             {place && (
-              <span className="session-place" data-tip={`工作区：${session.workspace}`}>
+              <span className="session-place" data-tip={`工作区：${projectFolder(session)}`}>
                 {place}
               </span>
             )}
@@ -406,6 +408,12 @@ function SessionRow({
               </span>
             )}
           </span>
+          {/* It works in a worktree of the repository it is listed under, and not in the folder itself. */}
+          {session.worktree && (
+            <span className="session-tree" role="img" aria-label={`在 worktree ${session.worktree.name} 里进行`} data-tip={`在 worktree 里进行：${session.worktree.name}`}>
+              <BranchIcon />
+            </span>
+          )}
         </button>
       ) : (
         <input

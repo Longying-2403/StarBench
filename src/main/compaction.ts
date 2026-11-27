@@ -15,8 +15,10 @@
 import { SUMMARY_CLOSE, SUMMARY_OPEN } from '../shared/compaction.ts'
 import { charsWithin, estimateTokens } from '../shared/stats.ts'
 import type { ChatMessage, CompactionMark, StoredMessage, WebActivity } from '../shared/types.ts'
+import { cutAt as cutText } from '../shared/well-formed.ts'
 import { messageWeight } from './meter.ts'
 import { thinkingReturns, userText } from './providers/history.ts'
+import type { PdfReach } from './providers/attachments.ts'
 
 /** Of what a request weighs when it is compacted, the share that stays as it is: the latest part of the conversation. */
 const KEPT_SHARE = 0.25
@@ -80,9 +82,10 @@ export function sendable(stored: readonly StoredMessage[]): ChatMessage[] {
       const summary = lead
       lead = undefined
       if (message.role === 'user') {
-        // The text files of the message are part of its text by now; its pictures stay with it.
-        const images = (message.attachments ?? []).filter((file) => file.kind === 'image')
-        const said = userText({ ...message, attachments: (message.attachments ?? []).filter((file) => file.kind === 'text') })
+        // The text files of the message, and what is told of its other files, are part of its text by
+        // now; its pictures and PDFs stay with it, to go as they are or be told of as the model takes them.
+        const images = (message.attachments ?? []).filter((file) => file.kind === 'image' || file.kind === 'pdf')
+        const said = userText({ ...message, attachments: (message.attachments ?? []).filter((file) => file.kind !== 'image' && file.kind !== 'pdf') })
         out.push({ role: 'user', content: said ? `${summary}\n\n${said}` : summary, ...(images.length ? { attachments: images } : {}) })
         continue
       }
@@ -95,11 +98,14 @@ export function sendable(stored: readonly StoredMessage[]): ChatMessage[] {
   return out
 }
 
-/** A guess at what a kept message weighs as it is sent, in tokens. A mark weighs nothing: it is not sent. */
-export function storedWeight(message: StoredMessage): number {
+/**
+ * A guess at what a kept message weighs as it is sent, in tokens, to `connection` where one is
+ * given (its PDFs weigh what goes for them: `messageWeight`). A mark weighs nothing: it is not sent.
+ */
+export function storedWeight(message: StoredMessage, connection?: PdfReach): number {
   if (message.role === 'compaction') return 0
   if (message.role === 'tool' && message.cleared !== undefined) return estimateTokens(message.cleared)
-  const { said, summary, tools } = messageWeight(message)
+  const { said, summary, tools } = messageWeight(message, connection)
   return said + summary + tools
 }
 
@@ -131,8 +137,9 @@ const CUT_NOTE_ROOM = 40
  */
 export function fitTokens(text: string, max: number): string {
   if (estimateTokens(text) <= max) return text
-  const kept = charsWithin(text, Math.max(0, max - CUT_NOTE_ROOM))
-  return `${text.slice(0, kept)}\n… [cut here to fit the model's context: ${text.length - kept} more characters. Ask for less at a time, such as a part of a file, to see the rest.]`
+  // Between characters: half of one at the cut is nothing a request can carry (shared/well-formed.ts).
+  const kept = cutText(text, charsWithin(text, Math.max(0, max - CUT_NOTE_ROOM)))
+  return `${kept}\n… [cut here to fit the model's context: ${text.length - kept.length} more characters. Ask for less at a time, such as a part of a file, to see the rest.]`
 }
 
 /** The line sent in the place of a cleared tool result. The call it answers still stands before it and says what it was. */
@@ -244,7 +251,10 @@ function cutAt(messages: readonly StoredMessage[], weights: readonly number[], s
   return Math.min(cut, asked)
 }
 
-const clip = (text: string, max: number): string => (text.length <= max ? text : `${text.slice(0, max)} … [${text.length - max} more characters]`)
+const clip = (text: string, max: number): string => {
+  const kept = cutText(text, max)
+  return kept.length === text.length ? text : `${kept} … [${text.length - kept.length} more characters]`
+}
 /** Without the tags that mark where a summary begins and ends, should a text happen to hold them. */
 const untagged = (text: string): string => text.split(SUMMARY_OPEN).join('').split(SUMMARY_CLOSE).join('')
 
@@ -393,7 +403,7 @@ function filesOf(messages: readonly StoredMessage[], upTo: number): { read: stri
         continue
       }
       if (typeof file !== 'string' || !file.trim()) continue
-      touch(reads ? read : changed, untagged(file.trim()).slice(0, 300))
+      touch(reads ? read : changed, cutText(untagged(file.trim()), 300))
     }
   }
   for (const file of changed) read.delete(file)
@@ -585,7 +595,7 @@ export async function compact(job: CompactJob): Promise<CompactResult> {
   if (job.signal.aborted) return {}
   if (!text) return without('The model returned no summary.')
   // A model that ran on far past what it was asked for: the summary must not take the room it is to make.
-  if (estimateTokens(text) > longest * 2) text = `${text.slice(0, charsWithin(text, longest * 2))}\n… [the summary was cut here: it ran too long]`
+  if (estimateTokens(text) > longest * 2) text = `${cutText(text, charsWithin(text, longest * 2))}\n… [the summary was cut here: it ran too long]`
 
   const said = saidOf(messages, cut, Math.floor(Math.min(SAID_MAX, size * SAID_SHARE) / scale))
   const files = filesOf(messages, cut)

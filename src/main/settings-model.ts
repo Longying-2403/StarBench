@@ -8,10 +8,12 @@ import { cleanWorkspaceName, folderKey, folderName } from '../shared/folders.ts'
 import { sendsKeySafely } from '../shared/key-address.ts'
 import { isSite } from '../shared/links.ts'
 import { freeName } from '../shared/provider-choices.ts'
+import type { EnterKey } from '../shared/shortcuts.ts'
 import { DEFAULT_THEME, isTheme } from '../shared/theme.ts'
 import type { Theme } from '../shared/theme.ts'
 import { CUSTOM_PROMPT_LIMIT, PROVIDER_KINDS, PROVIDER_PRESETS, isLocalAddress, isReasoningEffort } from '../shared/types.ts'
 import type { ChatGptAccount, CustomPrompt, ProviderInfo, ProviderInput, ProviderKind, ReasoningEffort, Settings } from '../shared/types.ts'
+import { cutAt } from '../shared/well-formed.ts'
 
 export interface StoredProvider {
   id: string
@@ -67,12 +69,19 @@ export interface StoredSettings {
   titles?: false
   /** Set, to false, when the list of conversations no longer says under each when it was last gone on with. Absent, it does. */
   sessionTimes?: false
+  /** Set when the Enter key in the message box makes a new line, and Ctrl+Enter sends. Absent, Enter sends the message. */
+  enterKey?: 'newline'
   /**
    * The sites whose links in an answer open without the question first (`WebPlace.site` in
    * shared/links.ts): each one the person said "do not ask again" for, the latest first. Absent
    * when there is none.
    */
   trustedSites?: string[]
+  /**
+   * The repositories the person said git may be run in (main/git.ts), by their folders as they
+   * were chosen, the latest first. Absent when there is none.
+   */
+  gitRepos?: string[]
 }
 
 /** What a ChatGPT sign-in is added as. */
@@ -87,9 +96,21 @@ export const needsNoKey = (provider: StoredProvider): boolean => provider.auth !
 /** Whether a key may be sent to an address: over https, or over plain http to this computer or a local-network IP address (shared/key-address.ts). */
 export { sendsKeySafely }
 
-/** Why no key is saved for, nor sent to, an address that plain http would expose it on. */
+/**
+ * Why no key is saved for, nor sent to, an address that plain http would expose it on. Said to
+ * the person: where they save the provider, and where a message, a compaction or the list of
+ * models finds the key of a provider saved before keys were held to https. The reasons and the way
+ * out are those the settings page gives under such an address (Settings.tsx).
+ */
 export const KEY_NEEDS_HTTPS =
-  "An API key is only sent over https://, or over http:// to this computer or to a local-network IP address: a name could be answered for by another machine on the network. Change the address to https://, or write the server's IP address."
+  '这个服务的地址用的是 http://，又不是本机或局域网的 IP 地址，所以 API Key 不会发往这里，也不会为它保存：Key 会明文经过网络，按名字找到的电脑也可能被同一网络里的其他电脑冒充。请在设置里把地址改成 https://；局域网里的服务器可以改填它的 IP 地址。'
+
+/**
+ * Why a saved key is not used: it cannot be decrypted on this computer. Typically the settings were
+ * copied from another computer or another account of Windows, whose key the system keeps apart.
+ * Said to the person, wherever the key is asked for.
+ */
+export const KEY_UNREADABLE = '保存的 API Key 在这台电脑上解不开（设置可能是从别的电脑或别的 Windows 用户拷过来的）。在设置里重新填写这个服务的 API Key。'
 
 /** Whether requests can be made with a provider as it is stored. */
 const usable = (provider: StoredProvider): boolean =>
@@ -104,7 +125,7 @@ const isObject = (value: unknown): value is Record<string, unknown> =>
 /** A custom prompt as it is kept: trimmed and no longer than allowed. Undefined when there is no text to keep. */
 function readPrompt(raw: unknown): CustomPrompt | undefined {
   if (!isObject(raw)) return undefined
-  const words = text(raw.text).slice(0, CUSTOM_PROMPT_LIMIT)
+  const words = cutAt(text(raw.text), CUSTOM_PROMPT_LIMIT)
   return words ? { text: words, replace: raw.replace === true } : undefined
 }
 
@@ -227,7 +248,9 @@ export function readSettings(raw: unknown): StoredSettings {
     ...keptTheme(source.theme),
     ...(source.titles === false ? { titles: false as const } : {}),
     ...(source.sessionTimes === false ? { sessionTimes: false as const } : {}),
-    ...keptSites(source.trustedSites)
+    ...(source.enterKey === 'newline' ? { enterKey: 'newline' as const } : {}),
+    ...keptSites(source.trustedSites),
+    ...keptRepos(source.gitRepos)
   }
 }
 
@@ -262,7 +285,7 @@ export function nameWorkspace(settings: StoredSettings, folder: string, name: un
  */
 export function forgetWorkspace(settings: StoredSettings, folder: string, windows: boolean): StoredSettings {
   const key = folderKey(folder, windows)
-  const { recentWorkspaces: remembered = [], workspaceNames: before = {}, trustedFolders: trusted, ...rest } = settings
+  const { recentWorkspaces: remembered = [], workspaceNames: before = {}, trustedFolders: trusted, gitRepos: repos, ...rest } = settings
   const recent = remembered.filter((dir) => folderKey(dir, windows) !== key)
   const names = keptNames({ ...before, [key]: '' })
   return {
@@ -270,7 +293,9 @@ export function forgetWorkspace(settings: StoredSettings, folder: string, window
     ...(recent.length ? { recentWorkspaces: recent } : {}),
     ...(names ? { workspaceNames: names } : {}),
     // The yes it was given goes too: chosen again, it is asked about like any folder.
-    ...(trusted ? { trustedFolders: trusted.filter((dir) => folderKey(dir, windows) !== key) } : {})
+    ...(trusted ? { trustedFolders: trusted.filter((dir) => folderKey(dir, windows) !== key) } : {}),
+    // And so does the yes to git being run in it.
+    ...keptRepos((repos ?? []).filter((dir) => folderKey(dir, windows) !== key))
   }
 }
 
@@ -391,7 +416,9 @@ export function toPublic(settings: StoredSettings, accounts: Readonly<Record<str
     theme: themeOf(settings),
     titles: settings.titles !== false,
     sessionTimes: settings.sessionTimes !== false,
-    trustedSites: settings.trustedSites ?? []
+    enterKey: settings.enterKey === 'newline' ? 'newline' : 'send',
+    trustedSites: settings.trustedSites ?? [],
+    gitRepos: settings.gitRepos ?? []
   }
 }
 
@@ -618,6 +645,12 @@ export function setSessionTimes(settings: StoredSettings, on: boolean): StoredSe
   return on ? rest : { ...rest, sessionTimes: false }
 }
 
+/** Has the Enter key in the message box send the message, or make a new line. Sending is how the app comes, and is not written down. */
+export function setEnterKey(settings: StoredSettings, key: EnterKey): StoredSettings {
+  const { enterKey: _dropped, ...rest } = settings
+  return key === 'newline' ? { ...rest, enterKey: 'newline' } : rest
+}
+
 /** At most this many sites are kept: a list a person looks through and prunes by hand. The oldest give way. */
 export const SITES_MAX = 200
 
@@ -643,6 +676,41 @@ export function trustSite(settings: StoredSettings, site: unknown): StoredSettin
 export function forgetSite(settings: StoredSettings, site: unknown): StoredSettings {
   const { trustedSites: before, ...rest } = settings
   return { ...rest, ...keptSites((before ?? []).filter((kept) => kept !== site)) }
+}
+
+/** At most this many repositories are kept as ones git may be run in. The oldest give way. */
+export const GIT_REPOS_MAX = 100
+
+/** The repositories as they are written down: each a folder named in full, each once as it is written. Left out when there is none. */
+function keptRepos(value: unknown): Pick<StoredSettings, 'gitRepos'> {
+  const folders = (Array.isArray(value) ? value : []).filter((dir): dir is string => typeof dir === 'string' && dir.trim() !== '').map((dir) => dir.trim())
+  const repos = [...new Set(folders)].slice(0, GIT_REPOS_MAX)
+  return repos.length ? { gitRepos: repos } : {}
+}
+
+/** Whether the person said git may be run in a repository. `windows` says how folders are told apart on this computer (`folderKey`). */
+export function allowsGit(settings: Pick<StoredSettings, 'gitRepos'>, folder: string, windows: boolean): boolean {
+  const key = folderKey(folder, windows)
+  return key !== '' && (settings.gitRepos ?? []).some((dir) => folderKey(dir, windows) === key)
+}
+
+/**
+ * Keeps the person's yes to git being run in a repository (main/git.ts). Only for a folder they
+ * said a model may read: the one is asked on top of the other, never in its place.
+ */
+export function allowGit(settings: StoredSettings, folder: string, windows: boolean): StoredSettings {
+  const key = folderKey(folder, windows)
+  if (!key) throw new Error('No folder was named.')
+  if (!isTrusted(settings, folder, windows)) throw new Error('This folder has not been trusted yet. Git is allowed only in a folder a model may read.')
+  const { gitRepos: before, ...rest } = settings
+  return { ...rest, ...keptRepos([folder.trim(), ...(before ?? []).filter((dir) => folderKey(dir, windows) !== key)]) }
+}
+
+/** Takes that back: the next worktree in the repository asks again. A folder that was not kept changes nothing. */
+export function forgetGit(settings: StoredSettings, folder: string, windows: boolean): StoredSettings {
+  const key = folderKey(folder, windows)
+  const { gitRepos: before, ...rest } = settings
+  return { ...rest, ...keptRepos((before ?? []).filter((dir) => folderKey(dir, windows) !== key)) }
 }
 
 /** Chooses the look of the app: dark, light, or as the system is set. `theme` is checked here, since it arrives over IPC. */

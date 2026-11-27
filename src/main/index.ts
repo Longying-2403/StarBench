@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, nativeTheme, net, protocol, shell } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, net, protocol, shell } from 'electron'
 import { randomUUID } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
@@ -28,16 +28,23 @@ import { ABOUT } from '../shared/about.ts'
 import { DEFAULT_THEME } from '../shared/theme.ts'
 import { webPlace } from '../shared/links.ts'
 import { MEMORY_COMMANDS } from '../shared/memory.ts'
-import { isLocalAddress, isSessionIcon } from '../shared/types.ts'
+import { isLocalAddress, isSessionIcon, notReadyText } from '../shared/types.ts'
+import { failureOf, withFailure } from '../shared/failures.ts'
+import { cutAt } from '../shared/well-formed.ts'
+import { hasUnmerged, isWorktreeName, leftFiles, mergeRecord, notAllowedText, projectFolder, worktreeOfFolder } from '../shared/worktree.ts'
+import type { MergeRecord, Merged, WorktreeInfo } from '../shared/worktree.ts'
 import { askAside, builtinPrompt, compactConversation, runTurn } from './agent.ts'
-import type { RoomOptions } from './agent.ts'
+import type { RoomOptions, TurnOptions } from './agent.ts'
 import { setAppMenu } from './app-menu.ts'
 import { attachData, attachFiles } from './attachments.ts'
+import { BOX_TAKES_PASTE, FOCUS_BOX, contextMenu } from './context-menu.ts'
+import type { MenuPlace } from './context-menu.ts'
 import { conversationName } from './conversation-name.ts'
 import { SignInError, startAttempt } from './chatgpt/login.ts'
 import type { Attempt } from './chatgpt/login.ts'
 import { adapterFor } from './providers/index.ts'
 import type { Connection } from './providers/index.ts'
+import { Git, saidToPerson } from './git.ts'
 import { githubRepoOf } from './github.ts'
 import { createKernel } from './kernel.ts'
 import type { Kernel } from './kernel.ts'
@@ -59,6 +66,9 @@ import { ToolRegistry, registerBuiltinTools } from './tools.ts'
 import { barless, windowButtons, windowGround } from './window-look.ts'
 import { TraceRegistry } from './trace.ts'
 import { findNamed, howToOpen, readImage } from './workspace-files.ts'
+import { registerWorktreeIpc } from './worktree-ipc.ts'
+import { worktreePrompt, worktreeTools } from './worktree-tools.ts'
+import { Worktrees, takenNames } from './worktrees.ts'
 
 // Lets development and tests run against a throwaway profile instead of the real one.
 if (process.env.STARBENCH_USER_DATA) {
@@ -146,6 +156,13 @@ const usage = new UsageService({
   keyOf: async (providerId) => (await store.getConnection(providerId))?.apiKey ?? null,
   emit: (event) => mainWindow?.webContents.send('usage:event', event)
 })
+/**
+ * Git, which the app runs for one thing: the worktrees of a repository (worktrees.ts). Only in a
+ * repository the person said it may be run in, and with no hook of the repository's: the folder
+ * named here is the app's own and stays empty (git.ts).
+ */
+const git = new Git({ noHooksDir: path.join(app.getPath('userData'), 'git-no-hooks'), allowed: (repo) => store.allowsGit(repo) })
+const worktrees = new Worktrees({ git })
 const mcp = new McpManager({
   configFile: path.join(app.getPath('userData'), 'mcp.json'),
   tools,
@@ -250,19 +267,49 @@ const wholeReplies = new Map<string, string>()
  * tell it of the pictures in words at once (`Connection.noImages`), instead of being refused first.
  */
 const noImages = new Map<string, string>()
+/**
+ * Sessions in which the service turned the PDFs down, or a request with them stayed too long for
+ * the model, kept the same way. Later messages tell it where the PDFs lie at once (`Connection.noDocuments`).
+ */
+const noDocuments = new Map<string, string>()
 const modelKey = (connection: { provider: string; model: string }): string => `${connection.provider}\n${connection.model}`
 /** The connection, with what a session has found out about its server. */
 const asLearned = (sessionId: string, connection: Connection): Connection => ({
   ...connection,
   ...(wholeReplies.get(sessionId) === modelKey(connection) ? { wholeReplies: true } : {}),
   ...(textTools.get(sessionId) === modelKey(connection) ? { textTools: true } : {}),
-  ...(noImages.get(sessionId) === modelKey(connection) ? { noImages: true } : {})
+  ...(noImages.get(sessionId) === modelKey(connection) ? { noImages: true } : {}),
+  ...(noDocuments.get(sessionId) === modelKey(connection) ? { noDocuments: true } : {})
 })
 
 /** The folder the page and its own scripts are in. */
 const PAGE_DIR = path.join(import.meta.dirname, '../renderer')
 /** Set while developing: the page then comes from a local server and not from a file. */
 const DEV_PAGE_URL = app.isPackaged ? undefined : process.env.ELECTRON_RENDERER_URL
+
+/**
+ * Shows the menu of a right-click in the window (context-menu.ts). Outside a box that takes text,
+ * the page is asked first whether its message box can take a paste, for 粘贴到输入框: the menu
+ * comes up once it has answered.
+ */
+async function showContextMenu(place: MenuPlace): Promise<void> {
+  const shown = mainWindow
+  if (!shown) return
+  const contents = shown.webContents
+  const inPage = (script: string): Promise<unknown> => contents.executeJavaScript(script).catch(() => false)
+  const boxTakesPaste = !place.isEditable && (await inPage(BOX_TAKES_PASTE)) === true
+  const page = {
+    replaceMisspelling: (word: string) => contents.replaceMisspelling(word),
+    // The keyboard is put in the box first, and the paste is then the page's own, as Ctrl+V there:
+    // text goes where the cursor is, files and pictures become attachments.
+    pasteIntoBox: () => {
+      void inPage(FOCUS_BOX).then((focused) => {
+        if (focused === true) contents.paste()
+      })
+    }
+  }
+  if (!shown.isDestroyed()) Menu.buildFromTemplate(contextMenu(place, page, boxTakesPaste)).popup({ window: shown })
+}
 
 function createWindow(): void {
   const dark = nativeTheme.shouldUseDarkColors
@@ -302,6 +349,8 @@ function createWindow(): void {
   // Of what a browser asks permission for, the page gets the clipboard and nothing else; Electron
   // would grant all of it (page-guard.ts).
   mainWindow.webContents.session.setPermissionRequestHandler((_contents, permission, grant) => grant(mayGrant(permission)))
+  // A right-click gets a menu for the text where it was made; Electron shows none by itself (context-menu.ts).
+  mainWindow.webContents.on('context-menu', (_event, params) => void showContextMenu(params))
 
   if (DEV_PAGE_URL) {
     mainWindow.webContents.on('console-message', (event) => {
@@ -401,6 +450,92 @@ function keepMode(id: string, run: ActiveRun, saved: PermissionMode | undefined,
 }
 
 /**
+ * Changes to a session that is on its way into memory, made by something other than the work
+ * that is about to begin: the record of a merge the person asked for just then. Each is made to
+ * the session once it is there (`takeChanges`), where that work saves it from.
+ */
+const pendingChanges = new Map<string, ((session: Session) => void)[]>()
+/** Makes the changes that waited for a session to come into memory. Says whether there were any. */
+function takeChanges(session: Session): boolean {
+  const waiting = pendingChanges.get(session.id) ?? []
+  pendingChanges.delete(session.id)
+  for (const change of waiting) change(session)
+  return waiting.length > 0
+}
+/** For a session that did not come into memory after all: what waited for it is made to its file. */
+function settleChanges(id: string): void {
+  const waiting = pendingChanges.get(id) ?? []
+  pendingChanges.delete(id)
+  if (waiting.length === 0) return
+  store
+    .changeSession(id, (session) => waiting.forEach((change) => change(session)))
+    .catch((err: unknown) => console.error('[store] could not keep a change to a session:', err instanceof Error ? err.message : err))
+}
+
+/**
+ * Changes the merges a session keeps of its worktree (`Session.merges`), wherever the session is
+ * just then: in memory, being worked on; on its way there; or in its file.
+ */
+async function changeMerges(id: string, change: (merges: MergeRecord[]) => MergeRecord[]): Promise<void> {
+  const apply = (session: Session): void => {
+    const merges = change(session.merges ?? [])
+    if (merges.length > 0) session.merges = merges
+    else delete session.merges
+  }
+  const live = liveSessions.get(id)
+  if (live) {
+    apply(live.session)
+    live.checkpoint()
+    await live.saved()
+  } else if (opening.has(id)) {
+    pendingChanges.set(id, [...(pendingChanges.get(id) ?? []), apply])
+  } else {
+    await store.changeSession(id, apply)
+  }
+}
+
+/** How many messages of the person a conversation holds: the turn a merge is shown at the end of. */
+const turnsOf = (session: Pick<Session, 'messages'>): number => session.messages.filter((message) => message.role === 'user').length
+
+/** Writes a merge of a worktree's work down with its conversation, and tells the page: it shows the merge, and offers to take it back. */
+async function recordMerge(id: string, done: Merged): Promise<void> {
+  const where = (session: Session): { turn: number; name: string } => ({ turn: turnsOf(session), name: session.worktree?.name ?? '' })
+  const live = liveSessions.get(id)
+  const { turn, name } = (live ? where(live.session) : await store.peekSession(id, where)) ?? { turn: 0, name: '' }
+  const record = mergeRecord(done, randomUUID(), Date.now(), turn)
+  await changeMerges(id, (merges) => [...merges, record])
+  send({ sessionId: id, event: { type: 'merged', record, name } })
+}
+
+/** Writes down that a merge was taken back, and tells the page. */
+async function recordUndo(id: string, mergeId: string): Promise<void> {
+  const at = Date.now()
+  await changeMerges(id, (merges) => merges.map((merge) => (merge.id === mergeId ? { ...merge, undone: at } : merge)))
+  send({ sessionId: id, event: { type: 'merge_undone', id: mergeId, at } })
+}
+
+/**
+ * What a turn in a conversation that works in a worktree has on top of the rest: the lines of
+ * its instructions that say where it is, and the worktree's tools (worktree-tools.ts). Nothing
+ * for any other conversation.
+ */
+function worktreeParts(session: Pick<Session, 'id' | 'worktree'>, base: TurnOptions['tools']): { prompt?: string; tools: TurnOptions['tools'] } {
+  const info = session.worktree
+  if (!info) return { tools: base }
+  return { prompt: worktreePrompt(info), tools: worktreeTools(base, { info, worktrees, merged: (done) => recordMerge(session.id, done) }) }
+}
+
+/**
+ * Whether a folder is one a model may read: one the person said so of, or a worktree the app
+ * made of such a repository, which is asked about no second time.
+ */
+async function readable(folder: string): Promise<boolean> {
+  if (await store.trusts(folder)) return true
+  const tree = worktreeOfFolder(folder, process.platform === 'win32')
+  return tree !== null && (await store.trusts(tree.repo))
+}
+
+/**
  * Gives a session the name the model wrote for it, where it still goes by `from`, the first
  * words of the person: a name they gave it in the meantime is theirs to keep. The page is told
  * once the name holds.
@@ -495,6 +630,7 @@ function registerIpc(): void {
   })
   ipcMain.handle('settings:setTitles', (_e, on: unknown) => store.setTitles(on))
   ipcMain.handle('settings:setSessionTimes', (_e, on: unknown) => store.setSessionTimes(on))
+  ipcMain.handle('settings:setEnterKey', (_e, key: unknown) => store.setEnterKey(key))
   ipcMain.handle('settings:setCompaction', (_e, change: unknown) => store.setCompaction(change))
   ipcMain.handle('prompt:builtin', () => builtinPrompt())
   ipcMain.handle('prompt:set', (_e, providerId: string, prompt: unknown) => store.setPrompt(providerId, prompt))
@@ -626,7 +762,8 @@ function registerIpc(): void {
   /** `skill`: the one the person picked for the message, if any; one of the memory's commands says what the model may do to the notes. */
   const memoryTurnOf = (session: Session, connection: Connection, room: RoomOptions, skill?: string): MemoryTurn => ({
     session: session.id,
-    workspace: session.workspace,
+    // The notes of a workspace are those of the repository, also for a conversation in a worktree of it.
+    workspace: projectFolder(session),
     provider: { id: connection.provider, ...(connection.providerName ? { name: connection.providerName } : {}), local: isLocalAddress(connection.baseURL) },
     model: connection.model,
     ...(room.window ? { window: room.window } : {}),
@@ -656,8 +793,11 @@ function registerIpc(): void {
     const given = Array.isArray(files) ? files : []
     return attachData(
       given.flatMap((file: unknown) => {
-        const { name, data } = typeof file === 'object' && file !== null ? (file as { name?: unknown; data?: unknown }) : {}
-        return data instanceof ArrayBuffer || ArrayBuffer.isView(data) ? [{ name: String(name ?? ''), data: data instanceof ArrayBuffer ? new Uint8Array(data) : new Uint8Array(data.buffer, data.byteOffset, data.byteLength) }] : []
+        // How large it is and where it lies are the page's word: attachData takes them only as far as they can be true.
+        const { name, data, size, path: where } = typeof file === 'object' && file !== null ? (file as { name?: unknown; data?: unknown; size?: unknown; path?: unknown }) : {}
+        return data instanceof ArrayBuffer || ArrayBuffer.isView(data)
+          ? [{ name: String(name ?? ''), data: data instanceof ArrayBuffer ? new Uint8Array(data) : new Uint8Array(data.buffer, data.byteOffset, data.byteLength), size, path: where }]
+          : []
       })
     )
   })
@@ -698,7 +838,7 @@ function registerIpc(): void {
   // pull request or a commit of it. Looked for only in a folder the person said a model may read.
   ipcMain.handle('workspace:github', async (_e, workspace: unknown) => {
     const folder = typeof workspace === 'string' ? workspace : ''
-    return folder && path.isAbsolute(folder) && (await store.trusts(folder)) ? githubRepoOf(folder) : null
+    return folder && path.isAbsolute(folder) && (await readable(folder)) ? githubRepoOf(folder) : null
   })
 
   const pluginManager = async (): Promise<PluginManager> => {
@@ -785,7 +925,7 @@ function registerIpc(): void {
   }
   ipcMain.handle('sessions:rename', async (_e, id: string, title: unknown) => {
     notWhileRunning(id)
-    const clean = typeof title === 'string' ? title.replace(/\s+/g, ' ').trim().slice(0, 120) : ''
+    const clean = typeof title === 'string' ? cutAt(title.replace(/\s+/g, ' ').trim(), 120) : ''
     if (!clean) throw new Error('A session needs a name.')
     await store.updateSession(id, { title: clean })
   })
@@ -798,14 +938,51 @@ function registerIpc(): void {
     if (icon !== null && !isSessionIcon(icon)) throw new Error('This is not one of the icons a session can have.')
     await store.updateSession(id, { icon })
   })
+  /**
+   * The worktree a saved session still has: its folder, or its git branch. Told from the folders
+   * of the repository, without running git. None for a session that works in no worktree, and
+   * for one whose worktree was taken away already.
+   */
+  const keptWorktree = async (id: string): Promise<WorktreeInfo | null> => {
+    const info = await store.peekSession(id, (session) => session.worktree ?? null)
+    return info && (await takenNames(info.repo)).includes(info.name) ? info : null
+  }
+  /**
+   * Before a session is deleted: a worktree it still has is taken away with it, unless it holds
+   * work the main folder does not have. That is thrown away only on the person's own yes, which
+   * the page asks for and acts on before it deletes the session (`worktrees:remove`).
+   */
+  const dropWorktree = async (id: string): Promise<void> => {
+    const info = await keptWorktree(id)
+    if (!info) return
+    // What stops it is said to the person, who asked for the conversation to be deleted: in the language of the app.
+    // A yes to git taken back is asked about before git is, which would refuse in English (`notAllowedText`).
+    if (!(await store.allowsGit(info.repo))) throw new Error(notAllowedText(info.name))
+    const removed = await worktrees.remove(info).catch((err: unknown) => {
+      throw saidToPerson(err)
+    })
+    if (removed.kind === 'unmerged') {
+      throw new Error(`这个会话的 worktree「${info.name}」里有还没合并的改动（${removed.files} 个文件，${removed.commits} 个提交）。先合并，或者从这个会话自己的菜单里删除它：那里会问你要不要丢弃这些改动。`)
+    }
+    // Nothing of it can be merged any more: files are left in its folder, which git cannot tell from changes.
+    if (removed.kind === 'left') {
+      const commits = removed.commits > 0 ? `，它的 git 分支上还有 ${removed.commits} 个还没合并的提交` : ''
+      throw new Error(`这个会话的 worktree「${info.name}」已经失效，但它的文件夹里还留着 ${leftFiles(removed.files)}${commits}。从这个会话自己的菜单里删除它：那里会问你要不要连同${removed.commits > 0 ? '这些文件和提交' : '这些文件'}一起删掉。`)
+    }
+    if (removed.kind === 'locked') {
+      throw new Error(`这个会话的 worktree「${info.name}」被你用 git worktree lock 锁住了。从这个会话自己的菜单里删除它：那里会问你要不要解锁并删除。`)
+    }
+  }
   /** Deletes a saved session, and with it what is kept of it for as long as the app runs. */
   const dropSession = async (id: string): Promise<void> => {
     const run = activeRuns.get(id)
     if (run) stopRun(run)
+    await dropWorktree(id)
     alwaysAllowed.delete(id)
     textTools.delete(id)
     wholeReplies.delete(id)
     noImages.delete(id)
+    noDocuments.delete(id)
     await store.deleteSession(id)
     // What the memory kept of it: the notes it saw. The notes themselves stay.
     await memory.dropSession(id).catch((err) => console.error('[memory] could not forget a deleted session:', err))
@@ -833,6 +1010,21 @@ function registerIpc(): void {
     // workspace and in the list: not a session that came since, and none that is archived.
     const going = all.filter((s) => !s.archived && asked.has(s.id))
     noneRunning(going)
+    // All of them or none here as well: a worktree with work that was not merged is not thrown away in passing.
+    for (const { id, title } of going) {
+      const info = await keptWorktree(id)
+      if (!info) continue
+      // The same where the person took back their yes to git in its repository: told before git is asked, with the conversation named.
+      if (!(await store.allowsGit(info.repo))) throw new Error(notAllowedText(info.name, title))
+      const would = await worktrees.removable(info).catch((err: unknown) => {
+        throw saidToPerson(err)
+      })
+      if (would.kind === 'removed') continue
+      const why = would.kind === 'locked' ? '它被你用 git worktree lock 锁住了' : would.kind === 'left' ? `它已经失效，但文件夹里还留着 ${leftFiles(would.files)}` : '里面有还没合并的改动'
+      // Merging is offered only where there is work to merge.
+      const how = would.kind === 'unmerged' ? '合并，或者从它自己的菜单里删除' : '从它自己的菜单里删除'
+      throw new Error(`会话“${title}”在 worktree「${info.name}」里进行，${why}。先单独处理这个会话（${how}），再删除这个工作区。`)
+    }
     for (const { id } of going) await dropSession(id)
     // A session that came since keeps the workspace in the list, and its folder is then still one to offer.
     if (all.some((s) => !s.archived && !going.includes(s))) return store.getSettings()
@@ -840,11 +1032,18 @@ function registerIpc(): void {
     return store.forgetWorkspace(dir)
   })
 
+  /**
+   * Why the model service in use cannot be asked now, as the person is told it: the words the page
+   * says before a message is sent (`notReadyText`). Where the settings tell nothing amiss and there
+   * is still no connection to be had (a key that cannot be read on this computer), that is said.
+   */
+  const notReady = async (connection: Connection | null): Promise<string> =>
+    notReadyText(await store.getSettings()) || (connection ? '请先在右下角选择模型' : '当前的模型服务还不能用。打开设置，检查它的 API Key 或登录。')
+
   /** Takes a message into its session and starts the turn that answers it. Resolves, with the session's id, once the turn has begun. */
   const beginTurn = async (sessionId: string | null, workspace: string, text: string, skill?: string, extras?: unknown): Promise<Sent> => {
     const connection = await store.getConnection()
-    if (!connection) throw new Error('The model service in use has no API key or sign-in yet. Open Settings to add one.')
-    if (!connection.model) throw new Error('No model chosen yet. Pick one next to the message box.')
+    if (!connection?.model) throw new Error(await notReady(connection))
     if (sessionId && activeRuns.has(sessionId)) throw new Error('This session is already running.')
     // Whether the message goes out as a plain chat, with no tools and nothing of the app's beside
     // it (`TurnOptions.plain`): a plugin says so, for this model, and the page has no say in it.
@@ -858,24 +1057,42 @@ function registerIpc(): void {
     // Loaded before anything is saved, so a skill that vanished fails the send instead of the turn.
     const pickedSkill = skill ? { name: skill, prompt: selectedSkillPrompt(skill, await skills.load(skill)) } : undefined
     // A plain chat is told of no skills. One the person picked for the message is part of what they say, and goes.
-    const systemExtra = plain ? undefined : skillsPrompt(await skills.list())
+    const skillsText = plain ? undefined : skillsPrompt(await skills.list())
     // What goes with the message arrives from the page, and is checked like everything that does.
-    const { mode: askedMode, attachments: given } = typeof extras === 'object' && extras !== null ? (extras as { mode?: unknown; attachments?: unknown }) : {}
+    const { mode: askedMode, attachments: given, worktree: askedTree } =
+      typeof extras === 'object' && extras !== null ? (extras as { mode?: unknown; attachments?: unknown; worktree?: unknown }) : {}
     const attachments = readAttachments(given)
     if (typeof text !== 'string' || (!text.trim() && attachments.length === 0)) throw new Error('There is nothing to send.')
 
     let session: Session | null = sessionId ? await store.loadSession(sessionId) : null
+    /** The worktree made for a new chat that is to work in one. */
+    let made: WorktreeInfo | undefined
     if (!session) {
       // The page asks before a new chat goes into a folder (TrustDialog.tsx); a message that comes
       // from anywhere else is held to the same: a folder that is there, named in full, and trusted.
+      // Said to the person, in the language of the app: the folder may have been deleted or renamed
+      // after it was chosen and before the first message went.
       const there = typeof workspace === 'string' && path.isAbsolute(workspace) && (await fs.stat(workspace).then((s) => s.isDirectory(), () => false))
-      if (!there) throw new Error('A new chat needs a folder that exists, named by its full path.')
-      if (!(await store.trusts(workspace))) throw new Error('This folder has not been trusted yet. Choose it again to be asked whether a model may read it.')
+      if (!there) throw new Error('这个文件夹已经不在了（可能被删掉或改了名字）。重新选择工作文件夹，再发送。')
+      if (!(await store.trusts(workspace))) throw new Error('这个文件夹还没有被信任。重新选择这个文件夹，会问你是否允许模型读取里面的文件。')
+      if (askedTree !== undefined && askedTree !== null) {
+        // The chat is to work in a worktree of the repository in that folder. It is made first: one
+        // that cannot be made leaves no conversation behind. Git is run for it, which the person
+        // was asked about for this repository (GitDialog.tsx); where they said no, nothing is made.
+        const name = typeof askedTree === 'object' ? (askedTree as { name?: unknown }).name : undefined
+        // What stops a worktree from being made is said to the person, in the language of the app (`Explained`).
+        if (!isWorktreeName(name)) throw new Error('worktree 的名字只能用小写字母、数字和连字符，最多 40 个字符，开头和结尾要是字母或数字。')
+        made = await worktrees.create(workspace, name).catch((err: unknown) => {
+          throw saidToPerson(err)
+        })
+      }
       session = {
         id: randomUUID(),
         // A message that is files and no words is named after the first of them.
-        title: text.trim().replace(/\s+/g, ' ').slice(0, 60) || attachments[0]?.name.slice(0, 60) || 'New chat',
-        workspace,
+        title: cutAt(text.trim().replace(/\s+/g, ' '), 60) || cutAt(attachments[0]?.name ?? '', 60) || 'New chat',
+        // The files of a conversation in a worktree are the worktree's; in the list it stays one of the repository's.
+        workspace: made ? worktrees.folderOf(made) : workspace,
+        ...(made ? { worktree: made } : {}),
         updatedAt: Date.now(),
         messages: []
       }
@@ -892,7 +1109,7 @@ function registerIpc(): void {
     const counting = await store.countsStats()
     if (counting) current.stats = addTurn(current.stats ?? emptyStats(current.messages.length > 0))
     // Keeps the folder list in order of use. Not worth failing the message over.
-    store.rememberWorkspace(current.workspace).catch((err) => console.error('[store] could not remember the folder:', err))
+    store.rememberWorkspace(projectFolder(current)).catch((err) => console.error('[store] could not remember the folder:', err))
     current.messages.push({
       role: 'user',
       content: text,
@@ -926,8 +1143,10 @@ function registerIpc(): void {
     }
     liveSessions.set(current.id, { session: current, checkpoint, saved: () => saving })
     // A name the model wrote for the session while this message was on its way is taken up with it,
-    // and said to the page once it is in the file, where the list is read from.
+    // and said to the page once it is in the file, where the list is read from. So is what else
+    // was to be changed of it meanwhile (`pendingChanges`).
     const named = takeTitle(current)
+    takeChanges(current)
     checkpoint()
     if (named) void saving.then(() => send({ sessionId: current.id, event: { type: 'titled', title: current.title } }))
 
@@ -940,6 +1159,9 @@ function registerIpc(): void {
           console.error('[memory] left out of this turn:', err instanceof Error ? err.message : err)
           return { prompt: undefined, tools }
         })
+    // In a worktree the model is told where it is, and has the worktree's tools. Not in a plain chat, which has nothing of the app's.
+    const tree = plain ? { prompt: undefined, tools: remembered.tools } : worktreeParts(current, remembered.tools)
+    const systemExtra = [skillsText, tree.prompt].filter(Boolean).join('\n\n') || undefined
     /** Set when the service turned out not to take the level of thinking chosen for the model: what is asked of it after the turn names none either. */
     let levelRefused = false
 
@@ -953,7 +1175,7 @@ function registerIpc(): void {
       room,
       plain,
       signal: run.controller.signal,
-      tools: remembered.tools,
+      tools: tree.tools,
       sampling,
       // Read anew before every request: a plugin that begins to watch in the middle of a turn sees the rest of it.
       trace: {
@@ -964,7 +1186,13 @@ function registerIpc(): void {
       },
       alwaysAllowed: allowed,
       permissionMode: () => run.mode,
-      emit: (event) => send({ sessionId: current.id, event }),
+      emit: (event) => {
+        // What ended the turn in an error is written down with the conversation (shared/failures.ts):
+        // the turn saves it once more as it ends, right after it has said so. Until this was kept,
+        // the reason was gone once the person went to another conversation and came back.
+        if (event.type === 'error') current.failures = withFailure(current.failures, failureOf(event, turnsOf(current), Date.now()))
+        send({ sessionId: current.id, event })
+      },
       checkpoint,
       // The numbers are kept with the conversation, so the next checkpoint saves them; the page is told at once.
       stats: counting
@@ -995,6 +1223,7 @@ function registerIpc(): void {
       onToolsRefused: () => textTools.set(current.id, modelKey(connection)),
       onStreamRefused: () => wholeReplies.set(current.id, modelKey(connection)),
       onImagesRefused: () => noImages.set(current.id, modelKey(connection)),
+      onDocumentsRefused: () => noDocuments.set(current.id, modelKey(connection)),
       requestPermission: (call) =>
         new Promise<PermissionDecision>((resolve) => {
           const id = randomUUID()
@@ -1017,7 +1246,7 @@ function registerIpc(): void {
       // By itself and after the turn: the person can go on with the conversation meanwhile.
       .then(() => (unnamed ? nameConversation(current, levelRefused ? { ...connection, reasoningEffort: 'default' } : connection) : undefined))
 
-    return { id: current.id, ...(plain ? { plain: true as const } : {}) }
+    return { id: current.id, ...(plain ? { plain: true as const } : {}), ...(made ? { worktree: { ...made, folder: current.workspace } } : {}) }
   }
 
   ipcMain.handle('agent:send', async (_e, sessionId: string | null, workspace: string, text: string, skill?: string, extras?: unknown) => {
@@ -1030,6 +1259,7 @@ function registerIpc(): void {
       if (sessionId) {
         opening.delete(sessionId)
         pendingModes.delete(sessionId)
+        settleChanges(sessionId)
       }
     }
   })
@@ -1038,8 +1268,8 @@ function registerIpc(): void {
   // done: nothing can be sent in it meanwhile, and a stop ends the writing of the summary.
   const compactSession = async (id: string): Promise<CompactionReport> => {
     const connection = await store.getConnection()
-    if (!connection) throw new Error('The model service in use has no API key or sign-in yet. Open Settings to add one.')
-    if (!connection.model) throw new Error('No model chosen yet. Pick one next to the message box.')
+    // Compacting now is not stopped by the page where there is no key or no model, as a message is: said here, in the same words.
+    if (!connection?.model) throw new Error(await notReady(connection))
     const session = await store.loadSession(id)
     if (!session) throw new Error('This session no longer exists.')
     // No tool runs while a conversation is compacted, so its mode has nothing to say here; it is kept as the session has it.
@@ -1059,29 +1289,35 @@ function registerIpc(): void {
         saving = saving.then(() => store.saveSessionText(id, text))
       }
       liveSessions.set(id, { session, checkpoint, saved: () => saving })
-      // A name the model wrote for the session just now is taken up with it. Saved as it is:
-      // a new name is no reason for the session to move up the list. The page is told once it is in the file.
-      if (takeTitle(session)) {
+      // A name the model wrote for the session just now is taken up with it, and so is what else
+      // was to be changed of it meanwhile (`pendingChanges`). Saved as it is: neither is a reason
+      // for the session to move up the list. The page is told of a name once it is in the file.
+      const changed = takeChanges(session)
+      const named = takeTitle(session)
+      if (named || changed) {
         const text = sessionText(session)
         const title = session.title
         const written = (saving = saving.then(() => store.saveSessionText(id, text)))
-        void written.then(
-          () => send({ sessionId: id, event: { type: 'titled', title } }),
-          () => {}
-        )
+        if (named) {
+          void written.then(
+            () => send({ sessionId: id, event: { type: 'titled', title } }),
+            () => {}
+          )
+        }
       }
       const room = await roomFor(session, connection)
       const remembered = await memory.forTurn(memoryTurnOf(session, connection, room), tools).catch(() => ({ prompt: undefined, tools }))
+      const tree = worktreeParts(session, remembered.tools)
       const report = await compactConversation({
         connection: asLearned(id, connection),
         workspace: session.workspace,
         messages: session.messages,
         // The same instructions and tools a message would go out with: they take their part of the context.
-        systemExtra: skillsPrompt(await skills.list()),
+        systemExtra: [skillsPrompt(await skills.list()), tree.prompt].filter(Boolean).join('\n\n') || undefined,
         memory: remembered.prompt,
         room,
         signal: run.controller.signal,
-        tools: remembered.tools,
+        tools: tree.tools,
         sampling,
         trace: {
           get active() {
@@ -1124,7 +1360,32 @@ function registerIpc(): void {
     } finally {
       opening.delete(id)
       pendingModes.delete(id)
+      settleChanges(id)
     }
+  })
+
+  // The worktrees of repositories (worktree-ipc.ts): what a folder is to git, the person's yes to
+  // git there, and the state, the merging and the taking away of a conversation's worktree.
+  registerWorktreeIpc(ipcMain, {
+    worktrees,
+    hasGit: () => git.program() !== null,
+    trusts: (folder) => store.trusts(folder),
+    allows: (folder) => store.allowsGit(folder),
+    allow: (folder) => store.allowGit(folder),
+    forget: (folder) => store.forgetGit(folder),
+    worktreeOf: async (id) => {
+      const session = liveSessions.get(id)?.session
+      const told = session ? { info: session.worktree, title: session.title } : await store.peekSession(id, (kept) => ({ info: kept.worktree, title: kept.title }))
+      return told?.info ? { info: told.info, title: told.title } : null
+    },
+    running: (id) => activeRuns.has(id) || opening.has(id),
+    merged: recordMerge,
+    recordOf: async (id, mergeId) => {
+      const live = liveSessions.get(id)?.session
+      const merges = live ? (live.merges ?? []) : ((await store.peekSession(id, (kept) => kept.merges ?? [])) ?? [])
+      return merges.find((merge) => merge.id === mergeId) ?? null
+    },
+    undone: recordUndo
   })
 
   ipcMain.handle('agent:stop', (_e, sessionId: string) => {

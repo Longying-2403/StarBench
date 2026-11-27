@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import * as model from '../src/main/settings-model.ts'
 import { presetEffort, startingEffort } from '../src/shared/effort-defaults.ts'
-import { CUSTOM_PROMPT_LIMIT, effortName, isLocalAddress, offersFastMode, usualEfforts } from '../src/shared/types.ts'
+import { CUSTOM_PROMPT_LIMIT, effortName, isLocalAddress, notReadyText, offersFastMode, usualEfforts } from '../src/shared/types.ts'
 
 test('settings from before there were providers keep their key, model and effort', () => {
   const old = {
@@ -34,6 +34,25 @@ test('settings from before there were providers keep their key, model and effort
   // Another service keeps speaking chat completions, as that version did with every service.
   const other = model.readSettings({ baseURL: 'https://llm.example.com/v1', model: 'm', reasoningEffort: 'default' })
   assert.deepEqual(other.providers, [{ id: 'custom', name: 'llm.example.com', kind: 'openai-chat', baseURL: 'https://llm.example.com/v1', model: 'm' }])
+})
+
+test('what keeps the service in use from being asked is said in the words the page uses before a message is sent', () => {
+  // A service on the internet with no key yet.
+  const keyless = model.readSettings({ providers: [{ id: 'a', name: 'A', kind: 'openai-chat', baseURL: 'https://a.example', model: 'm' }] })
+  assert.equal(notReadyText(model.toPublic(keyless)), '请先在设置中填写 API Key')
+  // A server on this computer asks for no key: with no model chosen that is what is said, and with one nothing is.
+  const local = (chosen: string) => model.toPublic(model.readSettings({ providers: [{ id: 'l', name: 'L', kind: 'openai-chat', baseURL: 'http://localhost:11434/v1', model: chosen }] }))
+  assert.equal(notReadyText(local('')), '请先在右下角选择模型')
+  assert.equal(notReadyText(local('qwen')), '')
+  // A ChatGPT sign-in: none yet, or one whose account did not allow its plan to be used.
+  const plan = model.readSettings({
+    providers: [{ id: 'chatgpt', name: 'ChatGPT', kind: 'openai-responses', baseURL: 'https://chatgpt.com/backend-api/codex', model: 'gpt', auth: 'chatgpt', encryptedLogin: 'BLOB1', signedIn: true }]
+  })
+  assert.equal(notReadyText(model.toPublic(plan)), '请先在设置中用 ChatGPT 登录')
+  assert.equal(notReadyText(model.toPublic(plan, { chatgpt: { signedIn: true, planUsage: false } })), '请先在设置中启用 ChatGPT 套餐额度')
+  assert.equal(notReadyText(model.toPublic(plan, { chatgpt: { signedIn: true, planUsage: true } })), '')
+  // Before the settings are read, the first of them.
+  assert.equal(notReadyText(null), '请先在设置中填写 API Key')
 })
 
 test('a missing or unusable settings file becomes the defaults', () => {
@@ -425,6 +444,23 @@ test('the list says when each conversation was gone on with unless that was swit
   for (const odd of [true, 'false', 0, null]) assert.equal(model.toPublic(model.readSettings({ sessionTimes: odd })).sessionTimes, true, String(odd))
   // Neither switch touches the other.
   assert.deepEqual(model.setTitles(off, false), { ...off, titles: false })
+})
+
+test('the Enter key in the message box sends the message unless it was set to make a new line', () => {
+  const fresh = model.readSettings(undefined)
+  assert.equal('enterKey' in fresh, false)
+  assert.equal(model.toPublic(fresh).enterKey, 'send')
+
+  const newline = model.setEnterKey(fresh, 'newline')
+  assert.equal(newline.enterKey, 'newline')
+  assert.equal(model.toPublic(newline).enterKey, 'newline')
+  assert.deepEqual(model.readSettings(JSON.parse(JSON.stringify(newline))), newline, 'kept through a save and a load')
+  assert.deepEqual(model.setEnterKey(newline, 'send'), fresh, 'sending is how the app comes, and is not written down')
+  // Anything but the one other choice in the file means that Enter sends.
+  for (const odd of ['send', 'Newline', true, 1, null]) assert.equal(model.toPublic(model.readSettings({ enterKey: odd })).enterKey, 'send', String(odd))
+  // It touches no other setting, and none touches it.
+  assert.deepEqual(model.setSessionTimes(newline, false), { ...newline, sessionTimes: false })
+  assert.deepEqual(model.setEnterKey(model.setTitles(fresh, false), 'newline'), { ...fresh, titles: false, enterKey: 'newline' })
 })
 
 test('the app goes by the system for its look unless one was chosen', () => {

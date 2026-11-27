@@ -15,6 +15,7 @@ import { OutputTail } from './decode.ts'
 import { writeJson } from './json-file.ts'
 import { envValue, onPath } from './program-path.ts'
 import { sendsKeySafely } from '../shared/key-address.ts'
+import { cutAt } from '../shared/well-formed.ts'
 import type { ToolRegistry } from './tools.ts'
 
 /** Generous, because `npx` may download the server on first use. */
@@ -376,7 +377,7 @@ export class McpManager {
               this.opts.tools.register(
                 {
                   name,
-                  description: (tool.description || `Tool "${tool.name}" of the MCP server "${conn.name}".`).slice(0, MAX_DESCRIPTION_CHARS),
+                  description: cutAt(tool.description || `Tool "${tool.name}" of the MCP server "${conn.name}".`, MAX_DESCRIPTION_CHARS),
                   parameters: tool.inputSchema as Record<string, unknown>,
                   // Servers describe their own tools, so none of them is trusted to skip the prompt.
                   needsPermission: true,

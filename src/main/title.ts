@@ -8,6 +8,7 @@
 
 import { usualEfforts } from '../shared/types.ts'
 import type { ReasoningEffort, StoredMessage } from '../shared/types.ts'
+import { cutAt } from '../shared/well-formed.ts'
 import type { Connection } from './providers/types.ts'
 
 /** The longest name the model may give, in characters. A reply longer than this was no title: an answer, most likely. */
@@ -16,7 +17,7 @@ export const TITLE_MAX = 40
 const SAID_MAX = 1500
 const ANSWER_MAX = 800
 
-const clip = (text: string, max: number): string => (text.length <= max ? text : `${text.slice(0, max)} …`)
+const clip = (text: string, max: number): string => (text.length <= max ? text : `${cutAt(text, max)} …`)
 
 /** What the model that names a conversation is told. `language` is the one the person writes in, where their writing shows it. */
 export function titlePrompt(language?: string): string {

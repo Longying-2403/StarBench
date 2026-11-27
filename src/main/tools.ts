@@ -6,6 +6,8 @@ import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { Worker } from 'node:worker_threads'
 import { runsOnItsOwnPart } from '../shared/permissions.ts'
+import { cutAt } from '../shared/well-formed.ts'
+import { APP_FOLDER } from '../shared/worktree.ts'
 import type { ToolAccess } from '../shared/permissions.ts'
 import { decodeOutput } from './decode.ts'
 import { system32, windowsPowerShell } from './program-path.ts'
@@ -18,7 +20,12 @@ const POWERSHELL_UTF8 = '[Console]::OutputEncoding = [System.Text.Encoding]::UTF
 const MAX_FILE_BYTES = 1_000_000
 const MAX_SEARCH_HITS = 200
 const COMMAND_TIMEOUT_MS = 120_000
-const SKIPPED_DIRS = new Set(['node_modules', '.git', 'dist', 'out', 'build', '.next', '__pycache__', '.venv'])
+/**
+ * Folders a search does not go into: dependencies, build output, and the folder of the app's own
+ * in a repository, where the worktrees lie. Each of those is a second copy of the repository, and
+ * would be found again for every word in it. A search that starts inside one is not held back.
+ */
+const SKIPPED_DIRS = new Set(['node_modules', '.git', 'dist', 'out', 'build', '.next', '__pycache__', '.venv', APP_FOLDER])
 
 export interface ToolContext {
   workspace: string
@@ -98,10 +105,19 @@ export function checkArguments(schema: Record<string, unknown>, args: Record<str
   return null
 }
 
+/**
+ * Room for the note of how much was cut. A result is looked at twice, by the tool that made it and
+ * once more when it is handed back: were it cut to the full length the first time, it would be
+ * over the length again with its note, and the second cut would take the note away and count
+ * nothing but the note.
+ */
+const CUT_NOTE_ROOM = 48
+
 function truncate(text: string): string {
   if (text.length <= MAX_OUTPUT_CHARS) return text
-  const dropped = text.length - MAX_OUTPUT_CHARS
-  return `${text.slice(0, MAX_OUTPUT_CHARS)}\n… [truncated ${dropped} characters]`
+  // Cut between characters: half of one, left at the end, is nothing a request can carry (shared/well-formed.ts).
+  const kept = cutAt(text, MAX_OUTPUT_CHARS - CUT_NOTE_ROOM)
+  return `${kept}\n… [truncated ${text.length - kept.length} characters]`
 }
 
 function str(args: Record<string, unknown>, key: string): string {
@@ -241,6 +257,12 @@ const path = require('node:path')
 const { start, directory, workspace, pattern, flags, maxBytes, maxHits, skipped } = workerData
 const regex = new RegExp(pattern, flags)
 const skip = new Set(skipped)
+// The beginning of a line, cut between characters: a line that ends with the first half of one is shorter by that half.
+function cut(line, max) {
+  if (line.length <= max) return line
+  const last = line.charCodeAt(max - 1)
+  return line.slice(0, last >= 0xd800 && last <= 0xdbff ? max - 1 : max)
+}
 function* walk(dir) {
   let entries = []
   try {
@@ -270,7 +292,7 @@ function search() {
     const lines = text.split('\\n')
     for (let i = 0; i < lines.length; i++) {
       if (!regex.test(lines[i])) continue
-      hits.push(rel + ':' + (i + 1) + ': ' + lines[i].trim().slice(0, 300))
+      hits.push(rel + ':' + (i + 1) + ': ' + cut(lines[i].trim(), 300))
       if (hits.length >= maxHits) return { hits, stopped: true }
     }
   }
@@ -618,7 +640,7 @@ export class ToolRegistry {
     // cut short. Saying exactly what is wrong lets it send the call again, instead of the tool
     // running on half an input.
     const problem = checkArguments(tool.parameters, args)
-    if (problem) return `Error: invalid arguments for ${name}: ${problem}. Received: ${rawArgs.slice(0, 2000)}`
+    if (problem) return `Error: invalid arguments for ${name}: ${problem}. Received: ${cutAt(rawArgs, 2000)}`
     try {
       const result: unknown = await tool.spec.run(args, ctx)
       if (typeof result === 'string') return truncate(result)

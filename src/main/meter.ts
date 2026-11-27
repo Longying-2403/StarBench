@@ -4,11 +4,13 @@
 // full record of a request, and only while a plugin watches.)
 // Nothing in this file depends on Electron.
 
-import { IMAGE_TOKENS } from '../shared/attachments.ts'
+import { IMAGE_TOKENS, fileNote, pageTokens, pdfNote, pdfTokens } from '../shared/attachments.ts'
 import { SUMMARY_CLOSE, SUMMARY_OPEN } from '../shared/compaction.ts'
 import { estimateTokens, normalizeUsage } from '../shared/stats.ts'
 import type { ContextParts, StepMeasure } from '../shared/stats.ts'
 import type { ChatMessage } from '../shared/types.ts'
+import { pdfWithheld } from './providers/attachments.ts'
+import type { PdfReach } from './providers/attachments.ts'
 import type { Connection, ModelRequest } from './providers/types.ts'
 
 export interface StepMeter {
@@ -36,16 +38,28 @@ export interface MeterHints {
 /**
  * A guess at what one message weighs as it is sent, by what it is: what was said, the summary of
  * a compacted conversation that a user message begins with (main/compaction.ts), and tool calls
- * with what the tools returned.
+ * with what the tools returned. A PDF weighs what goes for it to `connection`: its pages at what its
+ * service counts for one where it goes as it is, and else what the model is told of it
+ * (`pdfWithheld`, as `userText` decides); with no connection given, the latter.
  */
-export function messageWeight(message: ChatMessage): { said: number; summary: number; tools: number } {
+export function messageWeight(message: ChatMessage, connection?: PdfReach): { said: number; summary: number; tools: number } {
   if (message.role === 'tool') return { said: 0, summary: 0, tools: estimateTokens(message.content) }
   if (message.role === 'assistant') {
     const tools = (message.tool_calls ?? []).reduce((sum, call) => sum + estimateTokens(call.name) + estimateTokens(call.arguments), 0)
     return { said: estimateTokens(message.content), summary: 0, tools }
   }
-  // What goes in front of what was typed: the text of a picked skill, and of the files put with the message. A picture weighs about the same whatever it shows.
-  const files = (message.attachments ?? []).reduce((sum, file) => sum + (file.kind === 'text' ? estimateTokens(file.text) : IMAGE_TOKENS), 0)
+  // What goes in front of what was typed: the text of a picked skill, and of the files put with the
+  // message, or what is told of a file whose content does not go. A picture weighs about the same
+  // whatever it shows; a PDF that goes as it is by its pages, one that is told of by its note.
+  const pdf = (file: Extract<NonNullable<typeof message.attachments>[number], { kind: 'pdf' }>): number => {
+    const why = pdfWithheld(file, connection)
+    return why ? estimateTokens(pdfNote(file, why)) : pdfTokens(file, pageTokens(connection?.kind))
+  }
+  const files = (message.attachments ?? []).reduce(
+    (sum, file) =>
+      sum + (file.kind === 'text' ? estimateTokens(file.text) : file.kind === 'file' ? estimateTokens(fileNote(file)) : file.kind === 'pdf' ? pdf(file) : IMAGE_TOKENS),
+    0
+  )
   const skill = (message.skill ? estimateTokens(message.skill.prompt) : 0) + files
   // The summary itself never holds the closing tag (it is taken out when the summary is put together).
   const end = message.content.startsWith(SUMMARY_OPEN) ? message.content.indexOf(SUMMARY_CLOSE) : -1
@@ -54,13 +68,16 @@ export function messageWeight(message: ChatMessage): { said: number; summary: nu
   return { said: estimateTokens(message.content.slice(cut)) + skill, summary: estimateTokens(message.content.slice(0, cut)), tools: 0 }
 }
 
-/** A guess at the weight of what a request carries, part by part. A part that weighs nothing is left out. */
-export function weigh(request: Pick<ModelRequest, 'system' | 'messages' | 'tools'>, hints: MeterHints = {}): ContextParts {
+/**
+ * A guess at the weight of what a request carries, part by part. A part that weighs nothing is
+ * left out. Its PDFs weigh what goes for them to its connection (`messageWeight`).
+ */
+export function weigh(request: Pick<ModelRequest, 'system' | 'messages' | 'tools'> & Partial<Pick<ModelRequest, 'connection'>>, hints: MeterHints = {}): ContextParts {
   let messages = 0
   let summary = 0
   let toolResults = 0
   for (const message of request.messages) {
-    const weight = messageWeight(message)
+    const weight = messageWeight(message, request.connection)
     messages += weight.said
     summary += weight.summary
     toolResults += weight.tools

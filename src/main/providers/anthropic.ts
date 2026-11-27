@@ -3,7 +3,7 @@
 import Anthropic from '@anthropic-ai/sdk'
 import type { ModelChoice, ModelInfo, ToolCall } from '../../shared/types.ts'
 import type { WebActivity } from '../../shared/types.ts'
-import { ImagesRefused, carriesImages, refusesImages, userImages } from './attachments.ts'
+import { DocumentsRefused, ImagesRefused, carriesDocuments, carriesImages, refusesDocuments, refusesImages, userDocuments, userImages } from './attachments.ts'
 import { isErrorResult, newReply, replayOf, searchNote, userText, withSearchNote, withToolResults } from './history.ts'
 import type { AssistantMessage, Connection, ModelReply, ModelRequest, ProviderAdapter } from './types.ts'
 import { CLAUDE_SEARCH_BLOCKS, WebLog, claudeCall, claudeResult } from './web-search.ts'
@@ -158,12 +158,14 @@ function toMessages(request: ModelRequest, withFallback: boolean, withSearch: bo
     if (message.role === 'user') {
       const text = userText(message, request.connection)
       const images = userImages(message, request.connection)
-      // Pictures go in front of the words about them, which is where Claude reads them best.
+      const documents = userDocuments(message, request.connection)
+      // PDFs and pictures go in front of the words about them, which is where Claude reads them best. A PDF carries its name as its title.
       const blocks: BlockParam[] = [
+        ...documents.map((pdf): BlockParam => ({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: pdf.data }, title: pdf.name })),
         ...images.map((image): BlockParam => ({ type: 'image', source: { type: 'base64', media_type: image.type, data: image.data } })),
         ...(text ? [{ type: 'text' as const, text }] : [])
       ]
-      out.push({ role: 'user', content: images.length ? blocks : text })
+      out.push({ role: 'user', content: images.length || documents.length ? blocks : text })
       continue
     }
 
@@ -340,6 +342,9 @@ export const anthropicAdapter: ProviderAdapter = {
           request = { ...request, connection: { ...request.connection, fast: false } }
           continue
         }
+        // The PDFs were what was turned down (too many pages, a request too large with them): the
+        // caller can send the message again with those told of by where they lie.
+        if (!message.content && !message.reasoning_content && carriesDocuments(request) && refusesDocuments(err)) throw new DocumentsRefused((err as Error).message)
         // The pictures were what was turned down, as a gateway in front of the API may do: the
         // caller can send the message again with those told in words.
         if (!message.content && !message.reasoning_content && carriesImages(request) && refusesImages(err)) throw new ImagesRefused((err as Error).message)

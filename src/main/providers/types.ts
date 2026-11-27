@@ -46,6 +46,24 @@ export interface Connection {
    */
   noImages?: boolean
   /**
+   * Send the PDFs the person attached as they are. Set only for a service that reads them
+   * (`readsPdfs` in shared/attachments.ts); any other model is told where they lie instead.
+   */
+  pdfs?: boolean
+  /**
+   * Set once the service turned down the PDFs of a request (`DocumentsRefused` in attachments.ts),
+   * or a request with them stayed too long for the model after the conversation was compacted. The
+   * PDFs are then told of by where they lie, as for a service that reads none.
+   */
+  noDocuments?: boolean
+  /**
+   * The most a PDF may be guessed to weigh, in tokens, and still go as it is: what the model's
+   * context holds less the instructions and the tools, set by the turn where the size of the
+   * context is known (`pdfRoomOf` in agent.ts). A larger one is told of by where it lies from the
+   * start, rather than after a compaction that could not have made room for it.
+   */
+  pdfRoom?: number
+  /**
    * Set when requests are paid for by the signed-in person's ChatGPT plan. Its tokens last an
    * hour, so `token` is asked before every request: it resolves with one that is good now, getting
    * a new one when needed. `rejected` names a token the service has just turned down.
@@ -121,7 +139,8 @@ export interface ModelRequest {
   /**
    * Called when the service turned down the level of thinking `connection.reasoningEffort` named
    * (the model takes none, or not that one) and then took the request without one. `said` is the
-   * service's refusal in its own words. Only the two OpenAI formats find out this way (effort.ts).
+   * service's refusal in its own words. The two OpenAI formats find out this way (effort.ts), and
+   * Gemini's own API (`refusesLevel` in gemini.ts).
    */
   onEffortRefused?(said: string): void
   /**

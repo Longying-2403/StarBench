@@ -1,5 +1,6 @@
 // Run with: node --test test/toasts.test.ts
 import assert from 'node:assert/strict'
+import { readFile } from 'node:fs/promises'
 import { test } from 'node:test'
 import type { TestContext } from 'node:test'
 import { TOAST_LIMIT, TOAST_MS, ToastStore } from '../src/shared/toasts.ts'
@@ -133,4 +134,18 @@ test('only so many are shown at once: the oldest that would have left anyway mak
   // And a new one is never the one pushed out.
   toasts.add({ title: '提示 4' })
   assert.deepEqual(titles(), ['提示 4', '出错 4', '出错 3'])
+})
+
+test('the band of a notice blinks a few times for what is to be minded or has failed, and for nothing else', async () => {
+  // Read as it is in the checkout, whichever way its lines end.
+  const css = await readFile(new URL('../src/renderer/src/styles.css', import.meta.url), 'utf8')
+  const rule = /\.toast-warning::before,\s*\.toast-error::before\s*\{\s*animation:\s*toast-band\s+\d+ms\s+[a-z-]+\s+(\d+);\s*\}/.exec(css)
+  assert.ok(rule, 'the bands of warnings and failures blink')
+  // A few times as the notice comes, and then still: a failure stays until it is closed, and would blink as long.
+  assert.ok(Number(rule[1]) >= 2 && Number(rule[1]) <= 5, `blinks ${rule[1]} times`)
+  assert.doesNotMatch(css, /animation:\s*toast-band[^;]*infinite/)
+  // The quiet kinds stay quiet.
+  assert.doesNotMatch(css, /\.toast-(?:info|success)::before/)
+  // And nothing blinks for someone whose system is set to less movement.
+  assert.match(css, /@media \(prefers-reduced-motion: reduce\) \{\s*\.toast,\s*\.toast-warning::before,\s*\.toast-error::before \{\s*animation: none;/)
 })

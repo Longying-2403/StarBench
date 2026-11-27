@@ -969,6 +969,8 @@ body {
   background: color-mix(in srgb, var(--danger) 10%, transparent);
   color: var(--danger);
   white-space: pre-wrap;
+  /* What a service or git said may hold a whole path, which has no place to break at. */
+  overflow-wrap: anywhere;
 }
 .reasoning {
   margin-bottom: 6px;
@@ -3223,6 +3225,18 @@ a.btn {
   width: 4px;
   background: var(--toast);
 }
+/* Something to mind, or something that failed: its band blinks a few times as the notice comes,
+   so that it is not taken for one more of the quiet ones, and then stands still. One that went
+   on blinking would pull at the eye for as long as it is there, and a failure stays until closed. */
+.toast-warning::before,
+.toast-error::before {
+  animation: toast-band 700ms ease-in-out 5;
+}
+@keyframes toast-band {
+  50% {
+    opacity: 0.15;
+  }
+}
 .toast-words {
   flex: 1;
   min-width: 0;
@@ -3236,6 +3250,8 @@ a.btn {
 }
 .toast-text {
   color: var(--muted);
+  /* A text of several lines, such as one line for each file that was not added, keeps them. */
+  white-space: pre-line;
 }
 .toast-link {
   align-self: flex-start;
@@ -3278,7 +3294,9 @@ a.btn {
   }
 }
 @media (prefers-reduced-motion: reduce) {
-  .toast {
+  .toast,
+  .toast-warning::before,
+  .toast-error::before {
     animation: none;
   }
   /* The notice still goes when its time is up; the time is just not drawn. */
@@ -4115,4 +4133,261 @@ a.btn {
   overflow-wrap: anywhere;
   font-family: var(--mono);
   font-size: 12.5px;
+}
+
+/* Worktrees (Worktree.tsx). In the bar above the message box of a new chat, right of its folder:
+   the switch that puts the chat into a worktree of the repository. Quiet like the folder beside
+   it until it is on; then the name of the worktree to be made stands after it. */
+.wt-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: 13px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.wt-switch:hover:not(:disabled) {
+  border-color: var(--border);
+  color: var(--text);
+}
+.wt-switch:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.wt-switch[aria-checked='true'],
+.wt-switch[aria-checked='true']:hover {
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--text);
+}
+.wt-switch svg {
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+}
+.wt-track {
+  position: relative;
+  flex-shrink: 0;
+  width: 26px;
+  height: 14px;
+  border-radius: 999px;
+  background: var(--border);
+  transition: background-color 120ms ease;
+}
+.wt-track::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--muted);
+  transition:
+    left 120ms ease,
+    background-color 120ms ease;
+}
+.wt-switch[aria-checked='true'] .wt-track {
+  background: var(--accent);
+}
+.wt-switch[aria-checked='true'] .wt-track::after {
+  left: 14px;
+  background: var(--accent-text);
+}
+.wt-name,
+.wt-name-input {
+  padding: 1px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+.wt-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+}
+.wt-name:hover {
+  border-color: var(--accent);
+}
+.wt-name svg {
+  flex-shrink: 0;
+  width: 12px;
+  height: 12px;
+  color: var(--muted);
+}
+/* A worktree or a git branch of that name is there already. */
+.wt-name[data-taken],
+.wt-name[data-taken] svg {
+  border-color: var(--warn);
+  color: var(--warn);
+}
+.wt-name-input {
+  width: 16ch;
+  border-color: var(--accent);
+  outline: none;
+}
+
+/* In the bar of a conversation that works in a worktree: the worktree after its repository, how
+   many files it has changed, and the button that brings its work into the main folder. */
+.wt-sep {
+  color: var(--muted);
+}
+.composer-place .wt-place-name {
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 12.5px;
+}
+.wt-state {
+  color: var(--muted);
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+.wt-state[data-warn] {
+  color: var(--warn);
+}
+.wt-merge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 10px;
+  border: 1px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  border-radius: 6px;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  font-size: 12.5px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.wt-merge:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.wt-merge:disabled {
+  border-color: var(--border);
+  color: var(--muted);
+  cursor: default;
+}
+.wt-merge svg {
+  flex-shrink: 0;
+  width: 13px;
+  height: 13px;
+}
+
+/* The record a merge leaves in the conversation: what was merged where, the files on request,
+   and the way to take it back. Once taken back it is quiet, and offers nothing. */
+.wt-record {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  font-size: 13px;
+}
+.wt-record-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.wt-record-line > svg {
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+  color: var(--ok);
+}
+.wt-record-words {
+  flex: 1;
+  min-width: 0;
+}
+.wt-record-words .hint {
+  margin-left: 8px;
+}
+.wt-record-undone,
+.wt-record-undone .wt-record-line > svg {
+  color: var(--muted);
+}
+.wt-files {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 240px;
+  margin: 0 0 2px 22px;
+  overflow-y: auto;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--muted);
+}
+.wt-file {
+  display: flex;
+  gap: 10px;
+}
+.wt-file-change {
+  flex-shrink: 0;
+}
+.wt-file-added {
+  color: var(--ok);
+}
+.wt-file-modified {
+  color: var(--warn);
+}
+.wt-file-deleted {
+  color: var(--danger);
+}
+.wt-file-path {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+/* The button that throws work away, in the question before a conversation is deleted with its worktree. */
+.wt-danger,
+.wt-danger:hover:not(:disabled) {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+.wt-danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+}
+/* In the list: a conversation that works in a worktree of the repository it stands under. */
+.session-tree {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  margin: 2px 0 0 auto;
+  padding-left: 6px;
+  color: var(--accent);
+}
+.session-tree svg {
+  width: 13px;
+  height: 13px;
+}
+
+/* What can be done about a notice in the corner, there and then: quiet words in the colour of what can be pressed. */
+.toast-actions {
+  display: flex;
+  gap: 14px;
+  margin-top: 2px;
+}
+.toast-action {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.toast-action:hover {
+  text-decoration: underline;
 }

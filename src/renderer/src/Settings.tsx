@@ -6,6 +6,8 @@ import type { McpServerStatus, ModelChoice, ProviderInfo, ProviderKind, Settings
 import { ABOUT, buildLabel } from '../../shared/about.ts'
 import { CAP_MIN, SHARE_MAX, SHARE_MIN, isCap } from '../../shared/compaction.ts'
 import type { CompactionChange } from '../../shared/compaction.ts'
+import { SEND_KEYS, keysInText } from '../../shared/shortcuts.ts'
+import type { EnterKey } from '../../shared/shortcuts.ts'
 import { formatTokens, readWindow } from '../../shared/stats.ts'
 import { THEMES } from '../../shared/theme.ts'
 import type { Theme } from '../../shared/theme.ts'
@@ -16,7 +18,8 @@ import { CheckIcon, ChevronLeftIcon, MonitorIcon, MoonIcon, SunIcon } from './ic
 import { Notice } from './Notice.tsx'
 import { AutoUpdateRow, UpdateButton, UpdateStatus, useUpdates } from './UpdateCheck.tsx'
 import { UsageTab } from './UsagePage.tsx'
-import { errorText } from './util.ts'
+import { errorText, isMac } from './util.ts'
+import { worktreesApi } from './worktree-api.ts'
 
 const api = window.harness
 /** The shares of the context at which a conversation can be set to be compacted, in percent. */
@@ -107,6 +110,11 @@ function ProviderForm({
   const plainHttp = /^http:\/\//i.test(baseURL.trim()) && !sendsKeySafely(baseURL.trim())
   /** A key goes along when the form is saved: one typed in, or the stored one where the host stays. */
   const keyGoesAlong = Boolean(apiKey.trim()) || (draft.hasApiKey && !movedHost)
+  /**
+   * The key would go to such an address. It is not saved for it (settings-model.ts), so the form
+   * cannot be saved as it is: the notice under the key says why, and the button cannot be pressed.
+   */
+  const keyHeldBack = plainHttp && keyGoesAlong
 
   // The service's own list makes the model field a pick list. It is a convenience: typing still
   // works, and a provider that cannot be asked yet simply has no list.
@@ -122,6 +130,7 @@ function ProviderForm({
 
   const submit = async (e: FormEvent): Promise<void> => {
     e.preventDefault()
+    if (keyHeldBack) return
     setBusy(true)
     setError('')
     try {
@@ -215,7 +224,7 @@ function ProviderForm({
           {planOffered && !draft.hasApiKey && !local && '没有 API Key？点"返回"，可以改用 ChatGPT 套餐登录。'}
         </span>
       </label>
-      {plainHttp && keyGoesAlong ? (
+      {keyHeldBack ? (
         <Notice role="status">
           这个地址用的是 http://，又不是本机或局域网的 IP 地址，所以不能带着 API Key 保存：Key 会明文经过网络，按名字找到的电脑也可能被同一网络里的其他电脑冒充。请改用 https://；局域网里的服务器可以改填它的 IP 地址。
         </Notice>
@@ -246,7 +255,7 @@ function ProviderForm({
         <button type="button" className="btn" onClick={onBack}>
           返回
         </button>
-        <button type="submit" className="btn btn-primary" disabled={busy}>
+        <button type="submit" className="btn btn-primary" disabled={busy || keyHeldBack} data-tip={keyHeldBack ? '这个地址不能带着 API Key 保存，原因见上面的说明。' : undefined}>
           保存
         </button>
       </div>
@@ -634,6 +643,26 @@ function GeneralTab({ settings, onChanged }: { settings: Settings; onChanged: (s
     <div className="tab-body">
       <label className="setting-row">
         <span className="setting-words">
+          <span className="setting-name">按 Enter 键</span>
+          <span className="hint">
+            在输入框里按 Enter 键时做什么。选“发送消息”时，{keysInText('Shift+Enter', isMac)} 换行；选“换行”时，用 {keysInText(SEND_KEYS, isMac)} 或发送按钮发送。
+          </span>
+        </span>
+        <span className="setting-field">
+          <select
+            value={settings.enterKey}
+            onChange={(e) => {
+              setError('')
+              api.setEnterKey(e.target.value as EnterKey).then(onChanged, (err) => setError(errorText(err)))
+            }}
+          >
+            <option value="send">发送消息</option>
+            <option value="newline">换行</option>
+          </select>
+        </span>
+      </label>
+      <label className="setting-row">
+        <span className="setting-words">
           <span className="setting-name">统计用量和上下文</span>
           <span className="hint">
             在输入框下面显示当前对话的请求次数、用时、token 用量和上下文占用，数字随对话保存。为此每次请求都会向模型服务要一份用量统计：发给 OpenAI
@@ -740,6 +769,35 @@ function GeneralTab({ settings, onChanged }: { settings: Settings; onChanged: (s
                   onClick={() => {
                     setError('')
                     api.forgetSite(site).then(onChanged, (err) => setError(errorText(err)))
+                  }}
+                >
+                  移除
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+      <div className="setting-block">
+        <span className="setting-words">
+          <span className="setting-name">可以运行 git 的仓库</span>
+          <span className="hint">
+            在这些仓库里，StarBench 可以运行 git 来建立、合并和删除 worktree。运行时关掉钩子，不运行仓库配置里指定的程序，只做本地操作。第一次在一个仓库里打开 Worktree 开关时会问你。移除之后，StarBench 不再在那个仓库里运行 git：已经建好的 worktree 还在，要重新允许之后才能查看状态、合并或删除。
+          </span>
+        </span>
+        {settings.gitRepos.length === 0 ? (
+          <div className="hint">还没有。</div>
+        ) : (
+          <ul className="site-list">
+            {settings.gitRepos.map((folder) => (
+              <li key={folder} className="site-row">
+                <span className="site-name">{folder}</span>
+                <button
+                  type="button"
+                  className="btn btn-small"
+                  onClick={() => {
+                    setError('')
+                    worktreesApi.forget(folder).then(onChanged, (err) => setError(errorText(err)))
                   }}
                 >
                   移除

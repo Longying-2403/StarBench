@@ -2,11 +2,14 @@
 
 import type { Attachment, AttachmentsRead } from './attachments.ts'
 import type { CompactionChange, CompactionSettings } from './compaction.ts'
+import type { TurnFailure } from './failures.ts'
 import type { GitHubRepo } from './github.ts'
 import type { PermissionMode } from './permissions.ts'
+import type { EnterKey } from './shortcuts.ts'
 import type { SessionStats } from './stats.ts'
 import type { Theme } from './theme.ts'
 import type { UpdateEvent, UpdateState } from './update.ts'
+import type { MergeRecord, WorktreeInfo } from './worktree.ts'
 
 export interface ToolCall {
   id: string
@@ -196,7 +199,21 @@ export const isSessionIcon = (value: unknown): value is SessionIcon => (SESSION_
 export interface Session {
   id: string
   title: string
+  /** The folder the conversation works in: where its files are, and where a command runs. */
   workspace: string
+  /**
+   * Set for a conversation that works in a worktree of a repository (shared/worktree.ts): its
+   * `workspace` is the worktree's folder then, and in the list it belongs to the repository
+   * (`projectFolder`).
+   */
+  worktree?: WorktreeInfo
+  /** The merges of its worktree's work into the main folder, in the order they were made. */
+  merges?: MergeRecord[]
+  /**
+   * The turns that ended in an error, with what went wrong (shared/failures.ts): shown at the end
+   * of each such turn whenever the conversation is opened, and sent to no model.
+   */
+  failures?: TurnFailure[]
   updatedAt: number
   /** Put away: kept, but out of the main list. */
   archived?: boolean
@@ -209,7 +226,7 @@ export interface Session {
   stats?: SessionStats
 }
 
-export type SessionSummary = Pick<Session, 'id' | 'title' | 'workspace' | 'updatedAt' | 'archived' | 'icon'> & {
+export type SessionSummary = Pick<Session, 'id' | 'title' | 'workspace' | 'worktree' | 'updatedAt' | 'archived' | 'icon'> & {
   /** A turn of the session is under way, or it is being compacted. Said of the sessions that are; absent of the rest. */
   running?: true
 }
@@ -469,11 +486,18 @@ export interface Settings {
   titles: boolean
   /** Whether the list of conversations says under each one when it was last gone on with. It takes a line of each row. */
   sessionTimes: boolean
+  /** What the Enter key does in the message box: sends the message, or makes a new line (shared/shortcuts.ts). */
+  enterKey: EnterKey
   /**
    * The sites whose links in an answer open without the question first, the latest first: each
    * one the person said "do not ask again" for (`WebPlace.site` in shared/links.ts).
    */
   trustedSites: string[]
+  /**
+   * The repositories the person said git may be run in, by their folders, the latest first. The
+   * app runs git there to make, merge and take away worktrees (main/git.ts), and nowhere else.
+   */
+  gitRepos: string[]
 }
 
 /** The Claude models that answer faster on request, with nothing to apply for first. */
@@ -533,6 +557,21 @@ export function webSearchService(provider: Pick<ProviderInfo, 'kind' | 'baseURL'
  */
 export function searchWorksAt(service: WebSearchService | undefined, effort: ReasoningEffort): boolean {
   return service !== undefined && !(service === 'deepseek' && effort === 'none')
+}
+
+/**
+ * What keeps the model service in use from being asked, in the person's words: no key or sign-in
+ * yet, or no model chosen. Empty where nothing does, and where the settings are not read yet it
+ * is the first. The page says it before a message is sent; the main process says the same where
+ * it is asked for something the page does not stop first, such as compacting a conversation now.
+ */
+export function notReadyText(settings: Pick<Settings, 'ready' | 'model' | 'providers' | 'activeProviderId'> | null | undefined): string {
+  const active = settings?.providers.find((p) => p.id === settings.activeProviderId)
+  if (!settings?.ready) {
+    if (active?.auth !== 'chatgpt') return '请先在设置中填写 API Key'
+    return active.account?.signedIn ? '请先在设置中启用 ChatGPT 套餐额度' : '请先在设置中用 ChatGPT 登录'
+  }
+  return settings.model ? '' : '请先在右下角选择模型'
 }
 
 /** Starting points for the services the app knows how to talk to. */
@@ -654,6 +693,11 @@ export interface SendExtras {
   mode?: PermissionMode
   /** The files put with the message. */
   attachments?: Attachment[]
+  /**
+   * With the first message of a new chat in a repository: the conversation is to work in a
+   * worktree of that name, which is made before its turn begins (shared/worktree.ts).
+   */
+  worktree?: { name: string }
 }
 
 /** What became of a message that was sent. */
@@ -662,6 +706,8 @@ export interface Sent {
   id: string
   /** It went out as a plain chat (`plain` on the message), which is for the main process to say and not for the page. */
   plain?: true
+  /** The new conversation works in a worktree that was made for it: the worktree, and its folder, which is the conversation's `workspace`. */
+  worktree?: WorktreeInfo & { folder: string }
 }
 
 export type AgentEvent =
@@ -696,6 +742,13 @@ export type AgentEvent =
   | { type: 'compacted'; messages: StoredMessage[] }
   /** The service has counted the conversation as the compaction made at `at` left it: `after` tokens, in place of the guess. */
   | { type: 'compaction_counted'; at: number; after: number }
+  /**
+   * The work of the conversation's worktree was merged into the main folder, by the person or by
+   * the model. It can come at any time, in a turn or between two. `name` is that of the worktree.
+   */
+  | { type: 'merged'; record: MergeRecord; name: string }
+  /** The merge `id` of the conversation was taken back, at `at`. */
+  | { type: 'merge_undone'; id: string; at: number }
   /** `provider` is whose request failed, where the way out depends on that: which ChatGPT account, of the several that can be signed in. */
   | { type: 'error'; message: string; hint?: ErrorHint; provider?: string }
   /**
@@ -704,7 +757,7 @@ export type AgentEvent =
    */
   | {
       type: 'notice'
-      code: 'fast-mode-refused' | 'effort-refused' | 'tools-as-text' | 'stream-refused' | 'compaction-failed' | 'images-refused' | 'plain-call-dropped'
+      code: 'fast-mode-refused' | 'effort-refused' | 'tools-as-text' | 'stream-refused' | 'compaction-failed' | 'images-refused' | 'documents-refused' | 'document-too-long' | 'plain-call-dropped'
       message: string
       detail?: string
     }
@@ -795,6 +848,8 @@ export interface HarnessApi {
   setTitles(on: boolean): Promise<Settings>
   /** Shows, or no longer shows, under each conversation in the list when it was last gone on with. */
   setSessionTimes(on: boolean): Promise<Settings>
+  /** Has the Enter key in the message box send the message, or make a new line. */
+  setEnterKey(key: EnterKey): Promise<Settings>
   /** Changes whether, and from where on, conversations are compacted by themselves. What is left out stays as it is. */
   setCompaction(change: CompactionChange): Promise<Settings>
   /** The instructions the app itself gives every model, for showing them next to the person's own. */
@@ -890,8 +945,14 @@ export interface HarnessApi {
    * Resolves with nothing in it when the dialog is cancelled.
    */
   pickAttachments(): Promise<AttachmentsRead>
-  /** Reads files the person dropped on the message box, or pasted into it, the way picked ones are read. */
-  readAttachments(files: { name: string; data: ArrayBuffer }[]): Promise<AttachmentsRead>
+  /**
+   * Reads files the person dropped on the message box, or pasted into it, the way picked ones are
+   * read: each as its bytes (only its beginning, for one larger than any picture that is read
+   * whole), how large it is, and where it lies (`pathOf`).
+   */
+  readAttachments(files: { name: string; data: ArrayBuffer; size: number; path: string }[]): Promise<AttachmentsRead>
+  /** Where a dropped or pasted file lies on the disk, in full; empty for one that lies nowhere, such as a picture copied from a page. */
+  pathOf(file: File): string
   /**
    * Sets what the model may do in a saved conversation without asking. It counts from the next
    * tool call, also in a turn that is under way; a question that is already waiting still waits

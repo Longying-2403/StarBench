@@ -10,7 +10,7 @@ import type { AgentEvent, CompactionMark, CompactionReport, CustomPrompt, Permis
 import { STEP_SHARE, TARGET_SHARE, carriedTokens, compact, fitTokens, saysTooLong, sendable, storedWeight, windowSaid } from './compaction.ts'
 import { languageOf } from './language.ts'
 import { plainMessages, plainReply, plainWeight } from './plain.ts'
-import { ImagesRefused } from './providers/attachments.ts'
+import { DocumentsRefused, ImagesRefused, carriesDocuments, pdfWithheld } from './providers/attachments.ts'
 import { adapterFor } from './providers/index.ts'
 import type { Connection, ModelReply, ModelRequest, ProviderAdapter } from './providers/index.ts'
 import { ServiceError, ToolsRefused } from './providers/types.ts'
@@ -19,6 +19,7 @@ import type { SamplingRegistry } from './sampling.ts'
 import type { ToolRegistry } from './tools.ts'
 import { expected, fitParts, fitTo, halves, partsTotal, sentTokens } from '../shared/stats.ts'
 import type { CompactionDone, ContextParts, Fit, StepMeasure } from '../shared/stats.ts'
+import { whole, wholeText } from '../shared/well-formed.ts'
 import { meterStep, weigh } from './meter.ts'
 import type { MeterHints } from './meter.ts'
 import { watchExchange } from './trace.ts'
@@ -117,6 +118,12 @@ export interface TurnOptions {
    * told in words, so that later turns can start that way (`connection.noImages`).
    */
   onImagesRefused?(): void
+  /**
+   * Called when the service turned down the PDFs of a request, or a request with them stayed too
+   * long after the conversation was compacted, and the turn went on with the PDFs told of by where
+   * they lie, so that later turns can start that way (`connection.noDocuments`).
+   */
+  onDocumentsRefused?(): void
   /**
    * Where a record of each request and its reply goes while someone watches (trace.ts). `active`
    * is read before every request, so that watching can begin and end in the middle of a turn;
@@ -307,11 +314,28 @@ function toolKinds(tools: TurnOptions['tools']): (name: string) => 'builtin' | '
 const statusOf = (err: unknown): unknown => (typeof err === 'object' && err !== null ? (err as { status?: unknown }).status : undefined)
 
 /**
+ * A request with every text in it whole (shared/well-formed.ts): what the model is told, the
+ * conversation, and what is said of the tools. Half a character anywhere in it makes a body that
+ * services turn down, at this request and at every one after it for as long as the conversation
+ * holds that half: a result an earlier version cut in the middle of an emoji, or one a tool
+ * brought. Every request goes out through `ask`, whichever format the service takes, so this is
+ * the one place where that is put right; the conversation itself is left as it is kept.
+ */
+export function sound(request: ModelRequest): ModelRequest {
+  const system = whole(request.system)
+  const messages = wholeText(request.messages)
+  const tools = wholeText(request.tools)
+  if (system === request.system && messages === request.messages && tools === request.tools) return request
+  return { ...request, system, messages, tools }
+}
+
+/**
  * Makes one request to the model. A provider that is signed in to is asked for a token that is
  * good now; should the service turn that one down before anything arrived, a new one is
  * fetched and the request made once more.
  */
-async function ask(adapter: ProviderAdapter, request: ModelRequest): Promise<ModelReply> {
+async function ask(adapter: ProviderAdapter, asked: ModelRequest): Promise<ModelReply> {
+  const request = sound(asked)
   const { plan } = request.connection
   if (!plan) return adapter.complete(request)
   let arrived = false
@@ -407,6 +431,29 @@ function talkOf(opts: TurnOptions): Talk {
     window: opts.room?.window,
     fit: opts.room?.fit
   }
+}
+
+/** The parts of a request that are the same at every step of a turn: the instructions, the tools, and what the memory tells. */
+const FIXED_PARTS = ['system', 'custom', 'skills', 'memory', 'tools', 'pluginTools', 'mcpTools'] as const
+
+/**
+ * The most a PDF may be guessed to weigh and still go to the model as it is (`Connection.pdfRoom`):
+ * what the model's context holds, a twentieth kept for the reply, less what the instructions, the
+ * tools and the memory take. No compaction could make room for a larger one. Undefined where the
+ * size of the context is not known.
+ */
+function pdfRoomOf(talk: Talk): number | undefined {
+  if (talk.window === undefined) return undefined
+  const parts = weigh(requestOf(talk), hintsOf(talk))
+  const fixed = FIXED_PARTS.reduce((sum, part) => sum + (parts[part] ?? 0), 0)
+  return Math.max(0, Math.floor(talk.window * 0.95) - fixed)
+}
+
+/** The talk, with how much one PDF may weigh set on its connection (`pdfRoomOf`). */
+function fitPdfs(talk: Talk): Talk {
+  const pdfRoom = pdfRoomOf(talk)
+  if (pdfRoom !== undefined) talk.connection = { ...talk.connection, pdfRoom }
+  return talk
 }
 
 /** What plugins add to a request to this connection. */
@@ -525,7 +572,8 @@ function weigher(talk: Talk, parts: ContextParts, weight: { tokens: number; scal
   // with tools, the messages would not add up to the request, and clearing old results would
   // seem to free what was never sent.
   const plain = talk.opts.plain === true
-  const text = (message: StoredMessage): number => weight.scale * (plain ? plainWeight(message) : storedWeight(message))
+  // A PDF weighs what goes for it to the connection as it is now: a refusal of PDFs changes that within the turn.
+  const text = (message: StoredMessage): number => weight.scale * (plain ? plainWeight(message, talk.connection) : storedWeight(message, talk.connection))
   const beyond = (message: StoredMessage): number =>
     !plain && message.role === 'assistant' && message.origin?.tokens && message.origin.provider === talk.connection.provider ? Math.max(0, message.origin.tokens - text(message)) : 0
   let visible = 0
@@ -682,14 +730,40 @@ function resultBudget(talk: Talk, calls: number): number | undefined {
  * Takes what a turn takes, of which it uses what a request is made from; `room` has to be there.
  */
 export function compactConversation(opts: TurnOptions): Promise<CompactionReport> {
-  return makeRoom(talkOf(opts), 'asked')
+  return makeRoom(fitPdfs(talkOf(opts)), 'asked')
 }
 
 export async function runTurn(asked: TurnOptions): Promise<void> {
   // A plain chat has no tools from here on, whatever the caller handed over: none to offer, none to run.
   const opts = asked.plain === true ? plainTurn(asked) : asked
-  const talk = talkOf(opts)
+  const talk = fitPdfs(talkOf(opts))
   const stored = opts.messages
+  // A PDF of the message just sent that is longer than the model's context holds goes as a note
+  // from the start (`pdfWithheld`), instead of after a compaction that could not make room for it.
+  // The person is told once, at the turn it came with.
+  const newest = stored.findLast((message) => message.role === 'user')
+  if (newest?.role === 'user' && (newest.attachments ?? []).some((file) => file.kind === 'pdf' && pdfWithheld(file, talk.connection) === 'long')) {
+    opts.emit({
+      type: 'notice',
+      code: 'document-too-long',
+      message: "A PDF of this message is longer than this model's context holds, so it was not sent as it is: the model was told where it lies instead."
+    })
+  }
+
+  /**
+   * From now on the PDFs of the conversation are told of by where they lie (`Connection.noDocuments`),
+   * and the person is told why, with the service's own words for looking it up.
+   */
+  const dropDocuments = (detail: string): void => {
+    talk.connection = { ...talk.connection, noDocuments: true }
+    opts.emit({
+      type: 'notice',
+      code: 'documents-refused',
+      message: 'The model service did not take the PDFs, so they were left out and the model was told where they lie instead.',
+      detail
+    })
+    opts.onDocumentsRefused?.()
+  }
 
   /** Makes one request with the conversation as it stands, measured and written down as far as anyone asked for that. */
   const exchange = async (): Promise<ModelReply> => {
@@ -716,9 +790,17 @@ export async function runTurn(asked: TurnOptions): Promise<void> {
         detail: err.message
       })
       opts.onImagesRefused?.()
-      return ask(talk.adapter, next())
+      // A request that also carries PDFs may be turned down for those next.
+      return ask(talk.adapter, next()).catch(withoutDocuments)
+    }
+    /** The same for the PDFs the person attached: the request made again with those told of by where they lie (`Connection.noDocuments`). */
+    const withoutDocuments = (err: unknown): Promise<ModelReply> => {
+      if (!(err instanceof DocumentsRefused) || talk.connection.noDocuments) throw err
+      dropDocuments(err.message)
+      return ask(talk.adapter, next()).catch(withoutImages)
     }
     const reply = await ask(talk.adapter, next())
+      .catch(withoutDocuments)
       .catch(withoutImages)
       .catch((err: unknown) => {
         if (!(err instanceof ToolsRefused) || talk.connection.textTools) throw err
@@ -736,8 +818,8 @@ export async function runTurn(asked: TurnOptions): Promise<void> {
           detail: err.message
         })
         opts.onToolsRefused?.()
-        // A server that takes no tools may take no pictures either, and says so only now.
-        return ask(talk.adapter, next()).catch(withoutImages)
+        // A server that takes no tools may take no pictures or PDFs either, and says so only now.
+        return ask(talk.adapter, next()).catch(withoutDocuments).catch(withoutImages)
       })
       .catch((err: unknown) => {
         if (watch) opts.trace?.record(watch.failed(err))
@@ -769,6 +851,18 @@ export async function runTurn(asked: TurnOptions): Promise<void> {
     return reply
   }
 
+  /**
+   * A request still too long for the model after the conversation was compacted, or one that could
+   * not be compacted. Where it carries PDFs, those are as a rule what is too much (each page goes as
+   * its text and a picture of it), so it is made once more with them told of by where they lie.
+   * Anything else stays the error it was.
+   */
+  const tooLongWithDocuments = (err: unknown): Promise<ModelReply> => {
+    if (opts.signal.aborted || !saysTooLong(err) || talk.connection.noDocuments || !carriesDocuments(requestOf(talk))) throw err
+    dropDocuments(err instanceof Error ? err.message : String(err))
+    return exchange()
+  }
+
   try {
     for (let step = 0; step < MAX_STEPS; step++) {
       // Before the request: the conversation is compacted once it has grown to the line drawn for it.
@@ -776,9 +870,12 @@ export async function runTurn(asked: TurnOptions): Promise<void> {
       // A stop while the summary was written ends the turn like a stop anywhere else.
       if (opts.signal.aborted) return
       let reply = await exchange().catch(async (err: unknown) => {
-        // The service says the conversation is too long. Compacted, it is sent once more.
-        if (opts.signal.aborted || !saysTooLong(err) || !(await makeRoom(talk, 'refused', err)).done) throw err
-        return exchange()
+        // The service says the conversation is too long. Compacted, it is sent once more; and where
+        // that cannot be done, or it is still too long, once more with its PDFs told of by where
+        // they lie, since one PDF can be more than a model takes (`tooLongWithDocuments`).
+        if (opts.signal.aborted || !saysTooLong(err)) throw err
+        if (!(await makeRoom(talk, 'refused', err)).done) return tooLongWithDocuments(err)
+        return exchange().catch(tooLongWithDocuments)
       })
       // The same, found out while the reply was being written: what came of it is dropped, and the page shows the conversation anew.
       if (reply.tooLong && !opts.signal.aborted && (await makeRoom(talk, 'refused')).done) reply = await exchange()

@@ -12,7 +12,7 @@ import { after, test } from 'node:test'
 import { compactConversation, runTurn } from '../src/main/agent.ts'
 import type { TurnOptions } from '../src/main/agent.ts'
 import { sendable } from '../src/main/compaction.ts'
-import { geminiBody, geminiContents, geminiLevels, keepPart } from '../src/main/providers/gemini.ts'
+import { GeminiError, geminiBody, geminiContents, geminiLevels, keepPart, refusesLevel } from '../src/main/providers/gemini.ts'
 import type { Part } from '../src/main/providers/gemini.ts'
 import { searchNote } from '../src/main/providers/history.ts'
 import type { Connection, ModelRequest } from '../src/main/providers/index.ts'
@@ -977,4 +977,102 @@ test('a Gemini conversation compacted between two steps of a turn keeps the call
     []
   )
   assert.equal((messages.at(-1) as Assistant).content, 'done')
+})
+
+/** What Google answered a request that named a level Gemini 4 Hydrogen does not take (2026-11-25, with the user's key). */
+const LEVEL_REFUSED = { code: 400, message: 'Thinking level MINIMAL is not supported for this model. Please retry with other thinking level.', status: 'INVALID_ARGUMENT' }
+/** And one that named a level for Gemma 4 31B, which thinks but takes no level. */
+const NO_LEVEL = { code: 400, message: 'Thinking level is not supported for this model.', status: 'INVALID_ARGUMENT' }
+/** The level a request named, as the stand-in was sent it. */
+const levelOf = (seen: Seen): string => seen.body.generationConfig?.thinkingConfig?.thinkingLevel ?? '(none)'
+/** What the person is told in a turn: the notices, with what the service said. */
+const noticesOf = (events: AgentEvent[]): unknown[] => events.flatMap((e) => (e.type === 'notice' ? [[e.code, e.detail]] : []))
+
+test('a refusal is one of the level of thinking when Google says so, in its words or by the name of the field', () => {
+  const said = (message: string, status?: number): GeminiError => new GeminiError(status ? `${message} (HTTP ${status} INVALID_ARGUMENT)` : message, status)
+  for (const message of [
+    LEVEL_REFUSED.message,
+    NO_LEVEL.message,
+    // The names of the fields, from a server that does not know them or cannot read the value.
+    'Invalid JSON payload received. Unknown name "thinkingLevel" at \'generation_config.thinking_config\': Cannot find field.',
+    `Invalid value at 'generation_config.thinking_config.thinking_level', "HUGE"`,
+    'Invalid JSON payload received. Unknown name "thinkingBudget" at \'generation_config.thinking_config\': Cannot find field.'
+  ]) {
+    assert.equal(refusesLevel(said(message, 400)), true, message)
+  }
+  assert.equal(refusesLevel(said('API key not valid. Please pass a valid API key.', 400)), false, 'a refusal over something else')
+  for (const status of [401, 403, 404, 408, 429, 500, 503]) {
+    assert.equal(refusesLevel(said(LEVEL_REFUSED.message, status)), false, `${status} does not say the request was at fault`)
+  }
+  assert.equal(refusesLevel(said(LEVEL_REFUSED.message)), false, 'without a status it was not the service that answered it')
+  assert.equal(refusesLevel(new Error(LEVEL_REFUSED.message)), false, 'only what the service answered counts')
+  assert.equal(refusesLevel(null), false)
+})
+
+test('a level of thinking the model does not take is left out at once: the person is told once, the choice is taken back, and the turn goes on without it', async () => {
+  const service = await fakeGemini((seen, count) => {
+    if (levelOf(seen) !== '(none)') return json({ error: LEVEL_REFUSED }, 400)
+    return {
+      body:
+        count === 2
+          ? geminiSse([piece([{ functionCall: { id: 'fc1', name: 'read_file', args: { path: 'a.txt' } }, thoughtSignature: 'SIG1' }], { finishReason: 'STOP' })])
+          : geminiSse([piece([{ text: 'It says hello.' }], { finishReason: 'STOP' })])
+    }
+  })
+  let takenBack = 0
+  const done = await turn(connection({ model: 'gemini-4-hydrogen', reasoningEffort: 'minimal' }, service.baseURL), [{ role: 'user', content: 'what is in a.txt?' }], {
+    onEffortRefused: () => takenBack++
+  })
+  assert.deepEqual(done.errors, [], 'the refusal does not stop the conversation')
+  assert.deepEqual(done.toolResults, ['1\thello from the file'])
+  assert.equal(done.text, 'It says hello.')
+  // Asked again without the level, and the next step of the turn does not name it either.
+  assert.deepEqual(service.posts().map(levelOf), ['minimal', '(none)', '(none)'])
+  const [refused, taken] = service.posts().map((seen) => seen.body)
+  // The same request, less the level: the summary of the thinking is still asked for.
+  assert.deepEqual(taken.generationConfig, { thinkingConfig: { includeThoughts: true } })
+  assert.deepEqual({ ...refused, generationConfig: taken.generationConfig }, taken)
+  // Told once, in Google's words, before anything of the reply; and whoever keeps the choice takes it back, once.
+  assert.deepEqual(noticesOf(done.events), [['effort-refused', `${LEVEL_REFUSED.message} (HTTP 400 INVALID_ARGUMENT)`]])
+  assert.ok(done.events.findIndex((e) => e.type === 'notice') < done.events.findIndex((e) => e.type === 'tool_start'))
+  assert.equal(takenBack, 1)
+})
+
+test('nothing is taken back when Google refuses the request without the level too, when none was named, or over something else; a busy moment between changes nothing', async () => {
+  const hi = (): ChatMessage[] => [{ role: 'user', content: 'hi' }]
+  let takenBack = 0
+  const more = { onEffortRefused: () => takenBack++ }
+
+  // Refused again without the level, for another reason: it was not only the level, so the choice stays and the error is shown.
+  const ORDER = { code: 400, message: 'Please ensure that multiturn requests alternate between user and model.', status: 'INVALID_ARGUMENT' }
+  const broken = await fakeGemini((seen) => json({ error: levelOf(seen) === '(none)' ? ORDER : LEVEL_REFUSED }, 400))
+  const failed = await turn(connection({ model: 'gemini-3.7-flash', reasoningEffort: 'minimal' }, broken.baseURL), hi(), more)
+  assert.deepEqual(broken.posts().map(levelOf), ['minimal', '(none)'])
+  assert.deepEqual(failed.errors, [`${ORDER.message} (HTTP 400 INVALID_ARGUMENT)`])
+  assert.deepEqual([noticesOf(failed.events), takenBack], [[], 0])
+
+  // Nothing was chosen, so there is nothing to leave out: the refusal is shown as it came, and not tried again.
+  const unasked = await fakeGemini(() => json({ error: NO_LEVEL }, 400))
+  const shown = await turn(connection({ model: 'gemma-4-31b-it' }, unasked.baseURL), hi(), more)
+  assert.equal(unasked.posts().length, 1)
+  assert.deepEqual([shown.errors.length, noticesOf(shown.events), takenBack], [1, [], 0])
+
+  // A refusal over something else is not taken for one of the level.
+  const wrongKey = await fakeGemini(() => json({ error: { code: 400, message: 'API key not valid. Please pass a valid API key.', status: 'INVALID_ARGUMENT' } }, 400))
+  const reported = await turn(connection({ model: 'gemini-3.8-flash', reasoningEffort: 'low' }, wrongKey.baseURL), hi(), more)
+  assert.deepEqual([wrongKey.posts().length, reported.errors.length, takenBack], [1, 1, 0])
+
+  // Busy right after the refusal: asked again as a busy service is, and the person is told once Google takes the request.
+  const busy = await fakeGemini((seen, count) =>
+    levelOf(seen) !== '(none)'
+      ? json({ error: NO_LEVEL }, 400)
+      : count === 2
+        ? json({ error: { code: 503, message: 'The model is overloaded. Please try again later.', status: 'UNAVAILABLE' } }, 503)
+        : { body: geminiSse([piece([{ text: 'ok' }], { finishReason: 'STOP' })]) }
+  )
+  const later = await turn(connection({ model: 'gemma-4-31b-it', reasoningEffort: 'low' }, busy.baseURL), hi(), more)
+  assert.deepEqual(busy.posts().map(levelOf), ['low', '(none)', '(none)'])
+  assert.deepEqual([later.text, later.errors], ['ok', []])
+  assert.deepEqual(noticesOf(later.events), [['effort-refused', `${NO_LEVEL.message} (HTTP 400 INVALID_ARGUMENT)`]])
+  assert.equal(takenBack, 1)
 })

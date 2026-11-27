@@ -6,6 +6,7 @@
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import type { SkillInfo } from '../shared/types.ts'
+import { cutAt } from '../shared/well-formed.ts'
 import type { ToolSpec } from './tools.ts'
 
 const SKILL_FILE = 'SKILL.md'
@@ -165,7 +166,7 @@ export class SkillStore {
         // A front matter name the model could not call by falls back to the folder name.
         const name = parsed.name && SKILL_NAME.test(parsed.name) ? parsed.name : entry.name
         if (!SKILL_NAME.test(name) || found.has(name)) continue
-        const description = (parsed.description ?? '').replace(/\s+/g, ' ').trim().slice(0, MAX_DESCRIPTION_CHARS)
+        const description = cutAt((parsed.description ?? '').replace(/\s+/g, ' ').trim(), MAX_DESCRIPTION_CHARS)
         found.set(name, { name, description, source: root.source, dir, ...(parsed.userOnly ? { userOnly: true } : {}) })
       }
     }

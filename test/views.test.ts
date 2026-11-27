@@ -79,6 +79,9 @@ test('a new chat goes by a key of its own until the main process has given it an
   const early = run(sending, text('s1', 'early ', false), { type: 'bound', key, id: 's1', onPage: true }, text('s1', 'later', true))
   assert.deepEqual(kinds(early.s1.items), ['user:first message', 'assistant:early later'])
   assert.equal(early.s1.partial, false)
+  // So is a notice that came before anything else of the turn, as one of a PDF too long for the model does.
+  const told = run(sending, said('s1', { type: 'notice', code: 'document-too-long', message: 'too long' }, false), { type: 'bound', key, id: 's1', onPage: true }, text('s1', 'read in parts', true))
+  assert.deepEqual(kinds(told.s1.items), ['user:first message', 'notice', 'assistant:read in parts'])
 
   // The person began another chat while the first was being sent: each keeps to its own key.
   const next = draftKey(4)

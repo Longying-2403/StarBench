@@ -104,7 +104,10 @@ const threeReads = (origin?: Assistant['origin']): StoredMessage[] => [
 test('old tool results are cleared where that is enough, and no model is asked', async () => {
   const messages = threeReads()
   // The person's words weigh 2, each call 7: its name and its arguments.
-  assert.deepEqual(messages.map(storedWeight), [2, 7, 3000, 7, 3000, 7, 1000])
+  assert.deepEqual(
+    messages.map((message) => storedWeight(message)),
+    [2, 7, 3000, 7, 3000, 7, 1000]
+  )
   const done = await compact(job(messages))
 
   // A quarter of the 8023 tokens stays as it is: the last call and its result. The two results before it go.

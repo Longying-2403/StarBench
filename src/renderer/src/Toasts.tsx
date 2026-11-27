@@ -41,6 +41,24 @@ export function ToastStack() {
                 {toast.link.label}
               </a>
             )}
+            {toast.actions && (
+              <div className="toast-actions">
+                {toast.actions.map((action) => (
+                  <button
+                    key={action.label}
+                    type="button"
+                    className="toast-action"
+                    onClick={() => {
+                      // Done once: the notice goes with the press.
+                      toasts.dismiss(toast.id)
+                      action.run()
+                    }}
+                  >
+                    {action.label}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
           <button type="button" className="icon-btn toast-close" aria-label="关闭通知" onClick={() => toasts.dismiss(toast.id)}>
             ×

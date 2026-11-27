@@ -68,8 +68,14 @@ export type ViewsAction =
   /** The page holds the conversation no longer. */
   | { type: 'dropped'; key: string }
 
-/** The events that only come while a turn is under way: one of them, of a conversation the page knows nothing of, says that it is at work. */
-const IN_TURN: ReadonlySet<AgentEvent['type']> = new Set(['reasoning_delta', 'text_delta', 'assistant_rewrite', 'assistant_done', 'tool_start', 'tool_result', 'web_activity', 'permission_request', 'stats'])
+/**
+ * The events that only come while a turn is under way: one of them, of a conversation the page
+ * knows nothing of, says that it is at work. A notice is one of them: it is said in a turn, or in a
+ * compaction the page itself asked for of a conversation it has open, and may come before anything
+ * else of a turn (one of a PDF too long for the model is told as the turn begins, before the page
+ * knows a new chat's id). A notice said outside both would leave a view that seems at work for good.
+ */
+const IN_TURN: ReadonlySet<AgentEvent['type']> = new Set(['reasoning_delta', 'text_delta', 'assistant_rewrite', 'assistant_done', 'tool_start', 'tool_result', 'web_activity', 'permission_request', 'stats', 'notice'])
 
 const put = (views: Views, key: string, view: View): Views => ({ ...views, [key]: view })
 const without = (views: Views, key: string): Views => {
@@ -112,8 +118,8 @@ export function viewsReducer(views: Views, action: ViewsAction): Views {
         next.running = false
         next.compacting = false
         // Off the page, the list says that something is new there. What was followed of the turn is
-        // kept until it is looked at: a turn that failed leaves nothing in the conversation's file
-        // to say so, and the line that says why is only here.
+        // kept until it is looked at: a notice of the turn is in no file, only here. The error a
+        // turn ended in is kept with the conversation (shared/failures.ts).
         if (!action.onPage) next.unseen = true
       }
       return put(views, action.key, next)

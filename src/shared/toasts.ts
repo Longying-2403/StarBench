@@ -7,6 +7,12 @@
  */
 export type ToastKind = 'info' | 'success' | 'warning' | 'error'
 
+/** Something to do about what a notice says, in a word or two. Doing it takes the notice away. */
+export interface ToastAction {
+  label: string
+  run(): void
+}
+
 export interface ToastInput {
   /** `info` unless said otherwise. */
   kind?: ToastKind
@@ -15,6 +21,8 @@ export interface ToastInput {
   text?: string
   /** A place on the web that goes with it, opened in the browser. */
   link?: { label: string; href: string }
+  /** What can be done about it there and then, such as looking at what was changed or taking it back. */
+  actions?: readonly ToastAction[]
   /** Stays until it is closed. A failure stays unless this says otherwise: it must not go by unseen. */
   sticky?: boolean
   /** Says what the notice is of. A second one of the same thing takes the place of the first, and `dismissKey` takes it away. */
@@ -27,6 +35,7 @@ export interface Toast {
   title: string
   text?: string
   link?: { label: string; href: string }
+  actions?: readonly ToastAction[]
   sticky: boolean
   key?: string
   /** Whether the time it has left stands still: the pointer is on it, or the keyboard is in it. */
@@ -61,6 +70,7 @@ export class ToastStore {
       title: input.title,
       ...(input.text ? { text: input.text } : {}),
       ...(input.link ? { link: { ...input.link } } : {}),
+      ...(input.actions?.length ? { actions: [...input.actions] } : {}),
       sticky: input.sticky ?? kind === 'error',
       ...(input.key !== undefined ? { key: input.key } : {}),
       paused: false

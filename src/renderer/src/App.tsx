@@ -7,7 +7,7 @@ import { hasHidden, revealHidden } from '../../shared/hidden-chars.ts'
 import { DEFAULT_PERMISSION_MODE, VIEW_ONLY_RESULT, runsOnItsOwnPart } from '../../shared/permissions.ts'
 import type { PermissionMode } from '../../shared/permissions.ts'
 import { formatShare, formatTokens } from '../../shared/stats.ts'
-import { CHATGPT_USAGE_URL, isLocalAddress } from '../../shared/types.ts'
+import { CHATGPT_USAGE_URL, isLocalAddress, notReadyText } from '../../shared/types.ts'
 import type {
   CompactionMark,
   ModelInfo,
@@ -25,7 +25,7 @@ import { Composer } from './Composer.tsx'
 import { FolderMenu } from './FolderMenu.tsx'
 import { FolderIcon, PromptIcon, StarIcon, WarningIcon } from './icons.tsx'
 import { whenExact, whenText } from '../../shared/when.ts'
-import { itemsFromMessages, lastSummaryAt, turnEnds } from './items.ts'
+import { itemsFromSession, lastSummaryAt, turnEnds } from './items.ts'
 import type { Item } from './items.ts'
 import { MEMORY_DENIED_LABEL, MEMORY_TOOL_LABELS, MemoryNotice, MemorySensitiveBar, isSensitiveMemoryCall, memoryCallSummary } from './MemoryNotice.tsx'
 import { MemoryPage } from './MemoryPage.tsx'
@@ -40,6 +40,7 @@ import { Sidebar } from './Sidebar.tsx'
 import { StatusRow } from './StatusRow.tsx'
 import { TipLayer } from './Tips.tsx'
 import { ToastStack, notify, toasts } from './Toasts.tsx'
+import type { ToastInput } from '../../shared/toasts.ts'
 import { BalanceNotices } from './Balance.tsx'
 import { balanceServiceOf } from '../../shared/usage.ts'
 import { newerBuild, useUpdateNotice, useUpdates } from './UpdateCheck.tsx'
@@ -48,6 +49,10 @@ import { TrustDialog } from './TrustDialog.tsx'
 import { TurnRail } from './TurnRail.tsx'
 import { EMPTY_VIEW, draftKey, unseenIds, viewsReducer, workingIds } from './views.ts'
 import { errorText, isWindows, useNow } from './util.ts'
+import { notAllowedText, suggestWorktreeName } from '../../shared/worktree.ts'
+import type { Kept, MergeRecord, RepoInfo, WorktreeInfo, WorktreeState } from '../../shared/worktree.ts'
+import { DiscardDialog, GitDialog, MergeLine, WorktreePlace, WorktreeSwitch, mergeNotice, nameIsFree, undoNotice } from './Worktree.tsx'
+import { worktreesApi } from './worktree-api.ts'
 
 const api = window.harness
 const LAST_WORKSPACE_KEY = 'lastWorkspace'
@@ -77,7 +82,8 @@ function callSummary(call: ToolCall): string {
   const memory = memoryCallSummary(call)
   if (memory !== null) return memory
   const args = parseArgs(call)
-  const value = args.command ?? args.path ?? args.pattern ?? args.name ?? ''
+  // Of a commit, the words it is made under.
+  const value = args.command ?? args.path ?? args.pattern ?? args.name ?? args.message ?? ''
   return typeof value === 'string' ? value : ''
 }
 
@@ -89,13 +95,34 @@ const TOOL_LABELS: Record<string, string> = {
   list_dir: '列出目录',
   search: '搜索',
   run_command: '执行命令',
+  // What a model has in a conversation that works in a worktree (main/worktree-tools.ts).
+  worktree_status: '查看 worktree 的状态',
+  worktree_commit: '提交 worktree 里的改动',
+  worktree_update: '把主文件夹的提交并进 worktree',
+  worktree_resolve: '给冲突的文件选定保留哪一边',
+  worktree_merge: '把 worktree 合并到主文件夹',
   ...MEMORY_TOOL_LABELS
 }
 
-/** What is shown of a call's arguments: each by its name, the value as written or as JSON; with none to name, the raw text. */
+/** Whether a call was given no argument at all: no text, or an object with nothing in it. */
+function noArgs(text: string): boolean {
+  if (!text.trim()) return true
+  try {
+    const parsed: unknown = JSON.parse(text)
+    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed) && Object.keys(parsed).length === 0
+  } catch {
+    return false
+  }
+}
+
+/**
+ * What is shown of a call's arguments: each by its name, the value as written or as JSON; with
+ * none to name, the raw text, so that what cannot be read is still seen as it is. A call that was
+ * given none has neither.
+ */
 function shownArgs(call: ToolCall): { entries: [string, string][]; raw: string | null } {
   const entries = Object.entries(parseArgs(call))
-  if (entries.length === 0) return { entries: [], raw: call.arguments }
+  if (entries.length === 0) return { entries: [], raw: noArgs(call.arguments) ? null : call.arguments }
   return { entries: entries.map(([key, value]): [string, string] => [key, typeof value === 'string' ? value : JSON.stringify(value, null, 2)]), raw: null }
 }
 
@@ -149,6 +176,8 @@ function ToolDetails({ call }: { call: ToolCall }) {
       </pre>
     )
   }
+  // Said in words: an empty pair of braces reads as if something were missing.
+  if (entries.length === 0) return <div className="hint">这次调用不带参数。</div>
   return (
     <>
       {entries.map(([key, value]) => (
@@ -385,6 +414,8 @@ function Transcript({
   workspace,
   running,
   providers,
+  mergeFocus,
+  onUndoMerge,
   onOpenSettings
 }: {
   items: Item[]
@@ -393,6 +424,10 @@ function Transcript({
   running: boolean
   /** The model services as they are set up: an error of a ChatGPT sign-in says which account it is of. */
   providers: readonly ProviderInfo[]
+  /** The merge the person asked to see from its notice: its record opens and comes into view. `n` counts the askings. */
+  mergeFocus: { id: string; n: number } | null
+  /** Takes a merge of the conversation's worktree back. */
+  onUndoMerge: (record: MergeRecord) => Promise<void>
   onOpenSettings: () => void
 }) {
   // What stands above the last summary is no longer sent to the model. It stays, paler, for the person to read.
@@ -405,6 +440,7 @@ function Transcript({
   const draw = (item: Item, faded: boolean): ReactNode => {
     const pale = faded ? ' faded' : ''
     if (item.kind === 'mark') return <MarkLine mark={item.mark} workspace={workspace} faded={faded} />
+    if (item.kind === 'merge') return <MergeLine record={item.record} now={now} focus={mergeFocus?.id === item.record.id ? mergeFocus.n : 0} faded={faded} onUndo={onUndoMerge} />
     if (item.kind === 'user') {
       return (
         <>
@@ -578,6 +614,30 @@ export function App() {
    */
   const [trust, setTrust] = useState<{ folder: string; entered?: true } | null>(null)
   /**
+   * The worktree the conversation on the page works in (shared/worktree.ts), and how it stands
+   * against the main folder: asked for when the conversation is opened, when a turn of it ends,
+   * and when its work is merged or a merge is taken back. No worktree for most conversations.
+   */
+  const [worktree, setWorktree] = useState<WorktreeInfo | null>(null)
+  const [treeState, setTreeState] = useState<WorktreeState | null>(null)
+  /** Why the state could not be asked for, in the words of whoever refused. */
+  const [treeProblem, setTreeProblem] = useState('')
+  /** What the folder of a new chat is to git: in a repository the chat can work in a worktree. Null until it is known, and once the conversation has begun. */
+  const [repo, setRepo] = useState<RepoInfo | null>(null)
+  /** Whether the new chat on the page is to work in a worktree, and the name the person gave it, if they gave one. */
+  const [tree, setTree] = useState<{ on: boolean; name: string }>({ on: false, name: '' })
+  /** The repository the person is being asked about: may git be run in it? */
+  const [gitAsk, setGitAsk] = useState<string | null>(null)
+  /** A merge the person asked for is under way. */
+  const [merging, setMerging] = useState(false)
+  /** The merge whose record is to open and come into view; `n` counts the askings, so that asking for the same one again counts. */
+  const [mergeFocus, setMergeFocus] = useState<{ id: string; n: number } | null>(null)
+  /**
+   * The conversation being deleted whose worktree keeps it from going unasked, while the person is
+   * asked about that: work that was not merged, files left in what was a worktree, or their own lock.
+   */
+  const [discard, setDiscard] = useState<{ id: string; name: string; kept: Kept } | null>(null)
+  /**
    * What the page holds of each conversation: the one on show, and every other that is at work
    * (views.ts). Several can be at work at once, and each goes on being followed while another is
    * on show.
@@ -639,6 +699,26 @@ export function App() {
     void api.listSessions().then(setSessions)
   }, [])
 
+  /** Asks how the worktree of a conversation stands. What comes back for a conversation the page has left by then is dropped. */
+  const refreshTree = useCallback((id: string): void => {
+    const here = (): boolean => sessionRef.current === id
+    worktreesApi.state(id).then(
+      (state) => {
+        if (!here()) return
+        setTreeState(state)
+        setTreeProblem('')
+      },
+      (err: unknown) => {
+        if (!here()) return
+        setTreeState(null)
+        setTreeProblem(errorText(err))
+      }
+    )
+  }, [])
+  /** What the event listener, registered once, calls of what is defined anew at every drawing of the page. */
+  const showMergeRef = useRef<(id: string, mergeId: string) => void>(() => {})
+  const undoMergeRef = useRef<(id: string, record: MergeRecord) => Promise<void>>(async () => {})
+
   useEffect(() => {
     void api.getSettings().then((s) => {
       setSettings(s)
@@ -676,6 +756,22 @@ export function App() {
         toasts.dismissKey(`permission:${id}`)
         modesAtWork.current.delete(id)
       }
+      // The work of a worktree went into the main folder, by the person's press or by the model:
+      // said in the corner whichever conversation is on show, with the way to look at it and to take it back.
+      if (event.type === 'merged') {
+        const { record } = event
+        notify({
+          kind: 'success',
+          title: `已合并到 ${record.target}`,
+          text: `来自 worktree ${event.name}：${record.fileCount} 个文件，${record.commits} 个提交`,
+          actions: [
+            { label: '查看', run: () => showMergeRef.current(id, record.id) },
+            { label: '撤回', run: () => void undoMergeRef.current(id, record) }
+          ]
+        })
+      }
+      // How the worktree of the conversation on show stands may have changed with any of these.
+      if ((event.type === 'turn_end' || event.type === 'merged' || event.type === 'merge_undone') && id === sessionRef.current) refreshTree(id)
       // A session at work elsewhere than on this page is shown as such in the list, which is
       // asked for anew when the first word of its turn comes and when the turn ends.
       if (id !== sessionRef.current) {
@@ -695,7 +791,7 @@ export function App() {
         if (viewsRef.current[id]?.partial) {
           void api.loadSession(id).then((session) => {
             if (!session || sessionRef.current !== id || viewsRef.current[id]?.running) return
-            dispatchViews({ type: 'opened', id, items: itemsFromMessages(session.messages), stats: session.stats ?? null, running: false })
+            dispatchViews({ type: 'opened', id, items: itemsFromSession(session), stats: session.stats ?? null, running: false })
           })
         }
       }
@@ -705,7 +801,34 @@ export function App() {
       // what the event finishes: the conversation says under a reply when it was done.
       dispatchViews({ type: 'event', key: id, event, at: Date.now(), onPage })
     })
-  }, [refreshSessions])
+  }, [refreshSessions, refreshTree])
+
+  // What the folder of a new chat is to git: asked when the folder changes, and when the person's
+  // yes to git in a repository does. Not for a conversation that has begun: where it works is settled.
+  const gitRepos = settings?.gitRepos
+  useEffect(() => {
+    if (sessionId || !workspace) {
+      setRepo(null)
+      return
+    }
+    let current = true
+    worktreesApi.repo(workspace).then(
+      (told) => current && setRepo(told),
+      () => current && setRepo(null)
+    )
+    return () => {
+      current = false
+    }
+  }, [sessionId, workspace, gitRepos])
+  // A new chat, or another folder for it, starts with the switch off.
+  useEffect(() => setTree({ on: false, name: '' }), [draft, workspace])
+
+  // How the worktree of the conversation on show stands.
+  useEffect(() => {
+    setTreeState(null)
+    setTreeProblem('')
+    if (sessionId && worktree) refreshTree(sessionId)
+  }, [sessionId, worktree, refreshTree])
 
   // The welcome note sits on top of everything, so Escape closes it and nothing underneath.
   useEffect(() => {
@@ -757,18 +880,20 @@ export function App() {
     setPage('chat')
     setSessionId(id)
     setWorkspace(session.workspace)
+    setWorktree(session.worktree ?? null)
     setMode(modesAtWork.current.get(id) ?? session.permissionMode ?? DEFAULT_PERMISSION_MODE)
     stickToBottom.current = true
     // Where the conversation before this one was scrolled to says nothing about this one.
     lastTop.current = 0
     const held = viewsRef.current[id]
     // A conversation the page has followed since its turn began shows as the page has it. While
-    // the turn runs its file is behind; and a turn that ended while another conversation was on
-    // show may have ended in an error, which no file holds. Any other is shown as its file has it.
+    // the turn runs its file is behind; and of a turn that ended while another conversation was on
+    // show the page may hold a notice, which no file does. Any other is shown as its file has it,
+    // with the errors that ended its turns in their places (shared/failures.ts).
     if (held && !held.partial && (held.running || held.unseen)) dispatchViews({ type: 'seen', key: id })
     else {
       const atWork = held?.running ?? sessions.find((s) => s.id === id)?.running === true
-      dispatchViews({ type: 'opened', id, items: itemsFromMessages(session.messages), stats: session.stats ?? null, running: atWork })
+      dispatchViews({ type: 'opened', id, items: itemsFromSession(session), stats: session.stats ?? null, running: atWork })
     }
   }
 
@@ -830,6 +955,8 @@ export function App() {
     sessionRef.current = null
     setPage('chat')
     setSessionId(null)
+    // Nor is the worktree the conversation before it worked in: a new chat is in the folder itself until the person says otherwise.
+    setWorktree(null)
     // What a conversation was allowed is not carried over to the next one.
     setMode(DEFAULT_PERMISSION_MODE)
     if (dir && trusted(dir)) enterWorkspace(dir)
@@ -840,11 +967,59 @@ export function App() {
     }
   }
 
-  const removeSession = async (id: string): Promise<void> => {
+  /** Deletes a conversation whose worktree, if it had one, is gone or has nothing of its own. */
+  const finishRemove = async (id: string): Promise<void> => {
     await api.deleteSession(id)
     if (id === sessionId) newChat()
     dispatchViews({ type: 'dropped', key: id })
     refreshSessions()
+  }
+
+  /**
+   * Said when a conversation was not deleted because its worktree cannot be taken away: git may
+   * not be run in its repository any more. The bar above the message box of that conversation is
+   * where the person gives their yes again.
+   */
+  const notAllowedNotice = (id: string, name: string): ToastInput => ({
+    kind: 'warning',
+    sticky: true,
+    title: '没有删除：这个仓库里现在不能运行 git',
+    text: notAllowedText(name),
+    actions: [{ label: '打开会话', run: () => void openSession(id) }]
+  })
+
+  const removeSession = async (id: string): Promise<void> => {
+    // The worktree a conversation works in goes with it. One that holds work the main folder
+    // does not have is asked about first: deleting it throws that work away.
+    const tree = sessions.find((s) => s.id === id)?.worktree
+    if (!tree) return finishRemove(id)
+    try {
+      const gone = await worktreesApi.remove(id)
+      // Locked by the person themselves, it is asked about as well: their word that it stays, until they say otherwise here.
+      if (gone.kind === 'unmerged' || gone.kind === 'left' || gone.kind === 'locked') return setDiscard({ id, name: tree.name, kept: gone })
+      if (gone.kind === 'not-allowed') return void notify(notAllowedNotice(id, tree.name))
+      await finishRemove(id)
+    } catch (err) {
+      // What git said can be long, a whole path among it: it is said in the corner, where there is room for it.
+      notify({ kind: 'error', title: '没有删除这个会话', text: errorText(err) })
+    }
+  }
+
+  /**
+   * The person's yes to that question. The question stays open until the conversation is gone:
+   * what goes wrong on the way is said in it (`DiscardDialog`).
+   */
+  const discardAndRemove = async (): Promise<void> => {
+    if (!discard) return
+    const { id, name } = discard
+    const gone = await worktreesApi.remove(id, { discard: true })
+    if (gone.kind === 'not-allowed') {
+      setDiscard(null)
+      notify(notAllowedNotice(id, name))
+      return
+    }
+    await finishRemove(id)
+    setDiscard(null)
   }
 
   const renameSession = async (id: string, title: string): Promise<void> => {
@@ -923,8 +1098,20 @@ export function App() {
     const sentAt = Date.now()
     dispatchViews({ type: 'user', key, text, skill, attachments, at: sentAt })
     const sentMode = mode
+    // A new chat that is to work in a worktree: made under the name on the switch, or, where that
+    // one has been taken meanwhile, under the next free one. The message is sent either way.
+    const askedName = tree.name
+    const treeName = !sessionId && tree.on && repo?.kind === 'main' && repo.allowed ? (nameIsFree(repo, askedName) ? askedName : suggestWorktreeName(repo.taken)) : ''
     try {
-      const { id, plain } = await api.send(sessionId, workspace, text, skill, { mode: sentMode, ...(attachments.length ? { attachments } : {}) })
+      const { id, plain, worktree: made } = await api.send(sessionId, workspace, text, skill, {
+        mode: sentMode,
+        ...(attachments.length ? { attachments } : {}),
+        ...(treeName ? { worktree: { name: treeName } } : {})
+      })
+      // Made under another name than the one on the switch: said, so that the name in the bar is no surprise.
+      if (made && askedName && made.name !== askedName) {
+        notify({ title: `这个 worktree 改叫 ${made.name}`, text: `名字 ${askedName} 已经被占用（有同名的 worktree 或 git 分支），换成了下一个空闲的名字。` })
+      }
       // The person may have gone to another conversation while the message was on its way: the
       // page stays where they are, and this one goes on in the list.
       const onPage = pageKeyRef.current === key
@@ -935,6 +1122,11 @@ export function App() {
       if (onPage) {
         sessionRef.current = id
         setSessionId(id)
+        // A worktree was made for it: its files are there from here on.
+        if (made) {
+          setWorkspace(made.folder)
+          setWorktree({ repo: made.repo, name: made.name, base: made.base })
+        }
         // Changed while the message was on its way: a new chat had no id to send the change with
         // then, and the turn began with the mode it was sent with. It goes by the button from here on.
         if (modeRef.current !== sentMode) {
@@ -948,6 +1140,61 @@ export function App() {
       // A sign-in that turned out to be over is the usual reason; the page then says so by the message box.
       void api.getSettings().then(setSettings)
     }
+  }
+
+  /** The switch that puts a new chat into a worktree. Turned on for the first time in a repository, the person is asked about git there first. */
+  const toggleTree = (on: boolean): void => {
+    if (!on) return setTree((now) => ({ ...now, on: false }))
+    if (repo?.kind !== 'main') return
+    if (!repo.allowed) return setGitAsk(workspace)
+    setTree((now) => ({ on: true, name: now.name || repo.suggested }))
+  }
+  /**
+   * Their yes to git in that repository, which is kept. Asked from the switch of a new chat, the
+   * switch is on with it; asked from a conversation whose worktree could not be looked at any
+   * more, that worktree is looked at again.
+   */
+  const allowGit = async (): Promise<void> => {
+    if (!gitAsk) return
+    setSettings(await worktreesApi.allow(gitAsk))
+    setGitAsk(null)
+    if (sessionId) refreshTree(sessionId)
+    else setTree((now) => ({ on: true, name: now.name || repo?.suggested || '' }))
+  }
+
+  /** Brings the work of the worktree of the conversation on show into the main folder. What comes of it that the conversation does not show itself is said in the corner. */
+  const mergeTree = async (): Promise<void> => {
+    if (!sessionId || merging) return
+    const id = sessionId
+    setMerging(true)
+    try {
+      const told = mergeNotice(await worktreesApi.merge(id))
+      if (told) notify(told)
+    } catch (err) {
+      notify({ kind: 'error', title: '没有合并', text: errorText(err) })
+    } finally {
+      setMerging(false)
+      if (sessionRef.current === id) refreshTree(id)
+    }
+  }
+
+  /** Takes a merge back. */
+  const undoMerge = async (id: string, record: MergeRecord): Promise<void> => {
+    try {
+      const outcome = await worktreesApi.undo(id, record.id)
+      notify(undoNotice(outcome) ?? { kind: 'success', title: '已撤回这次合并', text: `主文件夹的 ${record.target} 回到了合并之前，worktree 里的提交没有动。` })
+    } catch (err) {
+      notify({ kind: 'error', title: '没有撤回', text: errorText(err) })
+    }
+  }
+  undoMergeRef.current = undoMerge
+  /** Shows the record of a merge: in its conversation, opened and in view. */
+  showMergeRef.current = (id, mergeId) => {
+    void (async () => {
+      if (sessionRef.current !== id) await openSession(id)
+      setPage('chat')
+      setMergeFocus((now) => ({ id: mergeId, n: (now?.n ?? 0) + 1 }))
+    })()
   }
 
   const changeEffort = (effort: ReasoningEffort): void => {
@@ -1019,17 +1266,8 @@ export function App() {
   const active = settings?.providers.find((p) => p.id === settings.activeProviderId)
   /** Requests go to a signed-in ChatGPT account and count against its plan. */
   const onPlan = active?.auth === 'chatgpt' && active.ready
-  const blocked = !settings?.ready
-    ? active?.auth !== 'chatgpt'
-      ? '请先在设置中填写 API Key'
-      : active.account?.signedIn
-        ? '请先在设置中启用 ChatGPT 套餐额度'
-        : '请先在设置中用 ChatGPT 登录'
-    : !settings.model
-      ? '请先在右下角选择模型'
-      : !workspace
-        ? '请先选择工作文件夹'
-        : ''
+  // The same words the main process uses where it is asked for something the page did not stop (`notReadyText`).
+  const blocked = notReadyText(settings) || (!workspace ? '请先选择工作文件夹' : '')
   /** A new chat with nothing in it: the message box sits in the middle of the window. */
   const empty = items.length === 0
 
@@ -1141,7 +1379,15 @@ export function App() {
                   // A picture takes its room only once it is read, after the answer it belongs to was drawn.
                   onLoadCapture={keepEndInView}
                 >
-                  <Transcript items={items} workspace={workspace} running={running && !betweenTurns} providers={settings?.providers ?? []} onOpenSettings={() => setPage('settings')} />
+                  <Transcript
+                    items={items}
+                    workspace={workspace}
+                    running={running && !betweenTurns}
+                    providers={settings?.providers ?? []}
+                    mergeFocus={mergeFocus}
+                    onUndoMerge={(record) => (sessionId ? undoMerge(sessionId, record) : Promise.resolve())}
+                    onOpenSettings={() => setPage('settings')}
+                  />
                   {running && !permission && (
                     <div className="working">
                       {/* A slash that turns in four steps, as a terminal shows that it is busy, and the cursor behind it. */}
@@ -1175,12 +1421,32 @@ export function App() {
             <div className="composer-frame">
               <div className="composer-top">
                 {sessionId ? (
-                  <span className="composer-place" data-tip={`工作文件夹：${workspace}`}>
-                    <FolderIcon />
-                    <span>{workspaceName(workspace, settings?.workspaceNames, isWindows)}</span>
-                  </span>
+                  worktree ? (
+                    // A conversation in a worktree: the repository and the worktree, how its work stands, and the way to merge it.
+                    <WorktreePlace
+                      repoName={workspaceName(worktree.repo, settings?.workspaceNames, isWindows)}
+                      folder={workspace}
+                      info={worktree}
+                      state={treeState}
+                      problem={treeProblem}
+                      running={running}
+                      merging={merging}
+                      onMerge={() => void mergeTree()}
+                      // The person took their yes to git in this repository back: asked for again from here.
+                      onAllow={settings && !settings.gitRepos.some((dir) => folderKey(dir, isWindows) === folderKey(worktree.repo, isWindows)) ? () => setGitAsk(worktree.repo) : undefined}
+                    />
+                  ) : (
+                    <span className="composer-place" data-tip={`工作文件夹：${workspace}`}>
+                      <FolderIcon />
+                      <span>{workspaceName(workspace, settings?.workspaceNames, isWindows)}</span>
+                    </span>
+                  )
                 ) : (
-                  <FolderMenu workspace={workspace} names={settings?.workspaceNames} onChoose={chooseWorkspace} />
+                  <>
+                    <FolderMenu workspace={workspace} names={settings?.workspaceNames} onChoose={chooseWorkspace} />
+                    {/* In a repository, the chat can work in a worktree of it: chosen here, before its first message. */}
+                    {repo?.kind === 'main' && <WorktreeSwitch repo={repo} on={tree.on} name={tree.name || repo.suggested} onToggle={toggleTree} onName={(name) => setTree({ on: true, name })} />}
+                  </>
                 )}
                 {/* At the right end of the bar: what is not about the message being written (the person's own prompt, what plugins add). */}
                 <div className="dock-tools">
@@ -1261,7 +1527,8 @@ export function App() {
         )}
         {page === 'memory' && (
           <section className="page" aria-labelledby="memory-title">
-            <MemoryPage workspace={workspace} names={settings?.workspaceNames} providers={settings?.providers ?? []} focus={memoryFocus} onBack={() => setPage('chat')} />
+            {/* The notes of a workspace are those of the repository, also for a conversation in a worktree of it. */}
+            <MemoryPage workspace={worktree?.repo ?? workspace} names={settings?.workspaceNames} providers={settings?.providers ?? []} focus={memoryFocus} onBack={() => setPage('chat')} />
             {permission && <PermissionBar call={permission.call} workspace={workspace} onDecide={decide} />}
           </section>
         )}
@@ -1274,6 +1541,12 @@ export function App() {
 
       {/* Asked anew for each folder: what was typed into the one before is not left in it. */}
       {trust && <TrustDialog key={trust.folder} folder={trust.folder} onTrust={trustFolder} onCancel={distrustFolder} />}
+      {/* Before git is run in a repository for the first time: asked as the switch for a worktree is turned on there. */}
+      {gitAsk && <GitDialog key={gitAsk} folder={gitAsk} onAllow={allowGit} onCancel={() => setGitAsk(null)} />}
+      {/* Before a conversation is deleted whose worktree holds work that was not merged. */}
+      {discard && (
+        <DiscardDialog key={discard.id} name={discard.name} kept={discard.kept} onDiscard={discardAndRemove} onCancel={() => setDiscard(null)} />
+      )}
       {/* The question before a link of an answer is followed to the web; a site kept as one not to ask about again shows in the settings at once. */}
       <LinkAsk onSettings={setSettings} />
 

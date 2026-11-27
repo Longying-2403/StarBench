@@ -6,6 +6,7 @@
 
 import { folderKey } from './folders.ts'
 import { estimateTokens } from './stats.ts'
+import { cutAt } from './well-formed.ts'
 
 /**
  * What a note is about: who the person is and how they work; a correction they made, or a way of
@@ -186,7 +187,7 @@ export function listLimit(budget: number, window: number | undefined, local: boo
  */
 export function lineOf(entry: Pick<SnapshotEntry, 'id' | 'kind' | 'text' | 'details'>): string {
   const cut = entry.text.length > TEXT_MAX
-  const text = cut ? `${entry.text.slice(0, TEXT_MAX - 1)}…` : entry.text
+  const text = cut ? `${cutAt(entry.text, TEXT_MAX - 1)}…` : entry.text
   return `- [${entry.kind}] ${text} #${entry.id}${entry.details || cut ? ' +' : ''}`
 }
 

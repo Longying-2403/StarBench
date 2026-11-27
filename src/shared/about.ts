@@ -5,7 +5,7 @@
 
 export const ABOUT = {
   /** One sentence on what the app is. */
-  summary: '一个桌面端的 AI 编程助手外壳：选一个工作文件夹，用对话的方式让模型读写文件、搜索代码、执行命令。',
+  summary: '一个桌面端的 AI 编程助手：选一个工作文件夹，用对话让模型读写文件、搜索代码、执行命令。',
   /** The app is not finished: the settings format and the plugin interface may still change. */
   stage: 'Beta',
   /**
@@ -14,7 +14,7 @@ export const ABOUT = {
    * (`buildLabel` below writes it). It is counted by the author and written here by hand;
    * nothing works it out.
    */
-  revision: 13,
+  revision: 14,
   repo: { label: 'github.com/Longying-2403/StarBench', url: 'https://github.com/Longying-2403/StarBench' },
   issues: { label: 'GitHub Issues', url: 'https://github.com/Longying-2403/StarBench/issues' },
   /** Who makes it, each with what they are to the project and where to find them. */

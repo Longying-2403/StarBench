@@ -7,6 +7,7 @@ import { estimateTokens } from '../shared/stats.ts'
 import type { ChatMessage, StoredMessage, ToolCall } from '../shared/types.ts'
 import { storedWeight } from './compaction.ts'
 import { withSearchNote, withToolResults } from './providers/history.ts'
+import type { PdfReach } from './providers/attachments.ts'
 
 type Assistant = Extract<ChatMessage, { role: 'assistant' }>
 
@@ -144,11 +145,12 @@ export function plainReply(reply: Assistant): string[] {
  * weigh far less there than in a turn with tools, being cut short, and a reply is its text. For
  * whoever makes room in the model's context while a plain chat is under way (`weigher` in
  * agent.ts): measured by what the messages weigh otherwise, clearing old results would seem to
- * free what was never sent.
+ * free what was never sent. A message of the person weighs as in a turn with tools, its PDFs by
+ * what goes for them to `connection` (`storedWeight`).
  */
-export function plainWeight(message: StoredMessage): number {
+export function plainWeight(message: StoredMessage, connection?: PdfReach): number {
   if (message.role === 'compaction') return 0
   if (message.role === 'tool') return estimateTokens(resultBlock('tool', message.cleared ?? message.content))
   if (message.role === 'assistant') return estimateTokens(replyText(message))
-  return storedWeight(message)
+  return storedWeight(message, connection)
 }

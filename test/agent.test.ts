@@ -1,13 +1,13 @@
 // Drives the real agent loop against a fake OpenAI-compatible streaming server.
 import assert from 'node:assert/strict'
-import { mkdtemp, readFile, readdir } from 'node:fs/promises'
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import http from 'node:http'
 import type { AddressInfo } from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
 import OpenAI from 'openai'
-import { builtinPrompt, runTurn, systemPrompt, today } from '../src/main/agent.ts'
+import { builtinPrompt, runTurn, sound, systemPrompt, today } from '../src/main/agent.ts'
 import type { TurnOptions } from '../src/main/agent.ts'
 import { cannotStream, chatMessages, refusesStreamOptions, refusesTools } from '../src/main/providers/chat.ts'
 import type { Connection } from '../src/main/providers/index.ts'
@@ -15,6 +15,7 @@ import { ToolRegistry, registerBuiltinTools } from '../src/main/tools.ts'
 import type { ExchangeDraft } from '../src/main/trace.ts'
 import type { StepMeasure } from '../src/shared/stats.ts'
 import type { AgentEvent, ChatMessage, CustomPrompt, ReasoningEffort } from '../src/shared/types.ts'
+import { isWhole } from '../src/shared/well-formed.ts'
 import { keptReply } from './kept-reply.ts'
 
 /** A chat-completions provider at the fake server. */
@@ -145,6 +146,105 @@ test('a turn streams, runs tools with permission checks and feeds results back',
   })
   assert.equal(events.at(-1)?.type, 'turn_end')
   assert.equal(events.some((e) => e.type === 'error'), false)
+})
+
+test('half a character never leaves in a request: results are cut between characters, and a half the conversation holds goes out as a mark', async (t) => {
+  // The two halves of one emoji, by their numbers: a half alone cannot be written into a file.
+  const first = String.fromCharCode(0xd83c)
+  const emoji = first + String.fromCharCode(0xdf89)
+  const mark = String.fromCharCode(0xfffd)
+  const workspace = await mkdtemp(path.join(os.tmpdir(), 'starbench-agent-'))
+  t.after(() => rm(workspace, { recursive: true, force: true }))
+  // A file whose result is cut where the emoji stands: the number of the line and a tab come before the line, and
+  // a result longer than 30,000 units is cut 48 before that, which leaves room for the note of how much is missing.
+  await writeFile(path.join(workspace, 'big.txt'), `${'x'.repeat(29_949)}${emoji} and more ${'z'.repeat(200)}\n`)
+  // A line that a search finds, with the emoji where a line of a result is cut.
+  await writeFile(path.join(workspace, 'hit.txt'), `needle ${'y'.repeat(292)}${emoji} and more\n`)
+
+  const model = await fakeModel([
+    [...call(0, 'c1', 'read_file', { path: 'big.txt' }), ...call(1, 'c2', 'search', { pattern: 'needle' }), ...call(2, 'c3', 'half_tool', {})],
+    [chunk({ content: 'done' })]
+  ])
+  const tools = new ToolRegistry()
+  registerBuiltinTools(tools)
+  // A tool that brings half a character itself, and is described with one.
+  tools.register({ name: 'half_tool', description: `says half ${first}`, run: () => `half ${first}` }, 'demo')
+  // The conversation holds a result that an earlier version cut in the middle of an emoji: every request with it was turned down.
+  const old: ChatMessage = { role: 'tool', tool_call_id: 'c0', content: `1a2b3c4 a title ${first}` }
+  const messages: ChatMessage[] = [
+    { role: 'user', content: 'earlier' },
+    { role: 'assistant', content: '', tool_calls: [{ id: 'c0', name: 'list_dir', arguments: '{}' }] },
+    old,
+    { role: 'assistant', content: 'so far' },
+    { role: 'user', content: 'go' }
+  ]
+  const events: AgentEvent[] = []
+  await runTurn({
+    connection: connectionTo(model.baseURL),
+    workspace,
+    messages,
+    signal: new AbortController().signal,
+    tools,
+    alwaysAllowed: new Set(),
+    emit: (e) => events.push(e),
+    checkpoint: () => {},
+    requestPermission: async () => 'always'
+  })
+  await model.close()
+
+  assert.equal(model.requests.length, 2)
+  assert.equal(events.some((e) => e.type === 'error'), false)
+  // Every text of both requests, the names in them as well. Read back from the body, an escape that stands for half a character is that half.
+  const texts = (value: unknown): string[] =>
+    typeof value === 'string'
+      ? [value]
+      : Array.isArray(value)
+        ? value.flatMap(texts)
+        : typeof value === 'object' && value !== null
+          ? Object.entries(value).flatMap(([name, entry]) => [name, ...texts(entry)])
+          : []
+  for (const request of model.requests) for (const text of texts(request)) assert.ok(isWhole(text), JSON.stringify(text.slice(-40)))
+  const sent = (request: number, id: string): unknown => model.requests[request].messages.find((m) => m.role === 'tool' && m.tool_call_id === id)?.content
+
+  // What the conversation held goes out with the mark for what cannot be read, in both requests; the conversation is left as it is kept.
+  assert.equal(sent(0, 'c0'), `1a2b3c4 a title ${mark}`)
+  assert.equal(sent(1, 'c0'), `1a2b3c4 a title ${mark}`)
+  assert.equal(old.content, `1a2b3c4 a title ${first}`)
+  assert.equal(messages[2], old)
+
+  const results = Object.fromEntries(messages.flatMap((m) => (m.role === 'tool' ? [[m.tool_call_id, m.content]] : []))) as Record<string, string>
+  // The file: cut before the emoji and not inside it. What is missing is counted once, though the result is looked at
+  // twice on its way (by the tool, and when it is handed back): the emoji, the rest of the line and the empty line after it.
+  assert.equal(results.c1, `1\t${'x'.repeat(29_949)}\n… [truncated 215 characters]`)
+  assert.ok(results.c1.length <= 30_000)
+  assert.equal(sent(1, 'c1'), results.c1)
+  // The line the search found, likewise.
+  assert.equal(results.c2, `hit.txt:1: needle ${'y'.repeat(292)}`)
+  // What a tool brought is kept as it brought it, and goes out with the mark.
+  assert.equal(results.c3, `half ${first}`)
+  assert.equal(sent(1, 'c3'), `half ${mark}`)
+  const described = model.requests[0].tools as unknown as { function: { name: string; description: string } }[]
+  assert.equal(described.find((tool) => tool.function.name === 'half_tool')?.function.description, `says half ${mark}`)
+})
+
+test('a request that holds no half character is passed on as it is', () => {
+  const request = {
+    connection: connectionTo('http://127.0.0.1:1'),
+    system: 'You are helpful 🎉',
+    messages: [{ role: 'user', content: '你好 🎉' }] as ChatMessage[],
+    tools: [{ name: 'list_dir', description: 'Lists a folder', parameters: { type: 'object', properties: {} } }],
+    signal: new AbortController().signal,
+    onText: () => {},
+    onReasoning: () => {}
+  }
+  assert.equal(sound(request), request)
+  const half = String.fromCharCode(0xd83c)
+  const mended = sound({ ...request, system: `cut ${half}` })
+  assert.equal(mended.system, `cut ${String.fromCharCode(0xfffd)}`)
+  // What was whole in it is the very same thing.
+  assert.equal(mended.messages, request.messages)
+  assert.equal(mended.tools, request.tools)
+  assert.equal(mended.connection, request.connection)
 })
 
 test('stopping while a permission prompt is open cancels the remaining calls', async () => {

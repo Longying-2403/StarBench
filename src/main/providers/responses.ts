@@ -15,7 +15,7 @@ import OpenAI from 'openai'
 import { routesByConversation } from '../../shared/types.ts'
 import type { ToolCall } from '../../shared/types.ts'
 import { fetchModelInfo, fetchPlanModelInfo, listModels, listPlanModels } from '../models.ts'
-import { ImagesRefused, carriesImages, imageUrl, refusesImages, userImages } from './attachments.ts'
+import { DocumentsRefused, ImagesRefused, carriesDocuments, carriesImages, imageUrl, pdfUrl, refusesDocuments, refusesImages, userDocuments, userImages } from './attachments.ts'
 import { refusesEffort } from './effort.ts'
 import { newReply, replayOf, userText, withSearchNote, withToolResults } from './history.ts'
 import { ServiceError } from './types.ts'
@@ -46,12 +46,17 @@ export function responsesInput(request: Pick<ModelRequest, 'messages' | 'connect
     if (message.role === 'user') {
       const text = userText(message, request.connection)
       const images = userImages(message, request.connection)
-      // With pictures, the message is a list of parts: the text, then each picture as an address that holds it.
-      if (images.length === 0) input.push({ role: 'user', content: text })
+      const documents = userDocuments(message, request.connection)
+      // With pictures or PDFs, the message is a list of parts: each PDF under its name, the text, then each picture as an address that holds it.
+      if (images.length === 0 && documents.length === 0) input.push({ role: 'user', content: text })
       else {
         input.push({
           role: 'user',
-          content: [...(text ? [{ type: 'input_text' as const, text }] : []), ...images.map((image) => ({ type: 'input_image' as const, image_url: imageUrl(image), detail: 'auto' as const }))]
+          content: [
+            ...documents.map((pdf) => ({ type: 'input_file' as const, filename: pdf.name, file_data: pdfUrl(pdf) })),
+            ...(text ? [{ type: 'input_text' as const, text }] : []),
+            ...images.map((image) => ({ type: 'input_image' as const, image_url: imageUrl(image), detail: 'auto' as const }))
+          ]
         })
       }
     } else if (message.role === 'tool') {
@@ -307,6 +312,8 @@ async function run(request: ModelRequest, withSummary: boolean, levelRefused?: s
     if (effort !== 'default' && !streamed && refusesEffort(err)) {
       return run({ ...request, connection: { ...connection, reasoningEffort: 'default' } }, withSummary, (err as Error).message)
     }
+    // The PDFs were what the service turned down: the caller can send the message again with those told of by where they lie.
+    if (!streamed && carriesDocuments(request) && refusesDocuments(err)) throw new DocumentsRefused((err as Error).message)
     // The pictures were what the service turned down: the caller can send the message again with those told in words.
     if (!streamed && carriesImages(request) && refusesImages(err)) throw new ImagesRefused((err as Error).message)
     if (connection.plan && err instanceof OpenAI.APIError) {

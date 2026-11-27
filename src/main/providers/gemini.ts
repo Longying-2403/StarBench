@@ -34,7 +34,7 @@
 import type { ChatMessage, EffortLevel, ModelChoice, ModelInfo, ToolCall, WebActivity } from '../../shared/types.ts'
 import { isGemini } from '../../shared/types.ts'
 import type { ToolDefinition } from '../tools.ts'
-import { ImagesRefused, carriesImages, refusesImages, userImages } from './attachments.ts'
+import { DocumentsRefused, ImagesRefused, carriesDocuments, carriesImages, refusesDocuments, refusesImages, userDocuments, userImages } from './attachments.ts'
 import { isErrorResult, newReply, replayOf, searchNote, userText, withSearchNote, withToolResults } from './history.ts'
 import { newCallId } from './tool-text.ts'
 import type { AssistantMessage, Connection, ModelReply, ModelRequest, ProviderAdapter } from './types.ts'
@@ -291,13 +291,17 @@ function argsOf(raw: string): Bag {
 const resultOf = (content: string): Bag => (isErrorResult(content) ? { error: content } : { output: content })
 
 /**
- * What the person wrote, with the files they put with it, as the parts of a message: the pictures
- * first, as Google advises for a picture with a question, then the text, with the text files in it.
+ * What the person wrote, with the files they put with it, as the parts of a message: the PDFs and
+ * the pictures first, as Google advises for a document or a picture with a question, then the
+ * text, with the text files in it.
  */
 function userParts(message: Extract<ChatMessage, { role: 'user' }>, connection: Connection): Part[] {
-  const pictures: Part[] = userImages(message, connection).map((image) => ({ inlineData: { mimeType: image.type, data: image.data } }))
+  const files: Part[] = [
+    ...userDocuments(message, connection).map((pdf) => ({ inlineData: { mimeType: pdf.type, data: pdf.data } })),
+    ...userImages(message, connection).map((image) => ({ inlineData: { mimeType: image.type, data: image.data } }))
+  ]
   const text = userText(message, connection)
-  return text ? [...pictures, { text }] : pictures
+  return text ? [...files, { text }] : files
 }
 
 /**
@@ -455,8 +459,12 @@ const FINISHED = new Set(['STOP', 'FINISH_REASON_UNSPECIFIED'])
 /** Why a reply ended when the model ran out of room for its output. */
 const OUT_OF_ROOM = new Set(['MAX_TOKENS', 'CONTINUATION'])
 
-/** Makes one request and collects the reply into `message`, which keeps what arrived if the request fails. */
-async function attempt(request: ModelRequest, message: AssistantMessage): Promise<ModelReply> {
+/**
+ * Makes one request and collects the reply into `message`, which keeps what arrived if the request
+ * fails. `refused` is what Google said when it turned down the level of thinking an earlier try of
+ * this reply named; this one names none.
+ */
+async function attempt(request: ModelRequest, message: AssistantMessage, refused?: string): Promise<ModelReply> {
   const { connection, signal, probe } = request
   // Not knowing the model is no reason to fail.
   const facts = await factsFor(connection).catch(() => null)
@@ -473,6 +481,8 @@ async function attempt(request: ModelRequest, message: AssistantMessage): Promis
   const moved = redirected(response, url)
   if (moved) throw moved
   if (!response.ok || !response.body) throw await failureOf(response)
+  // Taken without the level it had turned down: it is known now that the level was all that was wrong.
+  if (refused !== undefined) request.onEffortRefused?.(refused)
 
   const web = new WebLog(message, request.onWebActivity)
   // Search Suggestions are drawn as HTML (App.tsx): they are taken from Google's own API alone.
@@ -628,6 +638,23 @@ function explained(err: unknown, connection: Connection): unknown {
   return new GeminiError(`${err.message} ${hint}`, err.status, err.wait)
 }
 
+/**
+ * Whether Google turned a request down for the level of thinking it named: the model takes no
+ * level, or not that one. Answered with the user's key on 2026-11-25, as HTTP 400 INVALID_ARGUMENT:
+ * "Thinking level MINIMAL is not supported for this model. Please retry with other thinking level."
+ * (Gemini 4 Hydrogen, 3.7 Flash and gemini-pro-latest asked for minimal, 3.5 Flash-Lite and
+ * gemini-flash-latest for xhigh), and "Thinking level is not supported for this model." (Gemma 4
+ * 31B, which thinks, and answered once no level was sent). The names of the fields count as well,
+ * for a server in front of the API that does not know them or cannot read the value; a model
+ * given a number of tokens is refused over its budget. Only an error that says the request itself
+ * was at fault counts: not a wrong key, a model that is not there, or a limit that was reached.
+ */
+export function refusesLevel(err: unknown): boolean {
+  if (!(err instanceof GeminiError) || err.status === undefined) return false
+  if (err.status < 400 || err.status >= 500 || [401, 403, 404, 408, 429].includes(err.status)) return false
+  return /thinking[\s_.-]?(level|budget)/i.test(err.message)
+}
+
 const pause = (ms: number, signal: AbortSignal): Promise<void> =>
   new Promise((resolve) => {
     const done = (): void => {
@@ -647,21 +674,35 @@ const NOT_FOR_CHAT = /embed|imagen|image|veo|tts|audio|live|transcri|translate|l
 
 export const geminiAdapter: ProviderAdapter = {
   async complete(request: ModelRequest): Promise<ModelReply> {
-    for (let tries = 0; ; tries++) {
-      const message = newReply(request.connection)
+    let asked = request
+    /** What Google said when it turned down the level of thinking, until it takes the request without one. */
+    let refused: string | undefined
+    /** How many times the request was asked again because the service was busy or the connection failed. */
+    let tries = 0
+    for (;;) {
+      const message = newReply(asked.connection)
       try {
-        return await attempt(request, message)
+        return await attempt(asked, message, refused)
       } catch (err) {
         // A stop keeps whatever text arrived.
-        if (request.signal.aborted) return { message }
+        if (asked.signal.aborted) return { message }
         // Asking again is safe only while nothing of this reply has been shown.
         const shown = Boolean(message.content || message.reasoning_content || message.web?.length)
+        // PDFs the service turned down: the caller sends the message again with them told of by where they lie.
+        if (!shown && carriesDocuments(asked) && refusesDocuments(err)) throw new DocumentsRefused((err as Error).message)
         // A model that takes no pictures: the caller sends the message again with them told in words.
-        if (!shown && carriesImages(request) && refusesImages(err)) throw new ImagesRefused((err as Error).message)
-        const wait = shown ? undefined : pauseBefore(err, tries)
-        if (wait === undefined) throw explained(err, request.connection)
-        await pause(wait, request.signal)
-        if (request.signal.aborted) return { message }
+        if (!shown && carriesImages(asked) && refusesImages(err)) throw new ImagesRefused((err as Error).message)
+        // A level of thinking the model does not take must not be what stops the conversation, and
+        // nothing but leaving it out puts that right: asked again at once without it.
+        if (!shown && asked.connection.reasoningEffort !== 'default' && refusesLevel(err)) {
+          refused = (err as Error).message
+          asked = { ...asked, connection: { ...asked.connection, reasoningEffort: 'default' } }
+          continue
+        }
+        const wait = shown ? undefined : pauseBefore(err, tries++)
+        if (wait === undefined) throw explained(err, asked.connection)
+        await pause(wait, asked.signal)
+        if (asked.signal.aborted) return { message }
       }
     }
   },
